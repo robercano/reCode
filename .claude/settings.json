@@ -1,0 +1,38 @@
+{
+  "_README": "Generic harness settings. The hooks call .claude/scripts/gate.sh, which reads commands from .claude/gates.json — so you usually DON'T edit this file per project; you edit gates.json. Enable/disable hooks here as you see fit.",
+
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/scripts/gate.sh lint"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/scripts/gate.sh test_affected"
+          }
+        ]
+      }
+    ]
+  },
+
+  "permissions": {
+    "allow": [
+      "Read(//**)",
+      "Bash(bash .claude/scripts/gate.sh:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git worktree:*)"
+    ]
+  }
+}

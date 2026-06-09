@@ -1,0 +1,54 @@
+{
+  "_README": "PROJECT ADAPTER. This is the ONLY file you must fill in per project. The generic agents/hooks read it. Leave a value as an empty string to mark a gate 'not configured' (it will be skipped, not failed). See docs/GETTING_STARTED.md and docs/PROMPTS.md.",
+
+  "project": {
+    "name": "",
+    "language": "",
+    "packageManager": ""
+  },
+
+  "modules": [
+    {
+      "name": "example-core",
+      "path": "packages/core",
+      "description": "What lives here. Workers assigned to this module must not edit outside `path`.",
+      "owner": ""
+    }
+  ],
+
+  "gates": {
+    "_note": "Exact shell commands for this repo. Run from repo root. Empty string = skip.",
+    "install": "",
+    "build": "",
+    "lint": "",
+    "typecheck": "",
+    "test": "",
+    "test_affected": "",
+    "coverage": "",
+    "coverage_threshold": 80,
+    "e2e": "",
+    "security": ""
+  },
+
+  "review": {
+    "lenses": ["correctness", "tests", "security", "performance"],
+    "consensus": "all",
+    "_consensus_note": "'all' = every lens must approve; or an integer = that many approvals required.",
+    "skills": []
+  },
+
+  "budget": {
+    "orchestrator_model": "opus",
+    "worker_model": "sonnet",
+    "explorer_model": "haiku",
+    "reviewer_model": "opus",
+    "max_parallel_workers": 3,
+    "_note": "Opus to coordinate/review, Sonnet to build, Haiku to explore. Lower max_parallel_workers if review/merge is your bottleneck."
+  },
+
+  "merge": {
+    "policy": "pr-per-agent",
+    "_policy_options": "pr-per-agent | orchestrated-sequential-merge",
+    "baseBranch": "main"
+  }
+}
