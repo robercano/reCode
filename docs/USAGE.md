@@ -36,6 +36,20 @@ or ask: *"Run the `feature-fanout` workflow, args.task = '…'"*. It runs `Scope
 
 Tune `.claude/workflows/feature-fanout.js`: `LENSES`, `MAX_ITERS`, model per stage, worktree isolation.
 
+## Tickets: GitHub Issues (optional)
+A clean way to feed the orchestrator one task at a time is a module-labeled **GitHub Issues** backlog. The
+template ships `.claude/scripts/seed-issues.sh` as a starting point: it derives `module:<name>` labels from the
+`modules` in `gates.json` (plus `type:feature`/`type:infra`), and bulk-creates issues idempotently (re-running
+reuses labels and skips titles that already exist). Replace the placeholder `TICKETS` section with your backlog,
+then:
+```bash
+gh auth login                      # once
+bash .claude/scripts/seed-issues.sh
+```
+Drive one issue at a time: *"Use the orchestrator agent. Task: implement issue #N. Scope it within its module,
+show the plan, and WAIT for approval."* Keep each ticket scoped to ONE module so workers get non-overlapping
+boundaries.
+
 ## The human checkpoints (your agile cadence)
 | Ceremony | Mechanism | What you do |
 |---|---|---|
