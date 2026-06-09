@@ -37,6 +37,17 @@ bash .claude/scripts/gate.sh test
 ```
 Each should run the right command (or say "not configured — skipping").
 
+> **Bootstrap first.** On a brand-new repo there's usually no build system yet, so *real* gate commands will
+> **fail** (not skip) — e.g. `pnpm -r build` with no workspace, `forge test` with no `foundry.toml`. Pick one:
+> - **Scaffold a minimal buildable skeleton first** (workspace manifest + empty buildable packages/stubs that
+>   build and pass a trivial test), *then* wire the real gate commands. This makes the pilot run (Step 6) work
+>   immediately and gives parallel workers a green baseline to branch from. Recommended.
+> - **Or keep the gates empty** (`""` = skipped) until your first task is an explicit "bootstrap the workspace"
+>   ticket, and only fill in real gate commands once that lands.
+>
+> Either way, don't point a gate at a command that can't pass yet — a red `test_affected` will block the
+> `Stop` hook and every agent's "done".
+
 ## Step 4 — Review the agents (usually no change needed)
 Skim `.claude/agents/*.md`. They're generic and read `gates.json`, so they typically need no edits. Adjust
 `model:` per agent if your routing differs, or add project review skills (e.g. a security/audit skill) and
