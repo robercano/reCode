@@ -69,6 +69,31 @@ implementer ──done──▶ gates (build/lint/types/test/coverage via gate.s
                      PR / merge (per gates.json merge.policy)
 ```
 
+## The PR feedback loop (ticket → PR → review → merge)
+With `pr-per-agent`, the standing loop per ticket looks like:
+1. **Plan** — tickets are the backlog (GitHub Issues work well — see the seeder example), planned with the
+   orchestrator or added manually.
+2. **Build** — orchestrator scopes → implementers (isolated worktrees) → reviewer lenses → gates green.
+3. **PR** — created with `.claude/scripts/bot-gh.sh pr create …` so the PR author is a **bot machine
+   account**, not the repo owner. GitHub hard-blocks PR authors from approving their own PRs, so PRs created
+   under the owner's `gh` auth can never receive a formal Approve. One-time setup lives at the top of
+   `bot-gh.sh` (free machine account → collaborator → classic `repo`-scope PAT → `GH_BOT_TOKEN` in `.env`).
+   Reuse ONE generically-named bot across all your repos — GitHub ToS allows one free machine account per
+   person. Only `pr create` uses the bot; commits/pushes stay on the owner's auth.
+4. **Review** — the owner reviews on GitHub. To address comments, feed them back through the orchestrator
+   (*"address the comments on PR #N"*): same implementer loop, same branch, push updates the PR in place.
+5. **Merge** — owner approves, merge per `gates.json.merge`, clean the worktree (below).
+
+**Closing the loop automatically:** webhooks rarely reach a dev box, so poll. Either a Claude Code cron
+(`CronCreate`, durable) or an in-session `/loop` that every ~10–15 min runs
+`bash .claude/scripts/notify-poll.sh` — it prints new issues and PR comments/reviews since a cursor file
+(`.claude/state/notify-cursor`, gitignored) — then summarizes them and offers to kick the orchestrator.
+**Wrap the poll in that script, don't inline it:** an inline compound command (loops, `$()`, redirects)
+never matches a permission rule, so an inlined poll blocks on a permission prompt every firing; the script
+gives one stable command to pre-approve in `settings.json`
+(`"Bash(bash .claude/scripts/notify-poll.sh)"`). Caveats: cron jobs fire only while Claude Code is
+running, auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start.
+
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
   at PR time. Cleanest/auditable.
