@@ -71,10 +71,14 @@ With `pr-per-agent`, the standing loop per ticket looks like:
 5. **Merge** — owner approves, merge per `gates.json.merge`, clean the worktree (below).
 
 **Closing the loop automatically:** webhooks rarely reach a dev box, so poll. Either a Claude Code cron
-(`CronCreate`, durable) or an in-session `/loop` that every ~10–15 min checks the repo for new issues and new
-PR comments/reviews since a cursor file (e.g. `.claude/state/notify-cursor`, gitignored), summarizes them, and
-offers to kick the orchestrator. Caveats: cron jobs fire only while Claude Code is running, auto-expire after
-7 days, and may be session-scoped on some versions — re-arm at session start.
+(`CronCreate`, durable) or an in-session `/loop` that every ~10–15 min runs
+`bash .claude/scripts/notify-poll.sh` — it prints new issues and PR comments/reviews since a cursor file
+(`.claude/state/notify-cursor`, gitignored) — then summarizes them and offers to kick the orchestrator.
+**Wrap the poll in that script, don't inline it:** an inline compound command (loops, `$()`, redirects)
+never matches a permission rule, so an inlined poll blocks on a permission prompt every firing; the script
+gives one stable command to pre-approve in `settings.json`
+(`"Bash(bash .claude/scripts/notify-poll.sh)"`). Caveats: cron jobs fire only while Claude Code is
+running, auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start.
 
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
