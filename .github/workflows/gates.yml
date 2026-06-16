@@ -1,0 +1,44 @@
+# Server-side gate enforcement. Mirrors the local gates (settings.json hooks +
+# gate.sh) at the GitHub PR level, so a merge is gated by CI — not only by the
+# orchestrator remembering to run the gates before it opens a PR.
+#
+# Adapter-driven: each job just runs `gate.sh <name>`, which reads the command from
+# .claude/gates.json (and skips cleanly when a gate is left ""). You should not need
+# to edit this file per project — configure gates.json instead. Toolchain setup lives
+# in .github/actions/setup (also adapter-driven). See docs/PROMPTS.md to (re)generate.
+#
+# Enforcement teeth: turn these checks into REQUIRED status checks via branch
+# protection on the base branch — see docs/GETTING_STARTED.md.
+name: gates
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same PR cancels the in-flight run.
+concurrency:
+  group: gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: ${{ matrix.gate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # one red gate shouldn't hide the others
+      matrix:
+        # One job per gate → each surfaces as its own PR check (what visual
+        # front-ends like emdash monitor). `install` is not here — it runs once in
+        # the setup action as a prerequisite for every gate.
+        gate: [build, lint, typecheck, test, coverage, security]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: gate.sh ${{ matrix.gate }}
+        # An unconfigured gate ("") exits 0 (skip), so the check is green-but-trivial
+        # rather than red — same semantics as the local hooks. The coverage gate
+        # command can read $COVERAGE_THRESHOLD (exported by the setup action).
+        run: bash .claude/scripts/gate.sh ${{ matrix.gate }}

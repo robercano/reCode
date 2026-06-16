@@ -71,3 +71,15 @@ Run `npx ccusage` and summarize token/cost by model for this session. Given the 
 changes to: max_parallel_workers, model routing, the module map, and any agent prompt that caused rework or
 overlap. Propose concrete edits to gates.json.
 ```
+
+## 10. Wire up CI gate enforcement (server-side)
+```
+The repo ships .github/workflows/gates.yml + .github/actions/setup — an adapter-driven CI that runs each
+gate.sh gate on pull_request, reading commands from gates.json. Don't hand-edit the workflow. Instead:
+1. Confirm gates.json has working gate commands (run `bash .claude/scripts/gate.sh <name>` for each).
+2. If this repo isn't pure JS/TS, add the toolchain to .github/actions/setup at the "Extension point" comment
+   (e.g. foundry-toolchain for Solidity, setup-python for Python), keyed off project.language. Keep it a
+   config edit — don't fork the workflow.
+3. Make the matrix checks REQUIRED via branch protection (see GETTING_STARTED "Step 7 — Enforce gates in CI"),
+   so a red gate actually blocks merge. Show me the branch-protection settings to apply.
+```
