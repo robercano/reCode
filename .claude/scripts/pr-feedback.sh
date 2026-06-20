@@ -26,7 +26,7 @@ gh pr list -R "$repo" --state open \
     case ",$labels," in *,claude-addressing,*) continue;; esac
 
     cr=$(gh api "repos/$repo/pulls/$num/reviews" \
-          --jq '[.[]|select(.state=="CHANGES_REQUESTED")]|sort_by(.submitted_at)|last|"\(.submitted_at)\t\(.user.login)"' \
+          --jq '[.[]|select(.state=="CHANGES_REQUESTED")]|sort_by(.submitted_at)|last|select(.!=null)|"\(.submitted_at)\t\(.user.login)"' \
           2>/dev/null || true)
     if [ -z "$cr" ]; then continue; fi
     tcr="${cr%%$'\t'*}"
