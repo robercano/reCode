@@ -30,6 +30,8 @@
       "Read(//**)",
 
       "Bash(bash .claude/scripts/gate.sh:*)",
+      "Bash(bash .claude/scripts/notify-poll.sh:*)",
+      "Bash(bash .claude/scripts/pr-feedback.sh:*)",
 
       "Bash(git status:*)",
       "Bash(git diff:*)",
