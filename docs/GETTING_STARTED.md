@@ -73,9 +73,35 @@ Scope it, show me the plan, and wait for my approval before writing code.
 Approve the plan, let one implementer run in its worktree, watch the reviewers gate it, review the PR. Then
 read [`USAGE.md`](USAGE.md) to scale up, and [`TOKEN_BUDGET.md`](TOKEN_BUDGET.md) before you go parallel.
 
+## Step 7 — Enforce gates in CI (server-side)
+The hooks and `gate.sh` enforce gates *locally*, and the orchestrator runs them before opening a PR — but
+nothing stops a human (or a bot) merging a PR whose gates never ran. The template ships
+[`.github/workflows/gates.yml`](../.github/workflows/gates.yml) + a `.github/actions/setup` composite action
+that run **the same `gate.sh` gates** on every `pull_request`, reading commands from `gates.json`. It's
+adapter-driven — you configure `gates.json`, not the YAML.
+
+1. **It works out of the box for JS/TS.** For other stacks, add the toolchain at the *Extension point* comment
+   in `.github/actions/setup/action.yml` (e.g. `foundry-rs/foundry-toolchain` for Solidity,
+   `actions/setup-python`), keyed off `project.language`. Empty gates skip, so unconfigured checks stay green.
+2. **Make the checks required** — this is the actual enforcement. On the base branch (`merge.baseBranch`):
+   **Settings → Branches → Add branch protection rule** → *Require status checks to pass before merging*, then
+   select the gate checks (`build`, `lint`, `typecheck`, `test`, `coverage`, `security`). Or via CLI:
+   ```bash
+   gh api -X PUT repos/<owner>/<repo>/branches/<base>/protection \
+     -f 'required_status_checks[strict]=true' \
+     -f 'required_status_checks[checks][][context]=build' \
+     -f 'required_status_checks[checks][][context]=lint' \
+     -f 'required_status_checks[checks][][context]=typecheck' \
+     -f 'required_status_checks[checks][][context]=test' \
+     -f 'required_status_checks[checks][][context]=coverage' \
+     -f 'enforce_admins=true' -F 'required_pull_request_reviews=null' -F 'restrictions=null'
+   ```
+   Without this step the workflow only *reports* pass/fail; required checks are what block the merge button.
+
 ## Verification checklist
 - [ ] `CLAUDE.md` describes the project and lists modules.
 - [ ] `.claude/gates.json` has real commands; `gate.sh build|lint|test` behave correctly.
 - [ ] `/agents` lists orchestrator, implementer, reviewer, test-runner.
 - [ ] A pilot task produced a branch/PR that passed gates + review.
+- [ ] CI gates run on PRs and are set as **required** status checks on the base branch (Step 7).
 - [ ] You've checked spend with `/cost` or `npx ccusage`.
