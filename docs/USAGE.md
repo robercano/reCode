@@ -80,6 +80,12 @@ With `pr-per-agent`, the standing loop per ticket looks like:
    `bot-gh.sh` (free machine account → collaborator → classic `repo`-scope PAT → `GH_BOT_TOKEN` in `.env`).
    Reuse ONE generically-named bot across all your repos — GitHub ToS allows one free machine account per
    person. Only `pr create` uses the bot; commits/pushes stay on the owner's auth.
+   **Per-repo grant (easy to miss):** the bot must be a **collaborator on every (private) repo** it opens PRs
+   in — adding it once to one repo does *not* cover the rest. Without it, `gh` fails with an opaque
+   `Could not resolve to a Repository with the name '<owner>/<repo>'` (looks like a typo, is actually a
+   missing grant). `bot-gh.sh` preflights this and prints the fix; the one-time setup is, as the **owner**:
+   `gh api -X PUT repos/<owner>/<repo>/collaborators/<bot> -f permission=push`, then **accept as the bot**:
+   `bot-gh.sh api -X PATCH user/repository_invitations/<id>` (private-repo invites require acceptance).
 4. **Review** — the owner reviews on GitHub. To address comments, feed them back through the orchestrator
    (*"address the comments on PR #N"*): same implementer loop, same branch, push updates the PR in place.
 5. **Merge** — owner approves, merge per `gates.json.merge`, clean the worktree (below).
