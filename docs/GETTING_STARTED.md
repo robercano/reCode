@@ -98,6 +98,12 @@ adapter-driven — you configure `gates.json`, not the YAML.
    ```
    Without this step the workflow only *reports* pass/fail; required checks are what block the merge button.
 
+   > **Free private repos can't enforce.** Required status checks (and branch protection) need a paid plan
+   > on a private repo — GitHub will reject the call above with *"upgrade to GitHub Team/Enterprise"*. Options:
+   > make the repo **public** (enforcement is free), upgrade the plan, or run **convention-based**: the checks
+   > still run and are visible on every PR, and `merge-ready.sh` only merges a PR once the owner has approved
+   > it *and* CI is green — so the approval+green gate holds even though GitHub doesn't hard-block the button.
+
 ## Verification checklist
 - [ ] `CLAUDE.md` describes the project and lists modules.
 - [ ] `.claude/gates.json` has real commands; `gate.sh build|lint|test` behave correctly.
