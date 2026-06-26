@@ -17,19 +17,27 @@ concrete WSL2 example).
 
 ## Security model (the one paragraph to internalize)
 
-Two layers, each enforced **without a human in the loop**:
+Layers, in order of how hard they are for the agent to get around — this ordering is the whole point:
 
 1. **Deny list** (`permissions.deny`) — evaluated *before any tool runs* and **always enforced, even
-   under `bypassPermissions`**. This is your hard backstop: it blocks privilege escalation, secret/
-   credential reads, network-exfil tools, destructive ops, and (on WSL) host/Windows interop —
-   regardless of what the model decides to do.
+   under `bypassPermissions`, even with the sandbox disabled**. This is your hard backstop: it blocks
+   privilege escalation, secret/credential reads, network-exfil tools, destructive ops, and (on WSL)
+   host/Windows interop — regardless of what the model decides, and the agent cannot talk its way
+   around it. (Disabling the sandbox does *not* let a denied command run.)
 2. **OS sandbox** — Claude Code's `sandbox` confines `Bash` writes to the repo + temp dirs and blocks
-   reads of credential directories and host mounts at the kernel level (via `bubblewrap` on Linux). A
-   bug or prompt-injection that slips past the deny list still can't write outside the repo or read
-   your keys.
+   reads of credential directories and host mounts at the kernel level (`bubblewrap` on Linux,
+   Seatbelt on macOS). **Caveat under `bypassPermissions`:** by default (`allowUnsandboxedCommands:
+   true`) the agent can retry any command with `dangerouslyDisableSandbox: true`, and because bypass
+   skips the prompt, that retry just *runs*. So out of the box the sandbox stops **accidental**
+   escapes, not a determined/injected agent. **Set `allowUnsandboxedCommands: false` ("strict sandbox
+   mode")** to close that hole — then a command that can't run sandboxed *fails* instead of escaping.
+3. **OS-level isolation** (Step 2) and **managed settings** (Step 4) — these live *below* Claude Code;
+   no tool flag or local-settings edit can touch them. This is the only layer that contains the agent
+   itself rather than its accidents.
 
-`bypassPermissions` only removes the *prompt*. The deny list and the sandbox are what keep an
-unattended agent contained. Never enable bypass without both.
+`bypassPermissions` only removes the *prompt*. The deny list is your always-on backstop; strict-mode
+sandbox + OS isolation are what actually contain a misbehaving agent. Never enable bypass without all
+of them — and don't mistake the default (non-strict) sandbox for a cage.
 
 ---
 
@@ -73,12 +81,47 @@ Starting point — adapt the lists to your stack, then drop into `.claude/settin
       // host filesystem — WSL only; see Step 2
       "Bash(cmd.exe:*)", "Bash(powershell.exe:*)", "Bash(pwsh:*)", "Bash(wsl.exe:*)",
       "Bash(/mnt:*)", "Read(//mnt/**)", "Edit(//mnt/**)", "Write(//mnt/**)",
-      "Edit(//etc/**)", "Write(//etc/**)"
+      "Edit(//etc/**)", "Write(//etc/**)",
+
+      // ── Edit/Write fence (PORTABLE — copy as-is, no project paths) ──────────
+      // The Edit/Write TOOLS are NOT confined by the OS Bash sandbox (that only
+      // confines Bash subprocesses). Their only fence is the deny list + OS file
+      // ownership. Deny the sensitive paths OUTSIDE any project; the project stays
+      // writable by omission (deny beats allow, so you can't "allow-back" — see note).
+      // shell init & profile (run on next shell = persistence / code-exec)
+      "Edit(~/.bashrc)", "Write(~/.bashrc)",
+      "Edit(~/.bash_profile)", "Write(~/.bash_profile)",
+      "Edit(~/.profile)", "Write(~/.profile)",
+      "Edit(~/.zshrc)", "Write(~/.zshrc)",
+      "Edit(~/.zprofile)", "Write(~/.zprofile)",
+      "Edit(~/.zshenv)", "Write(~/.zshenv)",
+      // git config (hooks / aliases = code-exec on next git command)
+      "Edit(~/.gitconfig)", "Write(~/.gitconfig)",
+      "Edit(~/.config/git/**)", "Write(~/.config/git/**)",
+      // credentials (Edit/Write — Read already denied above)
+      "Edit(~/.ssh/**)", "Write(~/.ssh/**)",
+      "Edit(~/.gnupg/**)", "Write(~/.gnupg/**)",
+      "Edit(~/.aws/**)", "Write(~/.aws/**)",
+      "Edit(~/.config/gcloud/**)", "Write(~/.config/gcloud/**)",
+      "Edit(~/.kube/**)", "Write(~/.kube/**)",
+      "Edit(~/.npmrc)", "Write(~/.npmrc)",
+      "Edit(~/.docker/config.json)", "Write(~/.docker/config.json)",
+      // login-time / startup persistence
+      "Edit(~/.config/systemd/**)", "Write(~/.config/systemd/**)",
+      "Edit(~/.config/autostart/**)", "Write(~/.config/autostart/**)",
+      // Claude Code's OWN guardrails — surgical, NOT all of ~/.claude (memory/state live there)
+      "Edit(~/.claude/settings.json)", "Write(~/.claude/settings.json)",
+      "Edit(~/.claude/settings.local.json)", "Write(~/.claude/settings.local.json)",
+      // this project's permission files (stop the agent removing its own deny rules)
+      "Edit(.claude/settings.json)", "Write(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)", "Write(.claude/settings.local.json)"
     ]
   },
   "sandbox": {
     "enabled": true,
-    "allowUnsandboxedCommands": true,
+    "allowUnsandboxedCommands": false,   // strict: agent can't escape the sandbox per-command
+    "failIfUnavailable": true,           // fail-closed if bwrap/socat missing — don't silently run unsandboxed
+    "excludedCommands": [],              // glob patterns that legitimately MUST run outside the sandbox
     "filesystem": { "denyRead": ["/mnt"] },
     "credentials": {
       "files": [
@@ -101,9 +144,49 @@ Starting point — adapt the lists to your stack, then drop into `.claude/settin
 > scripts can't read the token and the loop breaks. Tool-level deny ≠ shell-level block; that asymmetry
 > is intentional.
 
-> **`allowUnsandboxedCommands: true`** lets commands that genuinely can't run sandboxed (e.g. git
-> worktrees created *outside* the repo) fall back to unsandboxed rather than fail. To keep full
-> containment, keep worktree paths *inside* the repo.
+> **The Edit/Write fence — and why it's a denylist, not "everything except the project".** The OS
+> sandbox confines *Bash subprocesses* only; the **`Edit`/`Write` tools are not sandboxed** — their
+> sole fences are the deny list and OS file ownership. So under bypass, an unfenced agent could write
+> `~/.bashrc`, `~/.gitconfig`, or its own `.claude/settings*.json` even though it can't `cd` out of the
+> repo in Bash. You'd like to say "deny all of `~` except this project," but **deny always beats allow
+> in Claude Code — there's no allow-back exception** — so a blanket `~/**` deny would block the project
+> too. The portable workaround is the block above: deny the *sensitive paths outside any project*
+> (shell init, git config, credentials, startup persistence, Claude's own guardrails). It contains
+> **zero project-specific paths**, so it's copy-paste identical across every repo — the project is
+> writable purely *by omission*.
+>
+> Two consequences to know: (1) This is a curated denylist, **not hermetic** — sibling repos and other
+> home files you didn't enumerate stay writable. For true "only the project is writable" containment,
+> use the **OS layer** (Step 2): run the agent as a dedicated user/distro that *owns nothing but the
+> repo*, so every other write fails on file permissions regardless of Claude Code's policy. The denylist
+> is defense-in-depth on top of that. (2) Denying `.claude/settings*.json` means the **agent can no
+> longer edit its own permission files** — exactly the point (it can't quietly remove its guardrails),
+> but it also means *you* change that file directly or via `!`, not by asking the agent.
+
+> **Strict mode (`allowUnsandboxedCommands: false`) is the high-leverage setting.** With the default
+> `true`, the agent can retry any failing command with `dangerouslyDisableSandbox: true` and — under
+> bypass — that retry runs with no prompt, so the agent can self-serve its way out of the sandbox.
+> `false` makes such a command *fail* instead. The cost: commands that genuinely can't run sandboxed
+> (e.g. git worktrees created *outside* the repo, or committing to a sibling repo) now fail rather than
+> falling back. Handle those explicitly:
+> - Keep worktree paths *inside* the repo (the loop's default) so they don't need to break out.
+> - For the rare command that truly must run unsandboxed, add a glob to `excludedCommands` (e.g.
+>   `"git -C /other/repo *"`) — an allowlist you control, not a blanket escape hatch.
+>
+> **`failIfUnavailable: true`** refuses to start if the sandbox backend (`bwrap`/`socat`) is missing,
+> instead of silently falling back to *no* sandbox — fail-closed, so a broken install can't quietly
+> drop your containment.
+
+> **Toolchain caches will trip strict mode — allowlist the *paths*, not the commands.** Your gate
+> commands write to package-manager caches *outside* the repo: pnpm → `~/.local/share/pnpm` +
+> `~/.cache/pnpm`, npm → `~/.npm`, Foundry → `~/.foundry` + solc downloads to `~/.svm`, and similarly
+> Cargo `~/.cargo`, Go `~/.cache/go-build`, Maven `~/.m2`, etc. Under strict mode these *fail*. Add the
+> specific cache dirs to **`sandbox.filesystem.allowWrite`** — this keeps the command sandboxed while
+> permitting just its cache. Do **not** reach for `excludedCommands` here: that runs the *whole* command
+> unsandboxed, and `pnpm install` / `npm install` execute untrusted dependency lifecycle scripts you do
+> *not* want loose. Reserve `excludedCommands` for commands that genuinely can't be sandboxed at all
+> (e.g. a git op against a repo outside the sandbox root). Network access (registry, GitHub) is a
+> separate axis — see `sandbox.network.allowedDomains` in Step 3.
 
 ---
 
@@ -179,22 +262,64 @@ sudo gpasswd -d "$USER" docker     # if you don't need Docker in this distro
    ```
 4. Confirm the deny list bites: ask the agent to run a denied command (e.g. `sudo true`) — it should be
    **blocked even though bypass is on**. That single check proves your backstop is live.
+5. Confirm strict mode bites: ask for a command that must write outside the repo — it should *fail*
+   (not silently escape). If it falls back instead, `allowUnsandboxedCommands` isn't `false` yet.
 
 ### Checklist
 - [ ] `.claude/settings.local.json` exists, gitignored, with `bypassPermissions` + deny list + sandbox.
 - [ ] Sandbox backend installed (`bwrap`/`socat` on Linux); `/sandbox` resolves.
+- [ ] `allowUnsandboxedCommands: false` (strict) + `failIfUnavailable: true` set.
 - [ ] A denied command (e.g. `sudo`) is blocked under bypass.
+- [ ] Edit/Write fence in place (deny block above) — an `Edit`/`Write` to `~/.bashrc` is blocked.
+- [ ] A write outside the repo *fails* rather than escaping (proves strict mode).
 - [ ] Host bridges cut (e.g. on WSL: `ls /mnt/c` fails, `cmd.exe` not found).
 - [ ] Agent user not in `sudo`/`docker` groups (or running as a dedicated isolated user/VM/distro).
 - [ ] `.env` readable by the loop scripts (NOT added to sandbox credentials) but denied to the Read tool.
 
 ---
 
+## Step 4 — Make the policy un-overridable (managed settings)
+
+Everything above lives in `settings.local.json` — which the agent itself (or a clone, or a careless
+edit) can rewrite. For a genuinely autonomous box, lift the policy *above* the agent into **managed
+settings**, a root-owned file the agent can't touch:
+
+- Linux/WSL: `/etc/claude-code/managed-settings.json`
+- macOS: `/Library/Application Support/ClaudeCode/managed-settings.json`
+- Windows: `C:\Program Files\ClaudeCode\managed-settings.json`
+
+```jsonc
+{
+  "permissions": {
+    "disableBypassPermissionsMode": "disable"   // pins the bypass decision; local settings can't widen it
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "allowManagedReadPathsOnly": true,          // local settings can't widen read scope
+    "allowManagedDomainsOnly": true             // local settings can't widen network allowlist
+  }
+}
+```
+
+Managed settings win over every other scope, and deny rules from any scope still beat allow rules from
+a lower one. This is the software-side equivalent of the OS-level isolation in Step 2: a boundary the
+agent operates *inside*, not one it configures.
+
+> **Choosing the permission mode.** `bypassPermissions` is one of several `defaultMode` values. For a
+> **fully headless / CI** box where no human will ever approve a prompt, consider `"dontAsk"` instead —
+> it *fail-closes*, auto-denying anything not explicitly in `permissions.allow` (vs. bypass, which
+> fail-*opens* on everything except the deny list). Bypass suits an attended-but-quiet loop; `dontAsk`
+> suits a locked-down pipeline.
+
+---
+
 ## Caveats
 
-- **Worktrees outside the repo** aren't writable under the sandbox; `allowUnsandboxedCommands: true`
-  lets them fall back to unsandboxed instead of failing. Keep worktree paths inside the repo for full
-  containment.
+- **Worktrees outside the repo** aren't writable under the sandbox. Under strict mode
+  (`allowUnsandboxedCommands: false`, recommended) such a write *fails* rather than escaping — so keep
+  worktree paths inside the repo, or allowlist the specific command via `excludedCommands`.
 - **Open PRs gate loop advancement.** A typical loop won't start a new ticket while a PR is open —
   that's by design (it keeps you the merge gate). Review/merge to let it advance.
 - **The committed `settings.json` is owned by the harness at runtime** (it may rewrite the working-tree
