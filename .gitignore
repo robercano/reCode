@@ -1,0 +1,2 @@
+# Claude Code local runtime state (machine-specific, not source)
+.claude/state/
