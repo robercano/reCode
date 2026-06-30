@@ -13,6 +13,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+owner="${MERGE_APPROVER:-${repo%%/*}}"   # the human whose APPROVED review gates a merge
 state_dir="$root/.claude/state"          # add .claude/state/ to .gitignore
 cursor_file="$state_dir/notify-cursor"
 
@@ -37,6 +38,23 @@ echo "=== reviews on open PRs ==="
 for n in $(gh pr list -R "$repo" --json number -q '.[].number'); do
   gh api "repos/$repo/pulls/$n/reviews" \
     --jq "[.[] | select(.submitted_at > \"$cursor\") | {pr:$n,user:.user.login,state:.state,body:.body,submitted:.submitted_at,url:.html_url}]"
+done
+
+# Standing status of EVERY open PR (cursor-independent): merge-readiness is a
+# state, not an event — an approval may have landed a tick ago and CI only just
+# gone green. A cron uses this to decide which PRs need feedback addressed;
+# merge-ready.sh acts on the approved+green ones.
+echo "=== open pr status ==="
+for n in $(gh pr list -R "$repo" --state open --json number -q '.[].number'); do
+  gh pr view "$n" -R "$repo" --json number,title,author,baseRefName,isDraft,mergeable,reviews,statusCheckRollup \
+    --jq "{
+      pr: .number, title: .title, author: .author.login, base: .baseRefName, draft: .isDraft, mergeable: .mergeable,
+      ownerReview: ([.reviews[] | select(.author.login==\"$owner\")] | sort_by(.submittedAt) | last | .state // \"none\"),
+      checks: ([.statusCheckRollup[]? | (.conclusion // .state)] | {
+        failing: (map(select(. == \"FAILURE\" or . == \"ERROR\" or . == \"CANCELLED\" or . == \"TIMED_OUT\")) | length),
+        pending: (map(select(. == \"PENDING\" or . == \"QUEUED\" or . == \"IN_PROGRESS\" or . == null)) | length),
+        total: length })
+    }"
 done
 
 echo "$now" > "$cursor_file"

@@ -1,2 +1,7 @@
-# Claude Code local runtime state (machine-specific, not source)
+# Runtime state written by the loop scripts (notify-poll.sh cursor, etc.)
 .claude/state/
+
+# Secrets — bot token (GH_BOT_TOKEN) and any local env. Commit .env.example only.
+.env
+.env.*
+!.env.example

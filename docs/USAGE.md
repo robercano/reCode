@@ -91,14 +91,28 @@ With `pr-per-agent`, the standing loop per ticket looks like:
 5. **Merge** — owner approves, merge per `gates.json.merge`, clean the worktree (below).
 
 **Closing the loop automatically:** webhooks rarely reach a dev box, so poll. Either a Claude Code cron
-(`CronCreate`, durable) or an in-session `/loop` that every ~10–15 min runs
-`bash .claude/scripts/notify-poll.sh` — it prints new issues and PR comments/reviews since a cursor file
-(`.claude/state/notify-cursor`, gitignored) — then summarizes them and offers to kick the orchestrator.
-**Wrap the poll in that script, don't inline it:** an inline compound command (loops, `$()`, redirects)
-never matches a permission rule, so an inlined poll blocks on a permission prompt every firing; the script
-gives one stable command to pre-approve in `settings.json`
-(`"Bash(bash .claude/scripts/notify-poll.sh)"`). Caveats: cron jobs fire only while Claude Code is
-running, auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start.
+(`CronCreate`, durable) or an in-session `/loop` that every ~10–15 min runs the three loop scripts in order
+— each is a single stable command to pre-approve in `settings.json`, since an inline compound command
+(loops, `$()`, redirects) never matches a permission rule and would block on a prompt every firing:
+
+1. **`bash .claude/scripts/notify-poll.sh`** — prints new issues and PR comments/reviews since a cursor file
+   (`.claude/state/notify-cursor`, gitignored), plus a cursor-independent **`open pr status`** section (per
+   open PR: latest owner review, CI rollup, mergeable) so the loop sees merge-readiness, which is a *state*,
+   not an event. Summarize new items.
+2. **`bash .claude/scripts/pr-feedback.sh`** — lists open bot PRs with *unaddressed* `CHANGES_REQUESTED`
+   feedback (deduped via a `<!-- claude-addressed -->` marker). For each, dispatch the orchestrator to
+   address the comments on the same branch and push — the implementer posts the marker after pushing.
+3. **`bash .claude/scripts/merge-ready.sh`** — merges every open PR the owner has **APPROVED** that is
+   mergeable and CI-green, then deletes the branch. The human Approve is the only merge gate; the script
+   never approves. **Safety:** it merges only if the approval was submitted *at/after* the PR's last commit,
+   so a free private repo (no branch protection to dismiss stale approvals) never auto-merges commits you
+   haven't reviewed — pushing after approval requires re-approval. Uses ambient `gh` auth (merging is an
+   owner action; only PR *creation* uses the bot).
+
+With all three wired, the loop runs hands-off: **add issues → review → approve → it merges and advances**.
+A natural step 4 is to start the next `module:*` issue only when **no PRs are open**, so work stays
+serialized (one issue in flight) and bounded. Caveats: cron jobs fire only while Claude Code is running,
+auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start.
 
 **Running it fully hands-off?** Polling still leaves a human approving each tool call. To let the loop
 run unattended (Claude Code `bypassPermissions`), first harden the environment so the prompt is replaced
