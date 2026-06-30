@@ -72,10 +72,64 @@
       "Bash(chmod:*)"
     ],
     "deny": [
+      "Bash(sudo:*)",
+      "Bash(doas:*)",
+      "Bash(su:*)",
+      "Bash(docker:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ncat:*)",
+      "Bash(telnet:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(powershell:*)",
+      "Bash(pwsh:*)",
+      "Bash(explorer.exe:*)",
+      "Bash(wsl.exe:*)",
+      "Bash(/mnt:*)",
+      "Bash(npm publish:*)",
+      "Bash(pnpm publish:*)",
+      "Bash(yarn publish:*)",
+      "Bash(gh auth token:*)",
+      "Bash(gh auth token)",
+      "Bash(gh secret:*)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Bash(rm -rf:*)",
-      "Read(//**/.env)"
+      "Read(//**/.env)",
+      "Read(//**/.env.*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/gcloud/**)",
+      "Read(~/.kube/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.npmrc)",
+      "Read(~/.docker/config.json)",
+      "Read(//mnt/**)",
+      "Edit(//mnt/**)",
+      "Write(//mnt/**)",
+      "Edit(//etc/**)",
+      "Write(//etc/**)"
     ]
+  },
+  "sandbox": {
+    "_README": "OS sandbox (bubblewrap on Linux/WSL2) confines Bash writes to the repo + temp dirs and blocks reading Windows /mnt + credential dirs, so commands run contained. Needs `bwrap` (+ `socat`) installed; with allowUnsandboxedCommands the harness falls back to unsandboxed when bwrap is absent. Pairs with the permissions deny list (always enforced) as defense-in-depth. NOTE: .env is intentionally NOT denied at the shell level here — the loop scripts source it for GH_BOT_TOKEN; it is denied only to the Read tool in permissions above.",
+    "enabled": true,
+    "allowUnsandboxedCommands": true,
+    "filesystem": {
+      "denyRead": ["/mnt"]
+    },
+    "credentials": {
+      "files": [
+        { "path": "~/.ssh", "mode": "deny" },
+        { "path": "~/.aws", "mode": "deny" },
+        { "path": "~/.config/gcloud", "mode": "deny" },
+        { "path": "~/.kube", "mode": "deny" },
+        { "path": "~/.gnupg", "mode": "deny" },
+        { "path": "~/.npmrc", "mode": "deny" },
+        { "path": "~/.docker/config.json", "mode": "deny" }
+      ]
+    }
   }
 }
