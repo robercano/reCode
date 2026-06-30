@@ -20,6 +20,7 @@
 # (bot-gh.sh). Repo is derived from the git remote; override with $1 (owner/repo).
 # The approver defaults to the repo owner; override with $MERGE_APPROVER.
 # Pre-approve `bash .claude/scripts/merge-ready.sh` in .claude/settings.json.
+
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 
