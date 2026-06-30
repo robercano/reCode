@@ -1,34 +1,32 @@
 #!/usr/bin/env bash
-# merge-ready.sh — merge every open PR that the repo OWNER has approved and that
-# is safe to merge, then delete the branch. The human Approve on GitHub is the
-# ONLY gate; this script never approves anything — it just acts on approvals.
+# merge-ready.sh — merge every open PR the repo OWNER has approved and that is
+# safe to merge, then delete the branch. The human Approve on GitHub is the ONLY
+# gate; this script never approves anything — it just acts on approvals. Pair it
+# with notify-poll.sh in a cron to close the loop: review → approve → auto-merge.
 #
 # A PR is merged iff ALL hold:
-#   - base is the configured baseBranch (from gates.json, default main), not a draft
-#   - latest review by the OWNER (the approver) is APPROVED
+#   - base is the configured baseBranch (gates.json merge.baseBranch), not a draft
+#   - latest review by the OWNER is APPROVED
 #   - that approval was submitted at/after the PR's last commit (so it covers the
-#     current head — guards against new commits pushed after an approval, since a
-#     free private repo has no branch protection to auto-dismiss stale approvals)
+#     current head) — guards against commits pushed after an approval. A private
+#     repo on a free plan has no branch protection to auto-dismiss stale
+#     approvals, so we enforce "approval covers head" here instead.
 #   - mergeable (no conflicts)
-#   - every CI check is green (no failing, none still pending)
-# Anything else is SKIPPED with a reason. Output is JSON lines the cron summarizes.
+#   - every CI check is green (none failing, none still pending)
+# Anything else is SKIPPED with a reason. Output is JSON lines a cron summarizes.
 #
-# Repo is derived from the git remote (override with $1 = owner/repo). The approver
-# defaults to the repo's owner login (override with $APPROVER — e.g. when the repo is
-# org-owned and the human reviewer is not the org). Runs as the bot (GH_BOT_TOKEN, a
-# write collaborator) so it works headless in the notification cron. Merging is not
-# approving, so the bot may merge bot-authored PRs.
-# Pre-approved in .claude/settings.json as `bash .claude/scripts/merge-ready.sh`.
+# Auth: uses ambient `gh` auth (the owner's `gh auth login`), same as
+# notify-poll.sh — merging is an owner action. Only PR *creation* uses the bot
+# (bot-gh.sh). Repo is derived from the git remote; override with $1 (owner/repo).
+# The approver defaults to the repo owner; override with $MERGE_APPROVER.
+# Pre-approve `bash .claude/scripts/merge-ready.sh` in .claude/settings.json.
+
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; fi
-: "${GH_BOT_TOKEN:?GH_BOT_TOKEN not set — add it to .env (see .env.example)}"
-export GH_TOKEN="$GH_BOT_TOKEN"
-
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-owner="${APPROVER:-$(gh repo view -R "$repo" --json owner -q .owner.login)}"   # approver whose APPROVED review authorizes a merge
+owner="${MERGE_APPROVER:-${repo%%/*}}"   # the approver whose APPROVED review authorizes a merge
 gates="$root/.claude/gates.json"
 base="$(node -e "try{const g=require('$gates');process.stdout.write((g.merge&&g.merge.baseBranch)||'main')}catch(e){process.stdout.write('main')}")"
 
