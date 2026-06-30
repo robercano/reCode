@@ -114,6 +114,11 @@ A natural step 4 is to start the next `module:*` issue only when **no PRs are op
 serialized (one issue in flight) and bounded. Caveats: cron jobs fire only while Claude Code is running,
 auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start.
 
+**Running it fully hands-off?** Polling still leaves a human approving each tool call. To let the loop
+run unattended (Claude Code `bypassPermissions`), first harden the environment so the prompt is replaced
+by always-enforced guardrails — see **[`HARDENING.md`](HARDENING.md)** (deny list + OS sandbox + host
+isolation). Don't enable bypass without it.
+
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
   at PR time. Cleanest/auditable.

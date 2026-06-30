@@ -34,6 +34,7 @@ docs/
   USAGE.md             how to drive the orchestrator day to day
   PROMPTS.md           copy-paste prompts to populate files & kick off work
   TOKEN_BUDGET.md      cost control & measurement
+  HARDENING.md         running the loop hands-off safely (bypass + sandbox)
 ```
 
 ★ = the only two files you must edit per project.
