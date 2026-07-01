@@ -10,7 +10,14 @@ key="${1:?usage: gate.sh <gate-name>}"
 # robust whether or not we're nested inside another git repo.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$script_dir/../.." && pwd)"
-gates="$root/.claude/gates.json"
+# Which adapter to read. Defaults to the project adapter; set GATES_FILE to run a
+# different one (e.g. GATES_FILE=.claude/self/gates.json for the self-host loop —
+# see .claude/self/README.md). Relative paths resolve from the repo root.
+gates_ref="${GATES_FILE:-.claude/gates.json}"
+case "$gates_ref" in
+  /*) gates="$gates_ref" ;;
+  *)  gates="$root/$gates_ref" ;;
+esac
 
 if [ ! -f "$gates" ]; then
   echo "gate.sh: no $gates found — skipping '$key'"; exit 0

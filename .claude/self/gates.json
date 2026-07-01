@@ -1,0 +1,36 @@
+{
+  "_README": "SELF-ADAPTER (issue #11). Lets this template dogfood itself WITHOUT polluting the shipped placeholder .claude/gates.json (which stays pristine for downstream adopters). The loop uses THIS file only when pointed at it via GATES_FILE=.claude/self/gates.json (see .claude/self/README.md). Gate commands are node/bash-only so they run with no extra tooling installed.",
+
+  "project": { "name": "ai-project-orchestrator", "language": "shell+markdown+js", "packageManager": "none" },
+
+  "modules": [
+    { "name": "docs",     "path": "docs",     "description": "User-facing docs: GETTING_STARTED, USAGE, HARDENING, PROMPTS, ARCHITECTURE, TOKEN_BUDGET." },
+    { "name": "harness",  "path": ".claude",  "description": "Orchestrator machinery: agents, commands, scripts, workflows, self-adapter." },
+    { "name": "examples", "path": "examples", "description": "Worked adapter examples (may not exist yet; created by issue #6)." },
+    { "name": "ci",       "path": ".github",  "description": "Server-side gate workflows and composite actions." }
+  ],
+
+  "gates": {
+    "_note": "Implemented in .claude/self/checks.sh — node + bash only, no external linters, so they pass in a bare environment.",
+    "install": "",
+    "build": "bash .claude/self/checks.sh build",
+    "lint": "bash .claude/self/checks.sh lint",
+    "typecheck": "",
+    "test": "bash .claude/self/checks.sh test",
+    "test_affected": "bash .claude/self/checks.sh test",
+    "coverage": "",
+    "coverage_threshold": 0,
+    "e2e": "",
+    "security": ""
+  },
+
+  "review": { "lenses": ["correctness", "tests"], "consensus": "all", "skills": [] },
+
+  "budget": {
+    "orchestrator_model": "opus", "worker_model": "sonnet",
+    "explorer_model": "haiku", "reviewer_model": "opus",
+    "max_parallel_workers": 2
+  },
+
+  "merge": { "policy": "pr-per-agent", "baseBranch": "main" }
+}
