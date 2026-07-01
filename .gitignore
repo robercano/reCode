@@ -5,3 +5,22 @@
 .env
 .env.*
 !.env.example
+
+# Machine-local hardened profile (bypass + sandbox) — never inherited by a clone.
+.claude/settings.local.json
+
+# Personal / editor config that the OS sandbox masks with /dev/null device nodes,
+# so it surfaces as bogus "untracked" entries in a sandboxed session (see
+# docs/HARDENING.md → Caveats). Never part of the project. NOTE: intentionally does
+# NOT include .mcp.json, .gitmodules, or .claude/{hooks,skills,routines,launch.json}
+# — those can be legitimate tracked project files; the explicit-staging rule in
+# .claude/agents/implementer.md protects them instead.
+.bashrc
+.bash_profile
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.ripgreprc
+.idea/
+.vscode/

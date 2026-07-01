@@ -248,6 +248,19 @@ command -v cmd.exe   # should print nothing
 sudo gpasswd -d "$USER" docker     # if you don't need Docker in this distro
 ```
 
+> **Gotcha — cutting `/mnt` breaks any tool pinned to a Windows binary.** WSL+Windows setups often
+> point Linux tools at Windows executables under `/mnt/c`. Once `/mnt` is gone those fail with
+> `cannot run /mnt/c/.../foo.exe: No such file or directory`. The common one is **git's SSH**: a global
+> `core.sshCommand = /mnt/c/Windows/System32/OpenSSH/ssh.exe` (and often a `~/.zshrc`/`~/.bashrc`
+> `alias ssh=...exe`) makes `git push` fail. Fix — switch to the Linux toolchain:
+> ```bash
+> sudo apt-get install -y openssh-client          # provides /usr/bin/ssh
+> git config --global --unset core.sshCommand      # fall back to the Linux ssh on PATH
+> # then either add a Linux SSH key to GitHub, or move the remote to https + `gh auth setup-git`
+> ```
+> Also scrub any `alias ssh=/mnt/...exe` from your shell rc. Same applies to editors, credential
+> helpers, or `GIT_*` vars pointed at `.exe` paths.
+
 ---
 
 ## Step 3 — Activate and verify
@@ -320,6 +333,22 @@ agent operates *inside*, not one it configures.
 - **Worktrees outside the repo** aren't writable under the sandbox. Under strict mode
   (`allowUnsandboxedCommands: false`, recommended) such a write *fails* rather than escaping — so keep
   worktree paths inside the repo, or allowlist the specific command via `excludedCommands`.
+- **In-session commands are sandboxed too — including the `!` prefix.** Anything Claude Code runs,
+  whether a tool call or a command you type with the `!` prefix, runs inside the Bash sandbox (writes
+  confined to repo + `$TMPDIR`). Under strict mode that means **host/home config changes fail even when
+  you type them yourself** — `git config --global` (`~/.gitconfig`), editing `~/.zshrc`, `ssh-keygen`
+  (`~/.ssh`), `gh auth` (`~/.config/gh`), etc. all error with `Read-only file system`. Run those in a
+  **real terminal outside Claude Code**. (This is the containment working as intended, not a bug — but
+  it surprises people the first time.)
+- **Sandboxed sessions mask config paths as `/dev/null` — expect phantom `git status` noise.** The
+  sandbox bind-mounts `/dev/null` over sensitive paths it won't let the agent read (shell rc, `.gitconfig`,
+  editor dirs, `.mcp.json`, and Claude's own `.claude/{hooks,skills,routines,launch.json}`). In a
+  sandboxed view these appear as **character-device files** (`ls -l` shows `crw-rw-rw- … 1, 3`), which
+  `git status` reports as untracked/modified even though they aren't real project files. This is expected,
+  not corruption. Two consequences: (1) **never `git add -A` / `git commit -a`** — git can't index a
+  device node and the commit may abort; stage explicit paths instead (the agent instructions enforce this).
+  (2) The unambiguous personal dotfiles are gitignored so they don't surface; `.mcp.json`/`.gitmodules`/
+  `.claude/*` are deliberately *not* ignored (they can be real), so rely on explicit staging there.
 - **Open PRs gate loop advancement.** A typical loop won't start a new ticket while a PR is open —
   that's by design (it keeps you the merge gate). Review/merge to let it advance.
 - **The committed `settings.json` is owned by the harness at runtime** (it may rewrite the working-tree
