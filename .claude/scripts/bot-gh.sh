@@ -14,7 +14,10 @@
 #      reliably target repos owned by ANOTHER personal account.)
 #   4. Put it in the project's .env (gitignored) as GH_BOT_TOKEN=...
 #
-# Only PR creation needs the bot; commits and pushes stay on the owner's auth.
+# Policy: ALL agent `gh` interaction (issue/PR creation, comments, merging, and
+# even reads/queries) goes through this wrapper so it runs as the bot. Only `git`
+# commits and pushes stay on the owner's auth — that keeps the owner eligible to
+# formally approve bot-authored PRs (GitHub blocks a PR author from approving it).
 #
 # Usage: .claude/scripts/bot-gh.sh pr create --title "..." --body "..."
 set -euo pipefail

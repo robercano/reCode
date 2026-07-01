@@ -15,9 +15,11 @@
 #   - every CI check is green (none failing, none still pending)
 # Anything else is SKIPPED with a reason. Output is JSON lines a cron summarizes.
 #
-# Auth: uses ambient `gh` auth (the owner's `gh auth login`), same as
-# notify-poll.sh — merging is an owner action. Only PR *creation* uses the bot
-# (bot-gh.sh). Repo is derived from the git remote; override with $1 (owner/repo).
+# Auth: ALL `gh` calls (listing, viewing, and the merge itself) run as the bot via
+# bot-gh.sh — the bot is a write collaborator, so it can merge. The merge GATE is
+# still the human OWNER's APPROVED review (detected below); running the merge as the
+# bot does not change who authorized it. Repo is derived from the git remote;
+# override with $1 (owner/repo).
 # The approver defaults to the repo owner; override with $MERGE_APPROVER.
 # Pre-approve `bash .claude/scripts/merge-ready.sh` in .claude/settings.json.
 
@@ -25,6 +27,8 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Route EVERY gh call (list/view/merge) through the bot identity (see bot-gh.sh).
+gh() { bash "$root/.claude/scripts/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 owner="${MERGE_APPROVER:-${repo%%/*}}"   # the approver whose APPROVED review authorizes a merge
 gates="$root/.claude/gates.json"

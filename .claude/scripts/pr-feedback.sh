@@ -15,6 +15,9 @@
 # Invoke as `bash .claude/scripts/pr-feedback.sh` (pre-approve that exact command).
 set -euo pipefail
 
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Route EVERY gh call through the bot identity (see bot-gh.sh).
+gh() { bash "$root/.claude/scripts/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 bot="${BOT_LOGIN:-robercano-ghbot}"
 marker="<!-- claude-addressed -->"
