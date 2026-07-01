@@ -54,6 +54,25 @@ Each should run the right command (or say "not configured — skipping").
 > Either way, don't point a gate at a command that can't pass yet — a red `test_affected` will block the
 > `Stop` hook and every agent's "done".
 
+### Choosing `test_affected` per stack
+`test_affected` runs on the `Stop` hook after every change, so it should be *fast* — ideally only the tests
+touched by the diff. But "test only what changed" isn't free in every stack. Sensible options:
+
+| Stack | Cheap `test_affected` | Notes |
+|---|---|---|
+| turbo | `turbo run test --filter='...[origin/main]'` | needs turbo |
+| nx | `nx affected -t test --base=origin/main` | needs nx |
+| pnpm (no turbo/nx) | `pnpm --filter '...[origin/main]' test` | flaky in worktrees unless `origin/main` is fetched first — see #9 |
+| cargo | `cargo test` (or `cargo nextest run`) | no cheap since-base; full suite is fine |
+| go | `go test ./...` | already fast; no filter needed |
+| Foundry | `forge test` | **no** native since-base — run all |
+| gradle | `./gradlew test` | full suite |
+
+**`test_affected` = your full `test` command is a perfectly good default** whenever the suite is fast — only
+reach for affected-filtering when the full run is too slow to gate on every `Stop`. And note the worktree
+gotcha: any filter that diffs against `origin/main` needs that ref present in the worktree, so `git fetch
+origin main` first (or fall back to the full suite) — the per-worktree setup hook in #9 is the place for that.
+
 ## Step 4 — Review the agents (usually no change needed)
 Skim `.claude/agents/*.md`. They're generic and read `gates.json`, so they typically need no edits. Adjust
 `model:` per agent if your routing differs, or add project review skills (e.g. a security/audit skill) and
