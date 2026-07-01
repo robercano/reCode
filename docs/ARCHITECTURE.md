@@ -67,8 +67,9 @@ an **upstream Claude Code** concern the template can only document + mitigate, n
   **not** reproduce it — `~/.claude.json` stayed valid JSON, zero `.corrupted.*` files. #29217 was a
   v2.1.59–62 / Windows report, now closed-stale. So it appears safe at modest concurrency but is
   version/platform-dependent.
-- **Mitigations:** keep `max_parallel_workers` at **2–3** (already advised); don't run other Claude Code
-  sessions / the Desktop app from the same home dir during a run; keep Claude Code updated.
+- **Mitigations:** keep `max_parallel_workers` at the low end of the **2–4** ceiling advised above (the
+  self-adapter ships `2`); don't run other Claude Code sessions / the Desktop app from the same home dir
+  during a run; keep Claude Code updated.
 - **Residual risk this template owns:** the harness rewrites the *working-tree* `.claude/settings.json` mid-run
   with its session grant list, so a worker doing `git add -A` could stage a grant-drifted `settings.json` into
   its PR. Mitigated by the pre-approved allow-list **and** the implementer rule to stage explicit paths only
