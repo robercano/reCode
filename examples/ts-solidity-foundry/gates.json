@@ -1,0 +1,66 @@
+{
+  "_README": "WORKED EXAMPLE (not a live adapter) — a TypeScript (pnpm workspace) + Solidity (Foundry) monorepo. Copy this into YOUR repo's .claude/gates.json and adapt paths/commands. See examples/ts-solidity-foundry/README.md for the reasoning behind each choice. Empty string = gate skipped, not failed.",
+
+  "project": {
+    "name": "acme-protocol",
+    "language": "typescript+solidity",
+    "packageManager": "pnpm"
+  },
+
+  "modules": [
+    {
+      "name": "sdk",
+      "path": "packages/sdk",
+      "description": "TypeScript client SDK that wraps the contracts. Depends on the ABI produced by `contracts`, but a worker here edits only TS — never the .sol sources.",
+      "owner": ""
+    },
+    {
+      "name": "web",
+      "path": "packages/web",
+      "description": "Front-end app (consumes `sdk`). TS/TSX only.",
+      "owner": ""
+    },
+    {
+      "name": "contracts",
+      "path": "contracts",
+      "description": "Foundry project: Solidity sources, tests, and deploy scripts. A worker here edits .sol + foundry config only. Regenerating the ABI that `sdk` consumes is a build-time artifact, not a cross-module edit.",
+      "owner": ""
+    }
+  ],
+
+  "gates": {
+    "_note": "Run from repo root. Each mixed-stack gate runs the TS side then the Foundry side; a failure in either fails the gate. `(cd contracts && ...)` keeps forge in its own project dir without a persistent chdir.",
+    "install": "pnpm install --frozen-lockfile && (cd contracts && forge install)",
+    "build": "pnpm -r build && (cd contracts && forge build)",
+    "lint": "pnpm -r lint && (cd contracts && forge fmt --check)",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test && (cd contracts && forge test)",
+    "test_affected": "pnpm --filter \"...[origin/main]\" test && (cd contracts && forge test)",
+    "coverage": "pnpm -r coverage && (cd contracts && forge coverage --report summary)",
+    "coverage_threshold": 80,
+    "e2e": "",
+    "security": "(cd contracts && slither . || true)"
+  },
+
+  "review": {
+    "lenses": ["correctness", "tests", "security", "performance"],
+    "consensus": "all",
+    "_consensus_note": "Solidity handles value — keep the `security` lens on. 'all' = every lens must approve.",
+    "skills": []
+  },
+
+  "budget": {
+    "orchestrator_model": "opus",
+    "worker_model": "sonnet",
+    "explorer_model": "haiku",
+    "reviewer_model": "opus",
+    "max_parallel_workers": 3,
+    "_note": "3 modules → up to 3 parallel workers. Drop to 2 if human review/merge is the bottleneck."
+  },
+
+  "merge": {
+    "policy": "pr-per-agent",
+    "_policy_options": "pr-per-agent | orchestrated-sequential-merge",
+    "baseBranch": "main"
+  }
+}
