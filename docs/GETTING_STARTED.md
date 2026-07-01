@@ -2,6 +2,12 @@
 
 From a fresh repo created off this template to a working orchestrator, in 6 steps. Budget ~20 minutes.
 
+> **Prefer to be guided?** Run **`/setup-orchestrator`** in Claude Code. It interviews you (project basics,
+> module boundaries, gate commands, review/merge config), then does the steps below for you — writes
+> `gates.json` + `CLAUDE.md`, fixes `.gitignore`, creates the `module:*` labels, verifies the bot, checks the
+> CI gates, and offers to arm the PR loop and (last) `/harden`. This page is the manual reference behind that
+> command — read it to understand what the command is doing, or to configure by hand.
+
 ## Prerequisites
 - Claude Code installed and authenticated (`claude` runs).
 - `node` and `git` on PATH (the gate script uses `node` to read `gates.json`).

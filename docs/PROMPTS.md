@@ -2,6 +2,10 @@
 
 Copy-paste these into Claude Code. The first two populate the files you must fill; the rest drive day-to-day work.
 
+> **Shortcut:** the **`/setup-orchestrator`** command runs an interactive interview that covers prompts 1–2
+> (draft `CLAUDE.md`, fill `gates.json`) *and* the rest of onboarding (labels, bot check, CI, arming the loop,
+> hardening). Use it for a fresh project; reach for the individual prompts below when you want to redo one piece.
+
 ---
 
 ## 1. Draft `CLAUDE.md`
