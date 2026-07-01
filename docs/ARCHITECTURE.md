@@ -55,3 +55,21 @@ only the adapter changes.
 - **2–4 parallel workers** is the practical ceiling before human review/merge becomes the bottleneck.
 - Token cost scales with agent count — see [`TOKEN_BUDGET.md`](TOKEN_BUDGET.md).
 - Remove worktrees on merge (`git worktree list` / `git worktree remove`).
+
+### Concurrent config-write safety
+This template fans out to **parallel worktree-isolated workers**, and upstream
+[anthropics/claude-code#29217](https://github.com/anthropics/claude-code/issues/29217) reported that
+`~/.claude.json` (global config) can be **corrupted by non-atomic concurrent writes** from multiple
+processes. That's the access pattern the template encourages, so it's worth naming — with the caveat that it's
+an **upstream Claude Code** concern the template can only document + mitigate, not fix:
+
+- **What was measured:** a probe on v2.1.153/WSL2 (6+ parallel subagents, ~50 tool calls in a few seconds) did
+  **not** reproduce it — `~/.claude.json` stayed valid JSON, zero `.corrupted.*` files. #29217 was a
+  v2.1.59–62 / Windows report, now closed-stale. So it appears safe at modest concurrency but is
+  version/platform-dependent.
+- **Mitigations:** keep `max_parallel_workers` at **2–3** (already advised); don't run other Claude Code
+  sessions / the Desktop app from the same home dir during a run; keep Claude Code updated.
+- **Residual risk this template owns:** the harness rewrites the *working-tree* `.claude/settings.json` mid-run
+  with its session grant list, so a worker doing `git add -A` could stage a grant-drifted `settings.json` into
+  its PR. Mitigated by the pre-approved allow-list **and** the implementer rule to stage explicit paths only
+  (never `git add -A`) — see `.claude/agents/implementer.md`.
