@@ -24,6 +24,12 @@
     "security": ""
   },
 
+  "worktree": {
+    "_note": "Self-host workers need no external toolchain state (gates are node/bash-only), so both hooks are empty. Present to document the schema and exercise worktree.sh's skip path.",
+    "setup": "",
+    "teardown": ""
+  },
+
   "review": { "lenses": ["correctness", "tests"], "consensus": "all", "skills": [] },
 
   "budget": {

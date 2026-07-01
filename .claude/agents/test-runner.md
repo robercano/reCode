@@ -11,6 +11,8 @@ You run the project's gates and report results. You do not fix code — you repo
 If any gate or check needs `gh` (e.g. fetching CI status via `gh api`/`gh run`), call it through `.claude/scripts/bot-gh.sh`, never bare `gh`, so it runs as the bot.
 
 ## What to run
+If you're gating a **fresh isolated worktree** (not the main checkout), first run `bash .claude/scripts/worktree.sh setup` if present — it bootstraps toolchain state that lives outside the tree (`node_modules`, `forge install`, caches) so gates don't fail for lack of setup rather than real defects. Empty/unconfigured = skips.
+
 Read `.claude/gates.json` and run the requested gates (or all configured ones) using `.claude/scripts/gate.sh <name>` when available, else the raw command from the file. Typical order: `install` (if needed) → `build` → `lint` → `typecheck` → `test` (or `test_affected`) → `coverage` → `e2e` → `security`.
 
 Skip any gate whose command is empty in `gates.json` and note it as "not configured".
