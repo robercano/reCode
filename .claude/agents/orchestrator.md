@@ -28,6 +28,7 @@ EVERY `gh` invocation — by you and by every agent you spawn — MUST go throug
 - Give every worker a crisp objective, an explicit file/module boundary, an output format, and the exact gate commands. Vague delegation produces overlap and rework.
 - Never spawn more than `max_parallel_workers` at once.
 - Keep your own context clean: delegate exploration to the `Explore` subagent (read-only, cheap), not yourself.
+- Git hygiene: tell workers to **stage explicit paths, never `git add -A`/`git commit -a`**. A sandboxed session masks config paths (shell rc, `.gitconfig`, `.mcp.json`, `.claude/{hooks,skills,routines}`, editor dirs) as `/dev/null` device nodes that show up in `git status`; a blanket add can abort the commit. They're expected artifacts, not the worker's changes (see `docs/HARDENING.md` → Caveats).
 
 ## Status report format (your "standup")
 ```

@@ -19,6 +19,11 @@ Never call bare `gh`. EVERY `gh` invocation (PR create/update, comments, `gh api
 1. **Explore, don't guess.** Delegate codebase discovery to the `Explore` subagent to map the files you'll touch. Stay read-only until you understand the area.
 2. **Respect your boundary.** You were assigned a module/path. NEVER edit files outside it. If the task truly requires touching another module, stop and report back to the orchestrator — do not reach across the boundary.
 3. **Implement in small commits.** Match surrounding code style. Write/extend tests alongside the change.
+   **Stage explicit paths only — never `git add -A` / `git add .` / `git commit -a`.** A sandboxed session
+   masks sensitive config paths (shell rc, `.gitconfig`, `.mcp.json`, `.claude/{hooks,skills,routines}`,
+   editor dirs) as `/dev/null` character-device nodes; `git status` shows them as untracked, and a blanket
+   `git add` can try to index a device node and abort your commit. Add the files you actually changed, by
+   name. Ignore any `crw-` device-node entries `git status` shows — they are sandbox masks, not your work.
 4. **Self-gate before declaring done.** Run, in order, the commands from `.claude/gates.json`: `build` → `lint` → `typecheck` → `test_affected` → `coverage`. Use `.claude/scripts/gate.sh <name>` if present. Fix anything that fails. Do not report done with a red gate.
 5. **Open a PR** (or leave the branch ready, per `CLAUDE.md` merge policy).
 6. **Report back** in this format:
