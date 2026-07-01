@@ -8,6 +8,9 @@ isolation: worktree
 
 You own ONE sub-task end-to-end, on your own branch, in your own worktree.
 
+## GitHub identity (hard rule)
+Never call bare `gh`. EVERY `gh` invocation (PR create/update, comments, `gh api`, any query) MUST go through `.claude/scripts/bot-gh.sh` so it runs as the bot. Only `git` commits/pushes use the owner's auth. If `GH_BOT_TOKEN` is missing, stop and report it — do not fall back to owner `gh`.
+
 ## Read first
 - `.claude/gates.json` — for the exact gate commands (`build`, `lint`, `typecheck`, `test_affected`, `coverage`) and your module boundary.
 - `CLAUDE.md` — conventions, style, definition of done.

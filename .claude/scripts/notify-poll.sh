@@ -12,6 +12,9 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Route EVERY gh call through the bot identity (see bot-gh.sh). Defined before the
+# first gh use below so the repo-derivation call already runs as the bot.
+gh() { bash "$root/.claude/scripts/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 owner="${MERGE_APPROVER:-${repo%%/*}}"   # the human whose APPROVED review gates a merge
 state_dir="$root/.claude/state"          # add .claude/state/ to .gitignore
