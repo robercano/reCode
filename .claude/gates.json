@@ -30,6 +30,12 @@
     "security": ""
   },
 
+  "worktree": {
+    "_note": "Optional per-worktree lifecycle. `setup` runs right after an isolated implementer/reviewer worktree is created — bootstrap toolchain state that lives OUTSIDE the tree so every gate is runnable in-worktree (e.g. 'pnpm install', 'forge install', link shared caches). `teardown` runs before the worktree is removed. Empty string = skip. Run via .claude/scripts/worktree.sh setup|teardown.",
+    "setup": "",
+    "teardown": ""
+  },
+
   "review": {
     "lenses": ["correctness", "tests", "security", "performance"],
     "consensus": "all",
