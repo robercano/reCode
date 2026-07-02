@@ -119,6 +119,30 @@ run unattended (Claude Code `bypassPermissions`), first harden the environment s
 by always-enforced guardrails — see **[`HARDENING.md`](HARDENING.md)** (deny list + OS sandbox + host
 isolation). Don't enable bypass without it.
 
+## Autonomous loop & the issue queue
+Each `/pr-loop` tick runs, in order: **poll → merge → address-feedback → advance** — this per-tick order,
+canonically defined in `.claude/commands/pr-loop.md`, is authoritative; the poll / address-feedback /
+merge scripts described above are the mechanism it runs. Two human control points
+decide what the loop actually touches:
+
+- **The `module:*` label is an explicit opt-in work queue.** The ADVANCE step only picks up **open issues
+  labelled `module:<name>`** — lowest-numbered first, one at a time, and only when there are zero open PRs.
+  An unlabelled issue is never touched, no matter what its title or body say. Two reasons:
+  - **Intent gate** — most issues are discussions, questions, or half-scoped bugs; a bot shouldn't
+    auto-implement them. The label is you saying "this is scoped and ready for an autonomous worker."
+  - **Mechanism** — the label maps issue → module → the worker's `path` boundary (`gates.json.modules[]`).
+    No module ⇒ no boundary ⇒ nothing safe to hand a worker.
+- **Owner-approval merge gate.** Workers author PRs as the **bot** (`bot-gh.sh`); the MERGE step (above)
+  only merges PRs the repo **owner** has Approved on GitHub that are CI-green and mergeable. It never
+  approves on the owner's behalf.
+
+**Corollary:** non-module (docs/infra) work is not loop-eligible until (a) its area exists as a module in
+`gates.json.modules[]`, and (b) the issue carries the matching `module:*` label. Commenting "approved" on an
+issue does nothing — nothing watches issue text.
+
+New project? Wire this up with the **[new-project configuration
+checklist](GETTING_STARTED.md#new-project-configuration-checklist)**.
+
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
   at PR time. Cleanest/auditable.
