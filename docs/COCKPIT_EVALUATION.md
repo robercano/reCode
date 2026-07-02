@@ -21,7 +21,8 @@ replace — then makes a recommendation.
 ## 1. Integration seam: worktree ownership
 
 Both emdash and this harness create and drive **git worktrees** directly (emdash to isolate its
-parallel agent sessions; the harness via `implementer` agents and `.claude/scripts/worktree.sh`).
+parallel agent sessions; the harness via its `implementer` agents, whose `isolation: worktree`
+frontmatter (`.claude/agents/implementer.md`) places each worker in its own git worktree).
 If both tools manage worktrees against the same repo at the same time, they can collide on the same
 branch names, leave orphaned worktrees the other tool doesn't know about, or race on `git worktree
 add`/`remove` for the same paths.
