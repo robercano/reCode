@@ -173,3 +173,27 @@ If workers stall or collide, the fix is almost always a sharper **module map** i
 ## When NOT to orchestrate
 Trivial or single-file changes: just do them directly. The 15× token multiplier isn't worth it. The
 orchestrator itself is told to use one worker and no parallelism for small tasks — hold it to that.
+
+## Testing a PR locally (`/test-pr <n>`)
+
+The owner reviews bot PRs by actually running the change. Doing that by hand is error-prone — the classic failure
+is testing from the main working tree (which does NOT contain the unmerged PR), concluding "the fix doesn't work",
+and bouncing the PR back. `/test-pr <pr-number>` removes that footgun:
+
+1. Resolves the PR's head branch and fetches the latest pushed commit.
+2. Creates a **detached** git worktree at `humanTest.worktreeDir/pr-<n>` (default `.worktrees/pr-<n>`) — isolated
+   from your main checkout and from any agent worktree on the same branch.
+3. Runs `humanTest.prepare` inside it (install + build) and prints `humanTest.launch` for you to run.
+
+Configure the commands once in `.claude/gates.json`:
+
+```json
+"humanTest": {
+  "prepare": "pnpm install --prefer-offline && pnpm -r build",
+  "launch": "pnpm dev",
+  "worktreeDir": ".worktrees"
+}
+```
+
+Add `humanTest.worktreeDir` to `.gitignore`. Re-running `/test-pr` on the same PR fast-forwards the worktree to the
+latest commit (idempotent). Tear down with `git worktree remove <path>`.
