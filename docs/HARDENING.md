@@ -13,6 +13,12 @@ concrete WSL2 example).
 > **You do not need this to use the template.** Skip it entirely until you actually want unattended
 > runs. When you do, treat the steps below as the price of admission — don't enable bypass without them.
 
+> **Shortcut:** the **`/harden`** command materializes the Step 1 config below into
+> `.claude/settings.local.json` (merge-safe with existing entries, checks the sandbox backend is
+> installed, ensures the file is gitignored) and prints the steps only you can finish — sudo, OS-level
+> isolation, restart. Run it *before* enabling bypass, while the agent can still edit `settings*.json`.
+> This page stays the reference for what it writes and for Steps 2–4.
+
 ---
 
 ## Security model (the one paragraph to internalize)
@@ -354,6 +360,12 @@ agent operates *inside*, not one it configures.
 - **The committed `settings.json` is owned by the harness at runtime** (it may rewrite the working-tree
   copy with its session grant list). Keep bypass/sandbox in `settings.local.json`; if you ever do harden
   the committed file, see the `git update-index` note in its `_README`.
+- **Sandbox masks show up in `git status`.** The sandbox masks sensitive config paths inside the repo
+  (shell rc files, `.gitconfig`, `.mcp.json`, `.claude/{hooks,skills,routines}`, editor dirs like
+  `.vscode`/`.idea`) as `/dev/null` **character-device nodes**, and `git status` lists them as untracked
+  (`crw-` in `ls -l`). They're expected sandbox artifacts, not real files: never stage them — a blanket
+  `git add -A`/`git commit -a` can try to index a device node and abort the commit. Stage explicit paths
+  instead. The `implementer` and `orchestrator` agent prompts already encode this rule for workers.
 
 ## See also
 - [`USAGE.md`](USAGE.md) — driving the loop and closing it automatically (cron / `/loop`).

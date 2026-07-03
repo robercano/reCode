@@ -112,7 +112,8 @@ With `pr-per-agent`, the standing loop per ticket looks like:
 With all three wired, the loop runs hands-off: **add issues → review → approve → it merges and advances**.
 A natural step 4 is to start the next `module:*` issue only when **no PRs are open**, so work stays
 serialized (one issue in flight) and bounded. Caveats: cron jobs fire only while Claude Code is running,
-auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start.
+auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start (the
+**`/pr-loop`** command does exactly that: arms or re-arms the cron and runs one tick immediately).
 
 **Running it fully hands-off?** Polling still leaves a human approving each tool call. To let the loop
 run unattended (Claude Code `bypassPermissions`), first harden the environment so the prompt is replaced
