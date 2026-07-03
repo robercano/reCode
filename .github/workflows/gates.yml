@@ -42,3 +42,27 @@ jobs:
         # rather than red — same semantics as the local hooks. The coverage gate
         # command can read $COVERAGE_THRESHOLD (exported by the setup action).
         run: bash .claude/scripts/gate.sh ${{ matrix.gate }}
+
+  # This repo self-hosts on the orchestrator template: harness changes under
+  # `.claude/**` and `docs/**` are exercised via the SELF adapter
+  # (.claude/self/gates.json), whose gates are actually implemented (node+bash
+  # checks in .claude/self/checks.sh). The `gates` job above reads the default,
+  # placeholder adapter (.claude/gates.json), which has empty gate commands for
+  # this repo and so skips cleanly — meaning harness/docs PRs would otherwise get
+  # no real server-side check. This job closes that gap without touching the
+  # placeholder job above.
+  self-gates:
+    name: self / ${{ matrix.gate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # one red gate shouldn't hide the others
+      matrix:
+        gate: [build, lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: gate.sh ${{ matrix.gate }} (self adapter)
+        # Self-adapter gates are node+bash only, so the default toolchain
+        # shipped on ubuntu-latest runners is sufficient — no setup action needed.
+        env:
+          GATES_FILE: .claude/self/gates.json
+        run: bash .claude/scripts/gate.sh ${{ matrix.gate }}
