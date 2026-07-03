@@ -8,6 +8,19 @@
 # Idempotent: existing labels are reused; an issue whose exact title already
 # exists is skipped, so re-running won't create duplicates.
 #
+# NOTE — this is the anti-drift mechanism for module:* labels: the label block
+# below derives label names straight from gates.json.modules[], so the labels
+# the /pr-loop ADVANCE step looks for can never drift out of sync with the
+# module map (see docs/USAGE.md → "Autonomous loop & the issue queue").
+#
+# NOTE — this script uses bare `gh` and runs as the OWNER (fine for a one-time,
+# interactive backlog seed you run yourself). Per this project's `gh` rule,
+# anything the AGENTS/loop do must go through the bot instead. If you want to
+# (re)bootstrap just the module:* labels as the bot — e.g. to hand that step to
+# an agent — use bot-gh.sh directly:
+#   node -e "require('./.claude/gates.json').modules.forEach(m=>console.log(m.name))" | \
+#     while read -r m; do bash .claude/scripts/bot-gh.sh label create "module:$m" --force; done
+#
 # Prereq: `gh auth login` completed for this repo, and `node` on PATH.
 # Usage:  bash .claude/scripts/seed-issues.sh
 set -uo pipefail

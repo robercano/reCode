@@ -129,6 +129,29 @@ adapter-driven — you configure `gates.json`, not the YAML.
    > still run and are visible on every PR, and `merge-ready.sh` only merges a PR once the owner has approved
    > it *and* CI is green — so the approval+green gate holds even though GitHub doesn't hard-block the button.
 
+## New-project configuration checklist
+A copy-pasteable checklist for wiring a new project into the autonomous loop. See
+[`USAGE.md` → "Autonomous loop & the issue queue"](USAGE.md#autonomous-loop--the-issue-queue) for the mental
+model (the `module:*` opt-in queue + the owner-approval merge gate) that this checklist wires up.
+
+1. **`.claude/gates.json`** — the only per-project file that must be filled: `project.{name,language,packageManager}`;
+   `modules[]` (one entry per independently-ownable area, each with a non-overlapping `path` — these become
+   both the worker boundaries and the `module:<name>` labels the loop understands; include non-code areas
+   like `docs` if you want them automatable); `gates.*` (real shell commands, `""` = skip); `coverage_threshold`;
+   `review.{lenses,consensus}`; `budget.*` (model routing, `max_parallel_workers`); `merge.{policy,baseBranch}`.
+2. **`CLAUDE.md`** — project context, conventions, definition of done, merge policy.
+3. **Bot machine account** — create it, add as a write collaborator, put `GH_BOT_TOKEN` in `.env` (gitignored).
+   All agent/loop `gh` calls run as the bot via `bot-gh.sh`; only `git` commits/pushes stay on the owner's
+   auth, so the owner can approve bot PRs. Setup notes live at the top of `.claude/scripts/bot-gh.sh`.
+4. **Create the `module:*` labels** matching your `modules[]` names — see the bootstrap note at the top of
+   `.claude/scripts/seed-issues.sh`. Without the label, ADVANCE can never queue the issue.
+5. **Server-side gates** — confirm `.github/workflows/gates.yml` runs your gate commands (Step 7 above), and
+   set branch protection / required status checks on `merge.baseBranch` if your plan supports it.
+6. **Arm the loop** — run **`/pr-loop`**. It self-adjusts cadence (FAST when there's ≥1 open PR or ≥1 open
+   `module:*` issue, else IDLE) but the cron is session-scoped, so re-run it at the start of each session.
+7. *(optional)* **Hardening** — `/harden` for the bypass + strict-sandbox profile, see
+   [`HARDENING.md`](HARDENING.md).
+
 ## Verification checklist
 - [ ] `CLAUDE.md` describes the project and lists modules.
 - [ ] `.claude/gates.json` has real commands; `gate.sh build|lint|test` behave correctly.

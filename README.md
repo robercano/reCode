@@ -15,7 +15,8 @@ config edit, not a rebuild.
 1. Click **“Use this template”** on GitHub → create your repo.
 2. Open it in Claude Code and follow **[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md)** (fill `CLAUDE.md`
    and `.claude/gates.json` — there are copy-paste prompts in [`docs/PROMPTS.md`](docs/PROMPTS.md) that draft
-   them for you).
+   them for you), then work through the **[new-project configuration
+   checklist](docs/GETTING_STARTED.md#new-project-configuration-checklist)** to wire it into the autonomous loop.
 3. Drive it: see **[`docs/USAGE.md`](docs/USAGE.md)**.
 
 ## What's in here
