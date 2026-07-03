@@ -146,6 +146,11 @@ decide what the loop actually touches:
 `gates.json.modules[]`, and (b) the issue carries the matching `module:*` label. Commenting "approved" on an
 issue does nothing — nothing watches issue text.
 
+**Self-hosting this repo's own backlog?** **`/pr-loop-self`** (`.claude/commands/pr-loop-self.md`) runs the
+same loop mechanics self-hosted, against this repo's own `.claude`/`docs`/`examples`/`.github` backlog, using
+**`.claude/self/gates.json`** as the adapter (module map, gates, review lenses) instead of the placeholder
+`.claude/gates.json` above. See `.claude/self/README.md` for the self-adapter contract.
+
 New project? Wire this up with the **[new-project configuration
 checklist](GETTING_STARTED.md#new-project-configuration-checklist)**.
 
