@@ -86,6 +86,11 @@ With `pr-per-agent`, the standing loop per ticket looks like:
    missing grant). `bot-gh.sh` preflights this and prints the fix; the one-time setup is, as the **owner**:
    `gh api -X PUT repos/<owner>/<repo>/collaborators/<bot> -f permission=push`, then **accept as the bot**:
    `bot-gh.sh api -X PATCH user/repository_invitations/<id>` (private-repo invites require acceptance).
+   **Owner notification:** `bot-gh.sh pr create` auto-assigns the new PR to the repo owner (unless the
+   caller already passed `--assignee`/`-a`) so the owner gets a GitHub notification that review is awaited.
+   The owner login comes from `$OWNER_LOGIN` if set, else — for cross-repo calls — from the `--repo`/`-R`
+   target's owner, else it's parsed from the local `origin` git remote. If it can't be resolved, the PR is
+   still created — just unassigned.
 4. **Review** — the owner reviews on GitHub. To address comments, feed them back through the orchestrator
    (*"address the comments on PR #N"*): same implementer loop, same branch, push updates the PR in place.
 5. **Merge** — owner approves, merge per `gates.json.merge`, clean the worktree (below).
