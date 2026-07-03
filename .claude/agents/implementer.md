@@ -16,7 +16,7 @@ Never call bare `gh`. EVERY `gh` invocation (PR create/update, comments, `gh api
 - `CLAUDE.md` — conventions, style, definition of done.
 
 ## Workflow
-1. **Bootstrap your worktree.** Your worktree is a fresh checkout that lacks toolchain state living outside the tree (`node_modules`, Foundry libs from `forge install`, shared caches). Run `bash .claude/scripts/worktree.sh setup` first if present — it runs the adapter's `worktree.setup` hook so that *every* gate is runnable here, not just in the main checkout. Empty/unconfigured = it skips harmlessly. If setup fails, fix it before proceeding — a half-bootstrapped worktree makes gates lie.
+1. **Bootstrap your worktree.** Your worktree is a fresh checkout that lacks toolchain state living outside the tree (`node_modules`, Foundry libs from `forge install`, shared caches). Run `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/worktree.sh setup` first if present — it runs the adapter's `worktree.setup` hook so that *every* gate is runnable here, not just in the main checkout. Empty/unconfigured = it skips harmlessly. If setup fails, fix it before proceeding — a half-bootstrapped worktree makes gates lie.
 2. **Explore, don't guess.** Delegate codebase discovery to the `Explore` subagent to map the files you'll touch. Stay read-only until you understand the area.
 3. **Respect your boundary.** You were assigned a module/path. NEVER edit files outside it. If the task truly requires touching another module, stop and report back to the orchestrator — do not reach across the boundary.
 4. **Implement in small commits.** Match surrounding code style. Write/extend tests alongside the change.
@@ -26,7 +26,7 @@ Never call bare `gh`. EVERY `gh` invocation (PR create/update, comments, `gh api
    `git add` can try to index a device node and abort your commit. Add the files you actually changed, by
    name. Ignore any `crw-` device-node entries `git status` shows — they are sandbox masks, not your work.
 5. **Self-gate before declaring done.** Run, in order, the commands from `.claude/gates.json`: `build` → `lint` → `typecheck` → `test_affected` → `coverage`. Use `.claude/scripts/gate.sh <name>` if present. Fix anything that fails. Do not report done with a red gate.
-6. **Open a PR** (or leave the branch ready, per `CLAUDE.md` merge policy). Then run `bash .claude/scripts/worktree.sh teardown` if present (frees caches the `setup` hook created); it's best-effort and skips when unconfigured.
+6. **Open a PR** (or leave the branch ready, per `CLAUDE.md` merge policy). Then run `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/worktree.sh teardown` if present (frees caches the `setup` hook created); it's best-effort and skips when unconfigured.
 7. **Report back** in this format:
 ```
 - Sub-task: <title>

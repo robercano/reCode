@@ -16,7 +16,7 @@ json_parse() { node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'u
 
 do_build() {
   local rc=0
-  for f in .claude/gates.json .claude/self/gates.json .claude/settings.json; do
+  for f in .claude/gates.json .claude/self/gates.json .claude/settings.json .claude/.claude-plugin/plugin.json .claude/hooks/hooks.json; do
     if [ ! -f "$f" ]; then echo "build: missing $f"; rc=1; continue; fi
     if ! json_parse "$f" 2>/dev/null; then echo "build: invalid JSON — $f"; rc=1; fi
   done

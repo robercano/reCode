@@ -8,7 +8,7 @@ working tree. The PR number is: **$ARGUMENTS**
 
 Do this:
 
-1. Run `bash .claude/scripts/prepare-pr.sh $ARGUMENTS`. It resolves the PR's head branch, fetches it, creates (or
+1. Run `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/prepare-pr.sh $ARGUMENTS`. It resolves the PR's head branch, fetches it, creates (or
    refreshes) a **detached** worktree at `<humanTest.worktreeDir>/pr-$ARGUMENTS` (default `.worktrees/pr-<n>`),
    and runs the project's `humanTest.prepare` command (install + build) inside it. The script is idempotent —
    re-running it on the same PR just fast-forwards the worktree to the latest pushed commit and rebuilds.
