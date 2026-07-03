@@ -8,7 +8,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/scripts/gate.sh lint"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh\" lint"
           }
         ]
       }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/scripts/gate.sh test_affected"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh\" test_affected"
           }
         ]
       }
