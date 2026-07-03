@@ -34,14 +34,16 @@ fi
 # Preflight: the bot needs collaborator access to EACH (private) repo it acts on
 # (setup step 2). Without it, gh fails with an opaque
 # "Could not resolve to a Repository with the name '<owner>/<repo>'" that reads like
-# a typo, not a missing grant. If a --repo target is given and the bot can't see it,
-# print the exact one-time grant + invite-accept commands instead.
+# a typo, not a missing grant. If a --repo/-R target is given and the bot can't see
+# it, print the exact one-time grant + invite-accept commands instead. This same
+# $target_repo is also reused below to resolve the correct owner for cross-repo
+# `pr create` calls.
 target_repo=""
 prev=""
 for a in "$@"; do
-  if [ "$prev" = "--repo" ]; then target_repo="$a"; break; fi
+  if [ -n "$prev" ]; then target_repo="$a"; break; fi
   case "$a" in
-    --repo) prev="--repo"; continue;;
+    --repo|-R) prev="1"; continue;;
     --repo=*) target_repo="${a#--repo=}"; break;;
   esac
 done
@@ -57,4 +59,51 @@ EOF
   exit 1
 fi
 
-GH_TOKEN="$GH_BOT_TOKEN" exec gh "$@"
+args=("$@")
+
+# Auto-assign new bot PRs to the repo owner, so the owner gets a notification
+# that a PR is waiting for review (a bot-authored PR otherwise has no assignee).
+# Only applies to `pr create`, and only if the caller didn't already pass
+# --assignee (or its short form -a) themselves.
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
+  has_assignee=0
+  for a in "$@"; do
+    case "$a" in
+      -a|--assignee|--assignee=*) has_assignee=1; break;;
+    esac
+  done
+  if [ "$has_assignee" -eq 0 ]; then
+    # Resolve the repo owner dynamically — never hardcode it. Precedence:
+    # OWNER_LOGIN env override, then the --repo/-R target (so cross-repo
+    # `pr create --repo other/acct` assigns the OTHER repo's owner, not the
+    # local origin's), then the local `origin` remote (works offline, unlike
+    # `gh repo view`), then `gh repo view` as a last resort.
+    owner="${OWNER_LOGIN:-}"
+    if [ -z "$owner" ] && [ -n "$target_repo" ]; then
+      owner="${target_repo%%/*}"
+    fi
+    if [ -z "$owner" ]; then
+      origin_url="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+      case "$origin_url" in
+        git@github.com:*)
+          owner="${origin_url#git@github.com:}"
+          owner="${owner%%/*}"
+          ;;
+        https://github.com/*)
+          owner="${origin_url#https://github.com/}"
+          owner="${owner%%/*}"
+          ;;
+      esac
+    fi
+    if [ -z "$owner" ]; then
+      owner="$(GH_TOKEN="$GH_BOT_TOKEN" gh repo view --json owner --jq .owner.login 2>/dev/null || true)"
+    fi
+    # Fail soft: if the owner can't be resolved, create the PR unassigned
+    # rather than erroring out.
+    if [ -n "$owner" ]; then
+      args+=(--assignee "$owner")
+    fi
+  fi
+fi
+
+GH_TOKEN="$GH_BOT_TOKEN" exec gh ${args[@]+"${args[@]}"}
