@@ -1,0 +1,57 @@
+# INSTALL DESTINATION: .github/actions/setup/action.yml
+# Installed by `/orchestrator:setup` (scaffold.sh) — created only if that path doesn't
+# already exist; left untouched on re-runs (see .claude/skills/setup/scaffold.sh).
+name: Adapter setup
+description: >
+  Toolchain setup + dependency install, driven entirely by .claude/gates.json so the
+  same workflow works on any downstream repo without hand-edited YAML. Reads
+  project.packageManager / project.language / gates.coverage_threshold, sets up the
+  matching toolchain, runs the `install` gate, and exports COVERAGE_THRESHOLD.
+
+runs:
+  using: composite
+  steps:
+    # Read the adapter. `node` is preinstalled on GitHub runners, so this works even
+    # before any toolchain setup — same dependency gate.sh already relies on.
+    - id: adapter
+      shell: bash
+      run: |
+        gates=".claude/gates.json"
+        read_json() { node -e "try{const g=require('./$gates');process.stdout.write(String($1||''))}catch(e){process.stdout.write('')}"; }
+        pm="$(read_json "g.project&&g.project.packageManager")"
+        lang="$(read_json "g.project&&g.project.language")"
+        thr="$(read_json "g.gates&&g.gates.coverage_threshold")"
+        echo "package-manager=$pm" >> "$GITHUB_OUTPUT"
+        echo "language=$lang"      >> "$GITHUB_OUTPUT"
+        # Export the threshold so coverage gate commands can read $COVERAGE_THRESHOLD.
+        [ -n "$thr" ] && echo "COVERAGE_THRESHOLD=$thr" >> "$GITHUB_ENV"
+        echo "adapter: packageManager='$pm' language='$lang' coverage_threshold='$thr'"
+
+    # --- JavaScript/TypeScript toolchain (the common case) -------------------------
+    - if: contains(fromJSON('["pnpm","npm","yarn"]'), steps.adapter.outputs.package-manager)
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - if: steps.adapter.outputs.package-manager == 'pnpm'
+      shell: bash
+      run: corepack enable
+
+    # --- Extension point: add stack-specific toolchain setup here ------------------
+    # The template ships the JS path above. Downstream repos on other stacks add their
+    # setup here (it's a config edit, like gates.json). Examples:
+    #
+    #   - if: contains(steps.adapter.outputs.language, 'olidity')   # Solidity / Foundry
+    #     uses: foundry-rs/foundry-toolchain@v1
+    #
+    #   - if: contains(steps.adapter.outputs.language, 'ython')     # Python
+    #     uses: actions/setup-python@v5
+    #     with: { python-version: '3.12' }
+    #
+    # See issue #9 (per-worktree lifecycle) — the same bootstrap that lets isolated
+    # worktree workers run a gate is what CI needs here.
+
+    # Install dependencies via the adapter's `install` gate (skips cleanly if empty).
+    - name: Install dependencies
+      shell: bash
+      run: bash .claude/scripts/gate.sh install
