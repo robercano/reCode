@@ -1,0 +1,34 @@
+---
+description: Prepare an open PR for local human testing — checks out its branch into an isolated, ready-to-run worktree (deps built) and hands you the launch command.
+argument-hint: <pr-number>
+---
+
+You are preparing an OPEN pull request for the user to manually test locally, WITHOUT disturbing their main
+working tree. The PR number is: **$ARGUMENTS**
+
+Do this:
+
+1. Run `bash .claude/scripts/prepare-pr.sh $ARGUMENTS`. It resolves the PR's head branch, fetches it, creates (or
+   refreshes) a **detached** worktree at `<humanTest.worktreeDir>/pr-$ARGUMENTS` (default `.worktrees/pr-<n>`),
+   and runs the project's `humanTest.prepare` command (install + build) inside it. The script is idempotent —
+   re-running it on the same PR just fast-forwards the worktree to the latest pushed commit and rebuilds.
+
+2. If the script fails, report the exact error and stop (common causes: the PR is closed, the bot token isn't set,
+   or `humanTest` isn't configured in `.claude/gates.json`). Do not guess.
+
+3. On success, report to the user, in this order:
+   - the PR number, its title, and the **exact head commit SHA** the worktree is now at (so they know they are
+     testing the latest pushed code, not a stale build — the usual reason "the fix doesn't work" for them);
+   - the ready-to-run path and the launch command the script printed, e.g.
+     `cd <path> && <humanTest.launch>`.
+   - Tell them to run the launch command **in their own terminal** (a dev server is long-running and needs a
+     browser), and to tear the worktree down with `git worktree remove <path>` when finished.
+
+4. Offer (do not assume) to start the launch command for them in the background if they'd rather you drive it.
+
+Notes:
+- This never edits the PR and never touches `main` — the worktree is an isolated, detached checkout, so it can
+  coexist with the same branch checked out elsewhere (e.g. an agent worktree).
+- The prepare/launch/worktree-dir commands are read from `.claude/gates.json` → `humanTest`, so this command is
+  project-agnostic. If `humanTest` is absent, the script still makes the worktree and tells the user to build/run
+  manually.

@@ -1,12 +1,10 @@
 {
   "_README": "WORKED EXAMPLE (not a live adapter) — a TypeScript (pnpm workspace) + Solidity (Foundry) monorepo. Copy this into YOUR repo's .claude/gates.json and adapt paths/commands. See examples/ts-solidity-foundry/README.md for the reasoning behind each choice. Empty string = gate skipped, not failed.",
-
   "project": {
     "name": "acme-protocol",
     "language": "typescript+solidity",
     "packageManager": "pnpm"
   },
-
   "modules": [
     {
       "name": "sdk",
@@ -27,7 +25,6 @@
       "owner": ""
     }
   ],
-
   "gates": {
     "_note": "Run from repo root. Each mixed-stack gate runs the TS side then the Foundry side; a failure in either fails the gate. `(cd contracts && ...)` keeps forge in its own project dir without a persistent chdir.",
     "install": "pnpm install --frozen-lockfile && (cd contracts && forge install)",
@@ -41,14 +38,17 @@
     "e2e": "",
     "security": "(cd contracts && slither . || true)"
   },
-
   "review": {
-    "lenses": ["correctness", "tests", "security", "performance"],
+    "lenses": [
+      "correctness",
+      "tests",
+      "security",
+      "performance"
+    ],
     "consensus": "all",
     "_consensus_note": "Solidity handles value — keep the `security` lens on. 'all' = every lens must approve.",
     "skills": []
   },
-
   "budget": {
     "orchestrator_model": "opus",
     "worker_model": "sonnet",
@@ -57,10 +57,15 @@
     "max_parallel_workers": 3,
     "_note": "3 modules → up to 3 parallel workers. Drop to 2 if human review/merge is the bottleneck."
   },
-
   "merge": {
     "policy": "pr-per-agent",
     "_policy_options": "pr-per-agent | orchestrated-sequential-merge",
     "baseBranch": "main"
+  },
+  "humanTest": {
+    "_note": "Consumed by /test-pr (.claude/scripts/prepare-pr.sh). 'prepare' runs INSIDE the PR worktree to make it runnable (install/build); 'launch' is printed for you to run in your own terminal; 'worktreeDir' is where PR test worktrees go (gitignore it).",
+    "prepare": "pnpm install --prefer-offline && pnpm -r build",
+    "launch": "pnpm dev",
+    "worktreeDir": ".worktrees"
   }
 }
