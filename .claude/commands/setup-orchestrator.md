@@ -13,7 +13,7 @@ and defer to them on any detail.
 Be conversational but efficient. Use the `AskUserQuestion` tool for discrete choices; ask for free-text
 (names, paths, shell commands) in plain prose. **Never invent values** — if you don't know a command or path,
 ask. **Propose the final files and get an explicit "yes" before writing.** All `gh` runs through
-`bash .claude/scripts/bot-gh.sh`, never bare `gh`.
+`bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh`, never bare `gh`.
 
 Do these in order. Stop and report if a step genuinely can't proceed.
 
@@ -25,7 +25,7 @@ Do these in order. Stop and report if a step genuinely can't proceed.
   labels. Then **ask the user whether to continue or stop** (use `AskUserQuestion`). If they choose stop, end the
   command cleanly with no changes. If they continue, proceed with the flow. (You still confirm before each file
   write in later steps, so a re-run can't clobber silently.)
-- Resolve the repo: `bash .claude/scripts/bot-gh.sh repo view --json nameWithOwner -q .nameWithOwner`.
+- Resolve the repo: `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh repo view --json nameWithOwner -q .nameWithOwner`.
 
 ## 2. Explain the model up front (so answers are informed)
 Briefly tell the user how the loop decides what to build:
@@ -66,12 +66,12 @@ Ensure these are gitignored (append if missing, don't duplicate): `.env` (holds 
 `.claude/state/` (the notify-poll cursor). Verify with `git check-ignore <path>`.
 
 ## 6. Create the module labels
-For every module `name`: `bash .claude/scripts/bot-gh.sh label create "module:<name>" --description "<desc>" --force`.
+For every module `name`: `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh label create "module:<name>" --description "<desc>" --force`.
 Report created vs already-existing. Remind: **an issue is only loop-eligible once it carries a `module:*` label.**
 
 ## 7. Verify the bot account
 - Confirm `.env` has `GH_BOT_TOKEN` and the bot can see the repo:
-  `bash .claude/scripts/bot-gh.sh api user --jq .login` and a `repo view` on the resolved repo.
+  `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh api user --jq .login` and a `repo view` on the resolved repo.
 - If missing/no access, DON'T fail the whole setup — point at the one-time setup notes in
   `.claude/scripts/bot-gh.sh` (create machine account → add as **write** collaborator → classic `repo`-scope
   token → `.env`) and mark this step "action needed".
