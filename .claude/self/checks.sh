@@ -39,9 +39,32 @@ do_lint() {
     [ -e "$f" ] || continue
     bash -n "$f" || { echo "lint: shell syntax error — $f"; rc=1; }
   done
+  # Workflow files are a workflow-DSL: they mix ESM-only `export` syntax with
+  # top-level `return`/`await`, so they're valid as neither plain CommonJS nor
+  # plain ESM and `node --check` can't validate them directly. Instead, strip
+  # the `export` keywords and wrap the body in an async IIFE (which makes
+  # top-level `return`/`await` legal), then parse it with vm.Script — parsing
+  # never executes the code, so undefined harness globals (agent, phase, log,
+  # ...) don't matter, but real syntax errors still surface as SyntaxError.
   for f in .claude/workflows/*.js; do
     [ -e "$f" ] || continue
-    node --check "$f" || { echo "lint: JS syntax error — $f"; rc=1; }
+    node -e '
+      const fs = require("fs");
+      const vm = require("vm");
+      const f = process.argv[1];
+      let src = fs.readFileSync(f, "utf8");
+      src = src.replace(/^\s*export\s+default\s+/gm, "").replace(/^\s*export\s+/gm, "");
+      const wrapped = "(async () => {\n" + src + "\n})";
+      try {
+        new vm.Script(wrapped, { filename: f });
+      } catch (e) {
+        if (e instanceof SyntaxError) {
+          console.error("lint: JS syntax error — " + f + ": " + e.message);
+          process.exit(1);
+        }
+        throw e;
+      }
+    ' "$f" || rc=1
   done
   [ "$rc" -eq 0 ] && echo "lint: shell + workflow syntax OK"
   return "$rc"
