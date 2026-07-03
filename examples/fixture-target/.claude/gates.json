@@ -1,0 +1,39 @@
+{
+  "_README": "FIXTURE ADAPTER (issue #11). This is a FILLED adapter for the tiny fixture-target repo used by the self-adapter's smoke harness (.claude/self/smoke.sh) to exercise the harness end-to-end WITHOUT infinite regress. Gates are intentionally node/bash-only so they pass with no toolchain installed beyond node + bash. Commands run from this directory's root (examples/fixture-target/).",
+
+  "project": { "name": "fixture-target", "language": "javascript", "packageManager": "none" },
+
+  "modules": [
+    { "name": "src", "path": "src", "description": "The fixture's trivial product source (add.js).", "owner": "" }
+  ],
+
+  "gates": {
+    "_note": "node/bash-only so they pass in a bare environment. Run from examples/fixture-target/.",
+    "install": "",
+    "build": "node --check src/add.js",
+    "lint": "node --check src/add.js && node --check test/add.test.js",
+    "typecheck": "",
+    "test": "node test/add.test.js",
+    "test_affected": "node test/add.test.js",
+    "coverage": "",
+    "coverage_threshold": 0,
+    "e2e": "",
+    "security": ""
+  },
+
+  "worktree": {
+    "_note": "Not exercised by the smoke harness — no external toolchain state to bootstrap.",
+    "setup": "",
+    "teardown": ""
+  },
+
+  "review": { "lenses": ["correctness", "tests"], "consensus": "all", "skills": [] },
+
+  "budget": {
+    "orchestrator_model": "opus", "worker_model": "sonnet",
+    "explorer_model": "haiku", "reviewer_model": "opus",
+    "max_parallel_workers": 1
+  },
+
+  "merge": { "policy": "pr-per-agent", "baseBranch": "main" }
+}
