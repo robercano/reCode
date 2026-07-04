@@ -36,6 +36,14 @@
     "teardown": ""
   },
 
+  "humanTest": {
+    "_note": "Optional support for the /test-pr command (.claude/scripts/prepare-pr.sh). `prepare` runs IN the PR worktree to make it runnable (install + build); `launch` is the command printed to start the app for manual testing; `launchPhone` is an OPT-IN variant (via `/test-pr <n> --phone`) that starts the app AND opens a public tunnel (e.g. `cloudflared tunnel --url http://localhost:<port> --http-host-header localhost`) so a phone can reach it — it exposes the app publicly, so keep it attended; `worktreeDir` is where PR worktrees are created (default '.worktrees'). Empty string = skip.",
+    "prepare": "",
+    "launch": "",
+    "launchPhone": "",
+    "worktreeDir": ".worktrees"
+  },
+
   "review": {
     "lenses": ["correctness", "tests", "security", "performance"],
     "consensus": "all",
