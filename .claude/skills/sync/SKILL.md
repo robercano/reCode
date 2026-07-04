@@ -54,10 +54,17 @@ version-marked managed files, not the "create if absent" ci files.
    - `kept (newer)` — the installed marker version is *newer* than what this plugin ships (e.g. a
      hand-authored bump). Never downgrade; left untouched.
    - `user-owned — skipped by design` — printed for awareness only; these files are never written by sync.
+   - `error` — the plugin install itself looks broken (a managed file's shipped template is missing, or the
+     template carries no valid `@orchestrator-managed <name> vN` marker). This is not a per-repo verdict like
+     the others above — it means the plugin's own files are inconsistent. `sync.sh` exits nonzero (1) whenever
+     any `error` line is printed, distinct from every other outcome above (including `conflict`), which are
+     normal per-file verdicts that still exit 0. Surface `error` lines to the user prominently and suggest
+     reinstalling/updating the plugin rather than treating it as something to fix in the consumer repo.
 
 3. **Report a diff summary.** Relay the script's per-file summary verbatim to the user (it's already in the
-   created/up-to-date/restamped/conflict/kept/skipped vocabulary above). Call out clearly which line, if any,
-   changed on disk (`restamped`) versus which are informational only.
+   created/up-to-date/restamped/conflict/kept/skipped/error vocabulary above). Call out clearly which line, if
+   any, changed on disk (`restamped`) versus which are informational only, and call out `error` lines as a
+   plugin-install problem rather than a repo problem.
 
 4. **Handle conflicts explicitly — never silently overwrite.** For every `conflict / needs-merge` line, tell
    the user which file it is, that it has local edits diverging from the last pristine version it was stamped
