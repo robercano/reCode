@@ -191,9 +191,24 @@ Configure the commands once in `.claude/gates.json`:
 "humanTest": {
   "prepare": "pnpm install --prefer-offline && pnpm -r build",
   "launch": "pnpm dev",
+  "launchPhone": "sh -c 'pnpm dev & devpid=$!; trap \"kill $devpid 2>/dev/null\" EXIT INT TERM; cloudflared tunnel --url http://localhost:5173 --http-host-header localhost'",
   "worktreeDir": ".worktrees"
 }
 ```
 
 Add `humanTest.worktreeDir` to `.gitignore`. Re-running `/test-pr` on the same PR fast-forwards the worktree to the
 latest commit (idempotent). Tear down with `git worktree remove <path>`.
+
+### Testing on a phone (`/test-pr <n> --phone`)
+
+To iterate on a UI from a phone (touch gestures, small-screen layout) rather than a desktop browser, configure
+`humanTest.launchPhone` and run `/test-pr <n> --phone`. It prepares the worktree exactly as above but prints
+`launchPhone` instead of `launch`. `launchPhone` starts the dev server(s) **and** opens a public tunnel (e.g. a
+`cloudflared` quick tunnel) to the running app, printing a `https://<random>.trycloudflare.com` URL you open in the
+phone's own browser. The `--http-host-header localhost` flag makes the tunnel send `Host: localhost`, so a dev
+server with a strict host allow-list (e.g. Vite) accepts it with no config change.
+
+This is opt-in and attended, because the tunnel is **public** while up: anyone with the link reaches the app and
+whatever backend/API it proxies, using the credentials in the worktree's `.env`. It's ephemeral — Ctrl-C tears down
+the tunnel and the dev servers together. Don't leave it running unattended. Without `--phone`, behavior is
+unchanged; if `launchPhone` isn't configured, `--phone` falls back to printing `launch`.
