@@ -1,5 +1,11 @@
 # Using the Orchestrator (after setup)
 
+> **Assumes:** you've installed the `orchestrator` Claude Code plugin and run `/orchestrator:setup` in your
+> project — see [`GETTING_STARTED.md`](GETTING_STARTED.md) if you haven't. Agents, commands, hooks, and
+> scripts ship *with* the plugin; `/orchestrator:setup` scaffolds the repo-specific residue the plugin can't
+> carry (`.claude/gates.json`, `CLAUDE.md`, the fan-out workflow, the CI gate workflow). Everything below is
+> what you do once that's in place — day-to-day driving, the human checkpoints, and the autonomous loop.
+
 Two ways to drive it: **conversational** (the orchestrator subagent — flexible) or **workflow** (deterministic
 fan-out). Plus the human checkpoints that keep you in the loop.
 
@@ -118,7 +124,7 @@ With all three wired, the loop runs hands-off: **add issues → review → appro
 A natural step 4 is to start the next `module:*` issue only when **no PRs are open**, so work stays
 serialized (one issue in flight) and bounded. Caveats: cron jobs fire only while Claude Code is running,
 auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start (the
-**`/pr-loop`** command does exactly that: arms or re-arms the cron and runs one tick immediately).
+**`/orchestrator:pr-loop`** command does exactly that: arms or re-arms the cron and runs one tick immediately).
 
 **Running it fully hands-off?** Polling still leaves a human approving each tool call. To let the loop
 run unattended (Claude Code `bypassPermissions`), first harden the environment so the prompt is replaced
@@ -126,8 +132,8 @@ by always-enforced guardrails — see **[`HARDENING.md`](HARDENING.md)** (deny l
 isolation). Don't enable bypass without it.
 
 ## Autonomous loop & the issue queue
-Each `/pr-loop` tick runs, in order: **poll → merge → address-feedback → advance** — this per-tick order,
-canonically defined in `.claude/commands/pr-loop.md`, is authoritative; the poll / address-feedback /
+Each `/orchestrator:pr-loop` tick runs, in order: **poll → merge → address-feedback → advance** — this
+per-tick order, canonically defined in `.claude/commands/pr-loop.md`, is authoritative; the poll / address-feedback /
 merge scripts described above are the mechanism it runs. Two human control points
 decide what the loop actually touches:
 
@@ -146,13 +152,30 @@ decide what the loop actually touches:
 `gates.json.modules[]`, and (b) the issue carries the matching `module:*` label. Commenting "approved" on an
 issue does nothing — nothing watches issue text.
 
-**Self-hosting this repo's own backlog?** **`/pr-loop-self`** (`.claude/commands/pr-loop-self.md`) runs the
+**Self-hosting this repo's own backlog?** **`/orchestrator:pr-loop-self`** (`.claude/commands/pr-loop-self.md`) runs the
 same loop mechanics self-hosted, against this repo's own `.claude`/`docs`/`examples`/`.github` backlog, using
 **`.claude/self/gates.json`** as the adapter (module map, gates, review lenses) instead of the placeholder
 `.claude/gates.json` above. See `.claude/self/README.md` for the self-adapter contract.
 
 New project? Wire this up with the **[new-project configuration
 checklist](GETTING_STARTED.md#new-project-configuration-checklist)**.
+
+## Updating the plugin
+When a new version of the `orchestrator` plugin ships (new agents, commands, gate fixes, etc.), refresh the
+marketplace listing and let Claude Code update the installed plugin:
+```
+/plugin marketplace update ai-project-orchestrator
+```
+Then re-stamp the files `/orchestrator:setup` scaffolded into **your** repo (`gates.json`, `CLAUDE.md`, the
+fan-out workflow, the CI gate workflow) so they pick up any changes shipped in the update:
+```
+/orchestrator:sync
+```
+This compares the version markers `/orchestrator:setup` already scaffolded against what the current plugin
+ships and re-stamps anything behind — flagging local edits instead of clobbering them (see
+`.claude/skills/sync/SKILL.md`) — so an update refreshes managed files (e.g. `feature-fanout.js`) without
+re-running the whole interview, and never touches your own `gates.json`/`CLAUDE.md` (those are created once
+and left alone on every re-run).
 
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
@@ -174,11 +197,11 @@ If workers stall or collide, the fix is almost always a sharper **module map** i
 Trivial or single-file changes: just do them directly. The 15× token multiplier isn't worth it. The
 orchestrator itself is told to use one worker and no parallelism for small tasks — hold it to that.
 
-## Testing a PR locally (`/test-pr <n>`)
+## Testing a PR locally (`/orchestrator:test-pr <n>`)
 
 The owner reviews bot PRs by actually running the change. Doing that by hand is error-prone — the classic failure
 is testing from the main working tree (which does NOT contain the unmerged PR), concluding "the fix doesn't work",
-and bouncing the PR back. `/test-pr <pr-number>` removes that footgun:
+and bouncing the PR back. `/orchestrator:test-pr <pr-number>` removes that footgun:
 
 1. Resolves the PR's head branch and fetches the latest pushed commit.
 2. Creates a **detached** git worktree at `humanTest.worktreeDir/pr-<n>` (default `.worktrees/pr-<n>`) — isolated
@@ -196,16 +219,16 @@ Configure the commands once in `.claude/gates.json`:
 }
 ```
 
-Add `humanTest.worktreeDir` to `.gitignore`. Re-running `/test-pr` on the same PR fast-forwards the worktree to the
-latest commit (idempotent). Tear down with `git worktree remove <path>`.
+Add `humanTest.worktreeDir` to `.gitignore`. Re-running `/orchestrator:test-pr` on the same PR fast-forwards the
+worktree to the latest commit (idempotent). Tear down with `git worktree remove <path>`.
 
-### Testing on a phone (`/test-pr <n> --phone`)
+### Testing on a phone (`/orchestrator:test-pr <n> --phone`)
 
 To iterate on a UI from a phone (touch gestures, small-screen layout) rather than a desktop browser, configure
-`humanTest.launchPhone` and run `/test-pr <n> --phone`. It prepares the worktree exactly as above but prints
-`launchPhone` instead of `launch`. `launchPhone` starts the dev server(s) **and** opens a public tunnel (e.g. a
-`cloudflared` quick tunnel) to the running app, printing a `https://<random>.trycloudflare.com` URL you open in the
-phone's own browser. The `--http-host-header localhost` flag makes the tunnel send `Host: localhost`, so a dev
+`humanTest.launchPhone` and run `/orchestrator:test-pr <n> --phone`. It prepares the worktree exactly as above but
+prints `launchPhone` instead of `launch`. `launchPhone` starts the dev server(s) **and** opens a public tunnel (e.g.
+a `cloudflared` quick tunnel) to the running app, printing a `https://<random>.trycloudflare.com` URL you open in
+the phone's own browser. The `--http-host-header localhost` flag makes the tunnel send `Host: localhost`, so a dev
 server with a strict host allow-list (e.g. Vite) accepts it with no config change.
 
 This is opt-in and attended, because the tunnel is **public** while up: anyone with the link reaches the app and
