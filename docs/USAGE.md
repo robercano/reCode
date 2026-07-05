@@ -171,11 +171,11 @@ fan-out workflow, the CI gate workflow) so they pick up any changes shipped in t
 ```
 /orchestrator:sync
 ```
-> **Not shipped yet.** `/orchestrator:sync` is planned for packaging phase 3 (issue #38) — it will re-run the
-> scaffold's re-stamping logic non-interactively, so an update also refreshes managed files without
-> re-running the whole interview. Until it lands, re-run `/orchestrator:setup` instead: it safely re-stamps
-> only the *managed* `feature-fanout.js` when its version marker is behind, and never overwrites your own
-> `gates.json`/`CLAUDE.md` (those are created once and left alone on every re-run).
+This compares the version markers `/orchestrator:setup` already scaffolded against what the current plugin
+ships and re-stamps anything behind — flagging local edits instead of clobbering them (see
+`.claude/skills/sync/SKILL.md`) — so an update refreshes managed files (e.g. `feature-fanout.js`) without
+re-running the whole interview, and never touches your own `gates.json`/`CLAUDE.md` (those are created once
+and left alone on every re-run).
 
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
@@ -214,9 +214,24 @@ Configure the commands once in `.claude/gates.json`:
 "humanTest": {
   "prepare": "pnpm install --prefer-offline && pnpm -r build",
   "launch": "pnpm dev",
+  "launchPhone": "sh -c 'pnpm dev & devpid=$!; trap \"kill $devpid 2>/dev/null\" EXIT INT TERM; cloudflared tunnel --url http://localhost:5173 --http-host-header localhost'",
   "worktreeDir": ".worktrees"
 }
 ```
 
 Add `humanTest.worktreeDir` to `.gitignore`. Re-running `/orchestrator:test-pr` on the same PR fast-forwards the
 worktree to the latest commit (idempotent). Tear down with `git worktree remove <path>`.
+
+### Testing on a phone (`/orchestrator:test-pr <n> --phone`)
+
+To iterate on a UI from a phone (touch gestures, small-screen layout) rather than a desktop browser, configure
+`humanTest.launchPhone` and run `/orchestrator:test-pr <n> --phone`. It prepares the worktree exactly as above but
+prints `launchPhone` instead of `launch`. `launchPhone` starts the dev server(s) **and** opens a public tunnel (e.g.
+a `cloudflared` quick tunnel) to the running app, printing a `https://<random>.trycloudflare.com` URL you open in
+the phone's own browser. The `--http-host-header localhost` flag makes the tunnel send `Host: localhost`, so a dev
+server with a strict host allow-list (e.g. Vite) accepts it with no config change.
+
+This is opt-in and attended, because the tunnel is **public** while up: anyone with the link reaches the app and
+whatever backend/API it proxies, using the credentials in the worktree's `.env`. It's ephemeral — Ctrl-C tears down
+the tunnel and the dev servers together. Don't leave it running unattended. Without `--phone`, behavior is
+unchanged; if `launchPhone` isn't configured, `--phone` falls back to printing `launch`.

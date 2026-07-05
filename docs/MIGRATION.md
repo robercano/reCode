@@ -46,10 +46,9 @@ Once installed, updating the plugin and re-stamping managed files (`.claude/work
 mainly) is the **`/orchestrator:sync`** command — see [`USAGE.md` → "Updating the
 plugin"](USAGE.md#updating-the-plugin).
 
-> **`/orchestrator:sync` is forthcoming** (packaging phase 3, issue #38), not available yet. In the meantime,
-> `/orchestrator:setup`'s scaffold step does the same job: re-run it and it will re-stamp
-> `feature-fanout.js` if its managed-version marker is behind, while leaving your `gates.json` and `CLAUDE.md`
-> untouched (they're created once, never overwritten by re-runs).
+`/orchestrator:sync` compares the version markers `/orchestrator:setup` already scaffolded against what the
+current plugin ships and re-stamps anything behind — flagging local edits instead of clobbering them — while
+leaving your `gates.json` and `CLAUDE.md` untouched (they're created once, never overwritten by re-runs).
 
 ## Verification checklist
 - [ ] The `orchestrator` plugin shows as **enabled** (`/plugin`).
