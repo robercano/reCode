@@ -65,6 +65,17 @@ args=("$@")
 # that a PR is waiting for review (a bot-authored PR otherwise has no assignee).
 # Only applies to `pr create`, and only if the caller didn't already pass
 # --assignee (or its short form -a) themselves.
+#
+# Assignment is a SEPARATE follow-up call after `pr create` succeeds, not an
+# inline `--assignee` flag on the create itself. Some bot tokens (classic PATs
+# scoped to `repo` only, no `read:org`) can create PRs fine but have the
+# assignee-resolution step rejected — if that were inline, the whole
+# `pr create` would fail and no PR would exist at all. As a follow-up, a
+# scope-rejected assignment just leaves the PR unassigned (soft failure,
+# warned on stderr) instead of losing the PR.
+has_assignee=1
+owner=""
+repo_full=""
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
   has_assignee=0
   for a in "$@"; do
@@ -82,8 +93,8 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
     if [ -z "$owner" ] && [ -n "$target_repo" ]; then
       owner="${target_repo%%/*}"
     fi
+    origin_url="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
     if [ -z "$owner" ]; then
-      origin_url="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
       case "$origin_url" in
         git@github.com:*)
           owner="${origin_url#git@github.com:}"
@@ -98,12 +109,39 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
     if [ -z "$owner" ]; then
       owner="$(GH_TOKEN="$GH_BOT_TOKEN" gh repo view --json owner --jq .owner.login 2>/dev/null || true)"
     fi
-    # Fail soft: if the owner can't be resolved, create the PR unassigned
-    # rather than erroring out.
-    if [ -n "$owner" ]; then
-      args+=(--assignee "$owner")
+    # repo_full (owner/name) is needed for the follow-up assignees API call
+    # below; reuse target_repo/origin-parsing where possible, gh repo view as
+    # a last resort.
+    repo_full="$target_repo"
+    if [ -z "$repo_full" ]; then
+      case "$origin_url" in
+        git@github.com:*) repo_full="${origin_url#git@github.com:}"; repo_full="${repo_full%.git}";;
+        https://github.com/*) repo_full="${origin_url#https://github.com/}"; repo_full="${repo_full%.git}";;
+      esac
+    fi
+    if [ -z "$repo_full" ]; then
+      repo_full="$(GH_TOKEN="$GH_BOT_TOKEN" gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
     fi
   fi
+fi
+
+if [ "$has_assignee" -eq 0 ] && [ -n "$owner" ]; then
+  # Create WITHOUT an inline --assignee (stdout captured only for the PR URL;
+  # stderr still streams live), then assign as a soft-fail follow-up.
+  if pr_url="$(GH_TOKEN="$GH_BOT_TOKEN" gh "${args[@]}")"; then
+    status=0
+  else
+    status=$?
+  fi
+  printf '%s\n' "$pr_url"
+  if [ "$status" -ne 0 ]; then exit "$status"; fi
+  pr_number="${pr_url##*/}"
+  if [ -n "$repo_full" ] && [ -n "$pr_number" ]; then
+    if ! GH_TOKEN="$GH_BOT_TOKEN" gh api -X POST "repos/$repo_full/issues/$pr_number/assignees" -f "assignees[]=$owner" >/dev/null 2>&1; then
+      echo "bot-gh.sh: warning — created $pr_url but could not assign it to '$owner' (bot token may lack read:org); PR left unassigned." >&2
+    fi
+  fi
+  exit 0
 fi
 
 GH_TOKEN="$GH_BOT_TOKEN" exec gh ${args[@]+"${args[@]}"}

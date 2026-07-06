@@ -23,6 +23,24 @@ frozen copy means you never get fixes/improvements:
 - `.claude/.claude-plugin/` — if you'd copied this too (it's this repo's own plugin manifest, not something a
   consumer needs locally).
 
+### Before you delete: check for local patches
+The list above assumes your copy of each generic file is identical to (or just staler than) what the plugin
+ships. That's not always true — a hand-copied install can accumulate real, load-bearing local fixes (e.g. a
+bot-token-scope workaround in `bot-gh.sh`, an extra retry in `notify-poll.sh`). Deleting one of those silently
+loses the fix, and it can be a while before anyone notices it's gone.
+
+Before deleting each file, diff it against the plugin's shipped copy (`${CLAUDE_PLUGIN_ROOT}/<same-relpath>`
+once the plugin is enabled, or the sibling clone's `.claude/<same-relpath>` if you're using the local-clone
+install method) rather than assuming they match. For anything that diverges:
+- **It's a generic improvement** (would help any consumer, not just this repo) — upstream it: open a PR
+  against `ai-project-orchestrator` with the fix, then delete your local copy once it's merged and the plugin
+  picks it up. No consumer-side sync step is needed for scripts/agents/commands (see "Enabling in a consuming
+  project" above) — once the fix lands upstream, everyone with the plugin enabled gets it immediately.
+- **It's genuinely project-specific** (tied to something only your repo has — a different bot account's token
+  scopes, a stack-specific quirk) — don't delete it. Keep it as a locally-named override (e.g. rename it so it
+  doesn't collide with the plugin's file, and repoint whichever command/prompt referenced it), and note in
+  `CLAUDE.md` why the override exists so a future reader doesn't "clean it up" by mistake.
+
 ## What to keep
 These are repo-specific — a plugin, by design, cannot carry them, so they stay yours regardless of the
 install method:
