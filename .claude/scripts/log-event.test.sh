@@ -104,6 +104,25 @@ check "rotation keeps the LAST 5 events (most recent), in order" node -e '
   }
 ' "$rotate_file"
 
+# Rotation boundary: writing EXACTLY EVENTS_MAX_LINES events must leave
+# exactly that many lines -- i.e. rotation must not trigger (or drop
+# anything) right at the boundary, only once the count exceeds the cap.
+boundary_file="$work/rotate-boundary.jsonl"
+for i in $(seq 1 5); do
+  EVENTS_MAX_LINES=5 CLAUDE_EVENTS_FILE="$boundary_file" bash "$log_event" \
+    --role implementer --task "b-$i" --phase implementing >/dev/null 2>&1
+done
+check "writing exactly N events with EVENTS_MAX_LINES=N leaves exactly N lines" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 5 ]' _ "$boundary_file"
+check "boundary case keeps all N events in order (no spurious drop)" node -e '
+  const fs = require("fs");
+  const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+  const tasks = lines.map((l) => JSON.parse(l).task);
+  const want = ["b-1", "b-2", "b-3", "b-4", "b-5"];
+  if (JSON.stringify(tasks) !== JSON.stringify(want)) {
+    throw new Error("got " + JSON.stringify(tasks) + " want " + JSON.stringify(want));
+  }
+' "$boundary_file"
+
 # ---------------------------------------------------------------------------
 # 4. Best-effort: a call with a weird/missing arg still exits 0.
 # ---------------------------------------------------------------------------

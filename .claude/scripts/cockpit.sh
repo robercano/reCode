@@ -248,7 +248,9 @@ function readEvents() {
     if (!trimmed) continue;
     try {
       const obj = JSON.parse(trimmed);
-      if (obj && typeof obj === "object") events.push(obj);
+      // typeof [] === "object" too, so exclude arrays explicitly -- otherwise
+      // a stray JSON-array line would produce a phantom worker row below.
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) events.push(obj);
     } catch (e) { /* skip malformed line */ }
   }
   return events;

@@ -78,11 +78,23 @@ EOF
 # Live progress fixture (issue #52): two events for the SAME (role,task) —
 # only the LATER phase ("gate-running") must win the dedup — plus a second
 # worker ("reviewer"/task 52b) in a different phase, to prove both distinct
-# workers render.
+# workers render. Also folds in, per the "tests" review lens:
+#  - a malformed JSON line (unparsable) and a blank line, which readEvents()
+#    must silently skip rather than crash the whole render;
+#  - a JSON *array* line ("[1,2,3]") -- typeof [] === "object" too, so this
+#    guards the Array.isArray() exclusion in readEvents() (a regression here
+#    would produce a phantom worker row);
+#  - a third legitimate worker ("52c") whose role contains a <script> tag and
+#    a quote, to prove the live section runs esc() on every field (a stored-
+#    XSS regression guard, mirroring the issue-title escaping check below).
 cat > "$work/fixtures/events.jsonl" <<'EOF'
 {"ts":"2026-01-01T00:00:00Z","role":"implementer","model":"sonnet","task":"52","phase":"implementing","lens":"","detail":""}
+{ this is not json
+
+[1,2,3]
 {"ts":"2026-01-01T00:05:00Z","role":"implementer","model":"sonnet","task":"52","phase":"gate-running","lens":"","detail":""}
 {"ts":"2026-01-01T00:02:00Z","role":"reviewer","model":"opus","task":"52b","phase":"reviewing","lens":"correctness","detail":""}
+{"ts":"2026-01-01T00:03:00Z","role":"<script>xss()</script>\"","model":"sonnet","task":"52c","phase":"scoped","lens":"","detail":""}
 EOF
 
 html="$work/cockpit.html"
@@ -132,6 +144,37 @@ check "reviewer/task 52b renders with role/model/phase/lens" bash -c '
   grep -qF "<code>opus</code>" "$1" &&
   grep -qF "badge warn\">reviewing</span>" "$1" &&
   grep -qF "<td>correctness</td>" "$1"
+' _ "$html"
+
+# Malformed-line tolerance (guards the readEvents() try/catch skip path): the
+# fixture above folds in an unparsable line and a blank line among otherwise
+# valid ones. Regressing this would blow up the whole dashboard on one bad
+# line, silently -- so assert BOTH the process still exits 0 (already checked
+# above, re-asserted here for intent) AND a known-good worker row from a
+# valid line still renders despite the bad lines sitting right next to it.
+check "malformed/blank JSON lines are skipped without crashing the render" [ "$rc" -eq 0 ]
+check "a known-good worker row still renders alongside malformed/blank lines" grep -qF '<td>implementer</td><td>52</td>' "$html"
+
+# Array-line guard (correctness lens): typeof [] === "object" too, so a
+# top-level JSON array line must NOT produce a phantom worker row. The
+# fixture has exactly 3 legitimate workers (52 deduped to its latest phase,
+# 52b, 52c) -- assert the live table has exactly 3 data rows, i.e. the
+# malformed/blank/array lines contributed zero phantom rows.
+check "JSON-array line produces no phantom worker row (exact row count == legitimate workers)" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="live">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("live section not found");
+  const rows = (m[0].match(/<tr><td>/g) || []).length;
+  if (rows !== 3) throw new Error("expected 3 live-worker rows, got " + rows);
+' "$html"
+
+# Live-section HTML-escaping (stored-XSS regression guard): worker 52c's
+# role contains a <script> tag and a quote -- mirror the issue-title escaping
+# check above, but for the live-progress panel, which has its own esc() calls.
+check "live-section field escaping: raw <script> absent, escaped form present" bash -c '
+  ! grep -qF "<script>xss()</script>" "$1" &&
+  grep -qF "&lt;script&gt;xss()&lt;/script&gt;&quot;" "$1"
 ' _ "$html"
 
 # ---------------------------------------------------------------------------
