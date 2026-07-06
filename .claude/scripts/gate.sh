@@ -10,6 +10,23 @@ key="${1:?usage: gate.sh <gate-name>}"
 # robust whether or not we're nested inside another git repo.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$script_dir/../.." && pwd)"
+
+# Dependency-freshness preflight (pnpm-gated: no-ops unless the repo uses pnpm).
+# pnpm copies the resolved lockfile to node_modules/.pnpm/lock.yaml on every
+# install, so a byte-diff against the working pnpm-lock.yaml is a fast, offline
+# staleness check. When they differ, node_modules is behind the lockfile (e.g. a
+# merged PR added a dependency) and TS builds fail with opaque "Cannot find
+# module" errors printed to STDOUT — leaving Stop hooks to report an unhelpful
+# "No stderr output". Surface the real cause on STDERR and abort early so the fix
+# ('pnpm install') is obvious. Projects without a root pnpm-lock.yaml skip this.
+if [ -f "$root/pnpm-lock.yaml" ]; then
+  installed_lock="$root/node_modules/.pnpm/lock.yaml"
+  if [ ! -e "$installed_lock" ] || ! cmp -s "$root/pnpm-lock.yaml" "$installed_lock"; then
+    echo "gate.sh: node_modules is out of sync with pnpm-lock.yaml — run 'pnpm install' (gate '$key' aborted)." >&2
+    exit 1
+  fi
+fi
+
 # Which adapter to read. Defaults to the project adapter; set GATES_FILE to run a
 # different one (e.g. GATES_FILE=.claude/self/gates.json for the self-host loop —
 # see .claude/self/README.md). Relative paths resolve from the repo root.
