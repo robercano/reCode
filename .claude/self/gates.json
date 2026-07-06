@@ -34,7 +34,8 @@
 
   "budget": {
     "orchestrator_model": "opus", "worker_model": "sonnet",
-    "explorer_model": "haiku", "reviewer_model": "opus",
+    "explorer_model": "haiku", "reviewer_model": "sonnet",
+    "reviewer_models": { "correctness": "opus" },
     "max_parallel_workers": 2
   },
 

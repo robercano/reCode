@@ -33,7 +33,7 @@ target_root="$(cd "$target_root" && pwd)"
 # templates/feature-fanout.js's behavior changes; scaffold.sh will then re-stamp any
 # destination whose marker is older (see issue #38, which drives re-stamping on
 # plugin upgrade).
-MANAGED_VERSION=1
+MANAGED_VERSION=2
 MARKER_PREFIX="@orchestrator-managed feature-fanout v"
 
 echo "orchestrator setup: scaffolding into $target_root"

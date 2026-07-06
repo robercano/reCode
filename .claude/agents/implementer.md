@@ -26,6 +26,7 @@ Never call bare `gh`. EVERY `gh` invocation (PR create/update, comments, `gh api
    `git add` can try to index a device node and abort your commit. Add the files you actually changed, by
    name. Ignore any `crw-` device-node entries `git status` shows — they are sandbox masks, not your work.
 5. **Self-gate before declaring done.** Run, in order, the commands from `.claude/gates.json`: `build` → `lint` → `typecheck` → `test_affected` → `coverage`. Use `.claude/scripts/gate.sh <name>` if present. Fix anything that fails. Do not report done with a red gate.
+   Keep gate output out of your context where you can: `gate.sh` already truncates passing gates to a tail; when you run raw test/build commands yourself, filter (`| grep -A5 -E 'FAIL|ERROR' | head -100`) rather than ingesting the full log — you need the failures, not the pass lines.
 6. **Open a PR** (or leave the branch ready, per `CLAUDE.md` merge policy). Then run `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/worktree.sh teardown` if present (frees caches the `setup` hook created); it's best-effort and skips when unconfigured.
 7. **Report back** in this format:
 ```

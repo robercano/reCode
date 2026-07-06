@@ -1,4 +1,4 @@
-// @orchestrator-managed feature-fanout v1
+// @orchestrator-managed feature-fanout v2
 // This file is installed and re-stamped by `/orchestrator:setup` (scaffold.sh). It is NOT
 // user-owned: re-running setup will overwrite it whenever the marker version above is older
 // than the version the installed plugin ships. Do not hand-edit if you want future setup runs
@@ -52,8 +52,11 @@ const results = await pipeline(
       `${st.prompt}\n\nBoundary: stay within module "${st.module}". Run the gates in .claude/gates.json before reporting done.`,
       { label: `impl:${st.module}`, phase: 'Implement', isolation: 'worktree' }
     )
+    // Token discipline: lenses that approve stay approved — each iteration re-reviews
+    // ONLY the lenses that rejected, so a fix doesn't re-buy the full review panel.
+    let lensesToReview = LENSES
     while (attempt < MAX_ITERS) {
-      const reviews = await parallel(LENSES.map(lens => () =>
+      const reviews = await parallel(lensesToReview.map(lens => () =>
         agent(
           `Adversarially review this change through the "${lens}" lens. Try to refute it. ` +
           `Return verdict approve|reject with concrete, actionable findings.\n\nCHANGE:\n${impl}`,
@@ -67,17 +70,20 @@ const results = await pipeline(
           } }
         )
       ))
-      const rejects = reviews.filter(Boolean).filter(r => r.verdict === 'reject')
-      if (rejects.length === 0) {
+      const rejectedLenses = lensesToReview.filter((lens, i) => reviews[i] && reviews[i].verdict === 'reject')
+      if (rejectedLenses.length === 0) {
         return { subtask: st.title, module: st.module, status: 'approved', attempts: attempt + 1, impl }
       }
       attempt++
-      log(`"${st.title}" rejected on attempt ${attempt} (${rejects.length}/${LENSES.length} lenses). Iterating.`)
-      const reasons = rejects.flatMap(r => r.findings).map(f => `- ${f}`).join('\n')
+      log(`"${st.title}" rejected on attempt ${attempt} (${rejectedLenses.length}/${lensesToReview.length} lenses). Iterating.`)
+      const reasons = reviews
+        .filter(r => r && r.verdict === 'reject')
+        .flatMap(r => r.findings).map(f => `- ${f}`).join('\n')
       impl = await agent(
         `Reviewers rejected your change to "${st.module}". Fix every finding, re-run the gates, report again:\n${reasons}`,
         { label: `fix:${st.module}`, phase: 'Implement', isolation: 'worktree' }
       )
+      lensesToReview = rejectedLenses
     }
     return { subtask: st.title, module: st.module, status: 'needs-human', attempts: attempt, impl }
   }
