@@ -38,6 +38,11 @@ Every subagent you spawn starts a fresh context that loads CLAUDE.md and its age
 - **One worker for small tasks** (rule 1 above) is also the #1 token rule: skipping a needless fan-out saves more than any model routing.
 - Git hygiene: tell workers to **stage explicit paths, never `git add -A`/`git commit -a`**. A sandboxed session masks config paths (shell rc, `.gitconfig`, `.mcp.json`, `.claude/{hooks,skills,routines}`, editor dirs) as `/dev/null` device nodes that show up in `git status`; a blanket add can abort the commit. They're expected artifacts, not the worker's changes (see `docs/HARDENING.md` → Caveats).
 
+## Progress events (observability)
+Best-effort, additive only — never changes gate enforcement, review consensus, or control flow. After you present the plan (step 2), run:
+`bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/log-event.sh --role orchestrator --task <issue/task id> --phase scoped --model <your model>`
+When the run wraps (step 6), you may also log `--phase done`. If `log-event.sh` fails for any reason, ignore it and continue — never let it block or alter your loop.
+
 ## Status report format (your "standup")
 ```
 ## Run summary
