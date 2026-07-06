@@ -60,12 +60,12 @@ its own `.claude/settings.json`:
 marketplace named `ai-project-orchestrator`; `enabledPlugins` then enables the `orchestrator`
 plugin from it, addressed as `<plugin-name>@<marketplace-name>`.
 
-**Known limitation:** Claude Code's documented `"source": "github"` marketplace source resolves
-`marketplace.json` at the repo **root** (`.claude-plugin/marketplace.json`), with no documented
-field to point it at a subdirectory. This repo's `marketplace.json` instead lives at
-`.claude/.claude-plugin/marketplace.json`, matching the plugin-root-is-`.claude/` layout described
-above. Until Claude Code supports a subdirectory marketplace source (or this repo additionally
-publishes a repo-root alias), the snippet above is the intended shape but may require consumers to
-add the marketplace from a local clone instead (e.g. `/plugin marketplace add
-<path-to-clone>/.claude`) rather than the bare GitHub shorthand. Revisit this note if/when
-subdirectory marketplace sources land upstream.
+**Resolved via a repo-root alias:** Claude Code's `"source": "github"` marketplace source resolves
+`marketplace.json` at the repo **root** (`.claude-plugin/marketplace.json`), not a subdirectory.
+Since this repo's plugin root is `.claude/`, there's a second, thin manifest at the actual repo root
+(`.claude-plugin/marketplace.json`, sibling to this one) whose single plugin entry points back down
+via a relative path — `"source": "./.claude"` — which the marketplace-source docs confirm is
+supported for same-repo plugins. That root file is what makes the bare GitHub snippet above resolve;
+see its own `.claude-plugin/README.md` (at repo root) for the two-manifest rationale. It carries no
+`version`/`author` so it never needs to be kept in sync with this file — it just points at this
+directory's payload.

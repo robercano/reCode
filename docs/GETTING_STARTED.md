@@ -16,24 +16,10 @@ Budget ~20 minutes.
 - Your project's actual build/test tooling installed (so the gate commands work).
 
 ## Step 1 — Install the `orchestrator` plugin
-This template ships as a Claude Code plugin named `orchestrator` (plugin root `.claude/`), with a
-`marketplace.json` alongside it. Two ways to add it — lead with the one that works today:
+This template ships as a Claude Code plugin named `orchestrator` (plugin root `.claude/`). Two ways to add it:
 
-**The reliable method today — a local clone.** Claude Code's `/plugin marketplace add` accepts a plain
-filesystem path, and this repo's marketplace root is `.claude/`:
-```bash
-git clone https://github.com/robercano/ai-project-orchestrator.git ../ai-project-orchestrator
-```
-Then, in Claude Code, inside **your own project**:
-```
-/plugin marketplace add ../ai-project-orchestrator/.claude
-/plugin install orchestrator@ai-project-orchestrator
-```
-(`/plugin` alone opens an interactive picker if you'd rather browse marketplaces/plugins than type the
-commands above.)
-
-**The target flow — a GitHub source (has a known gap today).** The eventual "no local clone" install is to
-declare the marketplace straight from GitHub in your project's `.claude/settings.json`:
+**GitHub source (no local clone needed).** Declare the marketplace straight from GitHub in your project's
+`.claude/settings.json`:
 ```json
 {
   "extraKnownMarketplaces": {
@@ -44,12 +30,23 @@ declare the marketplace straight from GitHub in your project's `.claude/settings
   "enabledPlugins": { "orchestrator@ai-project-orchestrator": true }
 }
 ```
-> **Known limitation.** Claude Code's `"source": "github"` marketplace source resolves `marketplace.json` at
-> the repo **root** (`.claude-plugin/marketplace.json`). This repo's manifest instead lives at
-> `.claude/.claude-plugin/marketplace.json`, because the plugin root is `.claude/`, not the repo root — so the
-> bare GitHub shorthand above may not resolve for you yet. Use the local-clone method until this repo ships a
-> dedicated, standalone marketplace repo at its root (a deferred follow-up — it can't be created from inside
-> this repo). See `.claude/.claude-plugin/README.md` (once cloned) for the up-to-date detail on this gap.
+This works because a thin `.claude-plugin/marketplace.json` at the repo **root** (where Claude Code's
+`"source": "github"` resolution looks) points at the actual plugin payload under `.claude/` via a relative
+path (`"source": "./.claude"`) — see `.claude-plugin/README.md` for why there are two `marketplace.json`
+files in this repo.
+
+**Local clone (alternative, e.g. if you want a pinned/offline copy).** Claude Code's `/plugin marketplace add`
+also accepts a plain filesystem path, using `.claude/` directly as the marketplace root:
+```bash
+git clone https://github.com/robercano/ai-project-orchestrator.git ../ai-project-orchestrator
+```
+Then, in Claude Code, inside **your own project**:
+```
+/plugin marketplace add ../ai-project-orchestrator/.claude
+/plugin install orchestrator@ai-project-orchestrator
+```
+(`/plugin` alone opens an interactive picker if you'd rather browse marketplaces/plugins than type the
+commands above.)
 
 ## Step 2 — Onboard: run `/orchestrator:setup`
 With the plugin enabled, run:
