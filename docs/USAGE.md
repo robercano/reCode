@@ -177,6 +177,14 @@ ships and re-stamps anything behind — flagging local edits instead of clobberi
 re-running the whole interview, and never touches your own `gates.json`/`CLAUDE.md` (those are created once
 and left alone on every re-run).
 
+> **Maintainer note: bump `plugin.json`'s `version` on every real change.** `/plugin marketplace update` only
+> re-fetches plugin content when the plugin's version string actually changes (`.claude/.claude-plugin/plugin.json`
+> and, for the local-clone method, `.claude/.claude-plugin/marketplace.json`'s matching entry). Merging a fix to
+> `main` without bumping that version means every existing installer's cached copy — at
+> `~/.claude/plugins/cache/ai-project-orchestrator/orchestrator/<version>/` — silently never updates, even
+> after `/plugin marketplace update`. Caught 2026-07-06: a `hooks/hooks.json` schema fix merged to `main` but
+> didn't reach an already-installed consumer until the version string was bumped too.
+
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
   at PR time. Cleanest/auditable.
