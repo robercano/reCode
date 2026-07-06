@@ -55,9 +55,13 @@
     "orchestrator_model": "opus",
     "worker_model": "sonnet",
     "explorer_model": "haiku",
-    "reviewer_model": "opus",
-    "max_parallel_workers": 3,
-    "_note": "Opus to coordinate/review, Sonnet to build, Haiku to explore. Lower max_parallel_workers if review/merge is your bottleneck."
+    "reviewer_model": "sonnet",
+    "reviewer_models": {
+      "correctness": "opus",
+      "security": "opus"
+    },
+    "max_parallel_workers": 2,
+    "_note": "Opus to coordinate, Sonnet to build, Haiku to explore. Reviews route per lens via reviewer_models (fallback: reviewer_model) — keep Opus for the lenses where misses are expensive (correctness, security), Sonnet for the rest. Every +1 max_parallel_workers multiplies token burn AND your review load; raise it only when review/merge is not the bottleneck."
   },
 
   "merge": {
