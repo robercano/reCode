@@ -56,6 +56,13 @@ only the adapter changes.
 - Token cost scales with agent count — see [`TOKEN_BUDGET.md`](TOKEN_BUDGET.md).
 - Remove worktrees on merge (`git worktree list` / `git worktree remove`).
 
+## Cockpit (read-only dashboard)
+`.claude/scripts/cockpit.sh` regenerates a static local HTML snapshot of this topology in practice: open
+issues by module with their blocking graph, open PR review/CI state, per-role model/skill routing, and active
+worker worktrees. Run it, then open `.claude/state/cockpit.html`. No server, no new dependency — see the
+script header for usage (`--fixtures`, `GATES_FILE` override) and `docs/COCKPIT_EVALUATION.md` for the
+design rationale.
+
 ### Concurrent config-write safety
 This template fans out to **parallel worktree-isolated workers**, and upstream
 [anthropics/claude-code#29217](https://github.com/anthropics/claude-code/issues/29217) reported that
