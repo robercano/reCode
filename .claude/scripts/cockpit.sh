@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# cockpit.sh — Phase 1 read-only dashboard (issue #51): a single static HTML
+# cockpit.sh — Phase 1 read-only dashboard (issue #51), extended in Phase 2
+# (issue #52) with a live per-worker progress panel: a single static HTML
 # snapshot of open issues (grouped by module label, with a parsed blocking
 # graph), open PRs (review + CI state), model/skill routing (agent frontmatter
-# + adapter config), and active worker worktrees. Regenerated on demand — no
-# persistent server, no watch daemon (re-run this script, or wrap it in
+# + adapter config), active worker worktrees, and — from the local progress
+# event log (see log-event.sh) — the CURRENT phase of every in-flight worker
+# (scoped/implementing/gate-running/reviewing/done). Regenerated on demand —
+# no persistent server, no watch daemon (re-run this script, or wrap it in
 # `watch -n 30 bash .claude/scripts/cockpit.sh`).
 #
 # Usage:
@@ -18,6 +21,9 @@
 # --fixtures <dir>: read <dir>/issues.json and <dir>/prs.json (arrays shaped
 # like `gh issue|pr list --json ...` output) instead of calling gh at all.
 # This is the offline seam cockpit.test.sh uses — no live gh/network in tests.
+# In this mode, the live-progress panel also reads <dir>/events.jsonl (if
+# present; missing = "no active workers") instead of the real event log, so
+# tests never touch .claude/state/.
 #
 # Degrades gracefully: if a bot-gh.sh call fails (no network / no gh auth),
 # that section renders an "unavailable (gh/network)" placeholder instead of
@@ -180,6 +186,18 @@ node -e '
   fs.writeFileSync(process.argv[3], JSON.stringify(out));
 ' "$gates" "$gates_ref" "$tmpdir/adapter.json"
 
+# ---- live worker progress events (issue #52) -------------------------------
+# Never reads the real event log in --fixtures mode (offline seam for tests).
+# Otherwise honors CLAUDE_EVENTS_FILE for parity with log-event.sh, defaulting
+# to the same gitignored .claude/state/events.jsonl. Missing/empty log is not
+# an error — it just means no workers are currently in flight.
+if [ -n "$fixtures" ]; then
+  events_file="$fixtures/events.jsonl"
+else
+  events_file="${CLAUDE_EVENTS_FILE:-$root/.claude/state/events.jsonl}"
+fi
+if [ -f "$events_file" ]; then cp "$events_file" "$tmpdir/events.jsonl"; else : >"$tmpdir/events.jsonl"; fi
+
 # ---- active worktrees -----------------------------------------------------------
 node -e '
   const fs = require("fs");
@@ -219,6 +237,24 @@ const worktrees = readJson("worktrees.json", []);
 const issuesUnavailable = process.env.COCKPIT_ISSUES_UNAVAILABLE === "1";
 const prsUnavailable = process.env.COCKPIT_PRS_UNAVAILABLE === "1";
 
+// Live progress events (issue #52): JSONL, one object per line. Tolerate
+// blank/malformed lines — skip them, never crash the whole render.
+function readEvents() {
+  let text = "";
+  try { text = fs.readFileSync(path.join(tmpdir, "events.jsonl"), "utf8"); } catch (e) { return []; }
+  const events = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj === "object") events.push(obj);
+    } catch (e) { /* skip malformed line */ }
+  }
+  return events;
+}
+const events = readEvents();
+
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;")
@@ -254,6 +290,47 @@ function refList(nums) {
 
 function moduleLabelsOf(issue) {
   return (issue.labels || []).map((l) => l.name).filter((n) => typeof n === "string" && n.startsWith("module:"));
+}
+
+// ---- Live worker progress section (issue #52) -----------------------------
+// Derive the CURRENT state per worker keyed by (role, task): keep the LATEST
+// event (by file order, i.e. append order) per key. No event log, or an
+// empty one, renders a muted "no active workers" placeholder — never a
+// crash, matching Phase 1's degrade contract.
+function phaseBadge(phase) {
+  switch (phase) {
+    case "done": return { cls: "good" };
+    case "gate-running":
+    case "reviewing":
+    case "implementing":
+    case "scoped": return { cls: "warn" };
+    default: return { cls: "muted" };
+  }
+}
+function renderLiveProgress() {
+  const latest = new Map(); // "role task" -> event
+  for (const ev of events) {
+    const role = ev.role != null ? String(ev.role) : "";
+    const task = ev.task != null ? String(ev.task) : "";
+    const key = role + " " + task;
+    latest.set(key, ev); // later lines overwrite earlier ones for the same key
+  }
+  const workers = [...latest.values()];
+  let html = `<section id="live"><h2>Live worker progress</h2>`;
+  if (workers.length === 0) {
+    html += `<p class="muted">no active workers</p>`;
+  } else {
+    html += `<table class="routing"><thead><tr><th>Role</th><th>Task</th><th>Model</th><th>Phase</th><th>Lens</th><th>Updated</th></tr></thead><tbody>`;
+    for (const w of workers) {
+      const badge = phaseBadge(w.phase);
+      html += `<tr><td>${esc(w.role)}</td><td>${esc(w.task)}</td><td><code>${esc(w.model || "(none)")}</code></td>`;
+      html += `<td><span class="badge ${badge.cls}">${esc(w.phase || "(unknown)")}</span></td>`;
+      html += `<td>${esc(w.lens || "")}</td><td>${esc(w.ts)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+  html += `</section>`;
+  return html;
 }
 
 // ---- Issues section: group by module label, parse blocking graph per issue ----
@@ -413,7 +490,8 @@ const html = `<!doctype html>
 </head>
 <body>
 <h1>Cockpit</h1>
-<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) &middot; re-run <code>cockpit.sh</code> to refresh</p>
+<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) + Phase 2 live progress (issue #52) &middot; re-run <code>cockpit.sh</code> to refresh</p>
+${renderLiveProgress()}
 ${renderIssues()}
 ${renderPRs()}
 ${renderRouting()}
