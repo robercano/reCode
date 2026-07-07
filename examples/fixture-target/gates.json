@@ -1,0 +1,26 @@
+{
+  "_README": "Adapter for the SMOKE-TEST FIXTURE TARGET (issue #64, Phase 2 of #11). A minimal consumer-shaped repo the smoke harness (.claude/self/smoke-fanout.sh) stages into a temp git repo and drives end-to-end: worktree -> canned diff -> these gates via the real gate.sh -> merge. Gates are node-only so they run in a bare environment.",
+
+  "project": { "name": "fixture-target", "language": "js", "packageManager": "none" },
+
+  "modules": [
+    { "name": "fixture-core", "path": "src", "description": "The fixture's only module. Smoke 'implementer' diffs must stay inside this path — the harness asserts it." }
+  ],
+
+  "gates": {
+    "install": "",
+    "build": "node --check src/*.js",
+    "lint": "node --check src/*.js test/*.js",
+    "typecheck": "",
+    "test": "node --test test/*.test.js",
+    "test_affected": "node --test test/*.test.js",
+    "coverage": "",
+    "coverage_threshold": 0,
+    "e2e": "",
+    "security": ""
+  },
+
+  "worktree": { "setup": "", "teardown": "" },
+
+  "merge": { "policy": "pr-per-agent", "baseBranch": "main" }
+}

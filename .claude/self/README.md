@@ -11,10 +11,17 @@ the tooling reads it only when explicitly pointed at it.
 ## Files
 - **`gates.json`** — the real adapter for THIS repo: modules (`docs`, `harness`→`.claude`, `examples`, `ci`)
   and node/bash-only gate commands, so they run with no extra linters installed.
-- **`checks.sh`** — implements `build` / `lint` / `test`:
+- **`checks.sh`** — implements the static checks:
   - `build` — every JSON config parses and each adapter (`gates.json` + `self/gates.json`) is well-shaped.
   - `lint` — `bash -n` every shell script + `node --check` every workflow.
-  - `test` — `build` + `lint` smoke (validates the harness end-to-end on itself).
+  - `test` — `build` + `lint` smoke (validates the harness statically on itself).
+- **`smoke-fanout.sh`** + **`smoke/*.patch`** — Phase 2 (issue #64): a deterministic end-to-end smoke of
+  the fan-out scaffold against `examples/fixture-target` — stages a consumer-shaped temp repo (fixture
+  adapter + the real `gate.sh`), plays a *recorded implementer* (worktree → canned diff → module-boundary
+  check → gates → merge), and proves the failure path (a broken diff fails the gate non-zero). No agents,
+  no tokens, no network: it validates the scaffold **on the fixture, not on itself** (no bootstrap
+  regress). Wired into the self `test` gate, so it runs in the `self / test` CI job on every PR;
+  `test_affected` stays static-only (Stop-hook fast path).
 
 ## Running gates against the self-adapter
 `gate.sh` honors a `GATES_FILE` env override (defaults to `.claude/gates.json`):

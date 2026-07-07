@@ -1,0 +1,8 @@
+diff --git a/src/broken.js b/src/broken.js
+new file mode 100644
+--- /dev/null
++++ b/src/broken.js
+@@ -0,0 +1,3 @@
++'use strict'
++// deliberate syntax error (unclosed paren+brace): the build gate MUST fail on this
++function broken( {
