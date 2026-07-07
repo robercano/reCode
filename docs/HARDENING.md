@@ -194,6 +194,38 @@ Starting point — adapt the lists to your stack, then drop into `.claude/settin
 > (e.g. a git op against a repo outside the sandbox root). Network access (registry, GitHub) is a
 > separate axis — see `sandbox.network.allowedDomains` in Step 3.
 
+> **Git config/hook writes are denied by default — and you can't re-enable them in-sandbox. Use a real
+> terminal.** The sandbox lets `git commit` update refs and the index but keeps `.git/config` **and**
+> `.git/hooks/` writes denied (see the [sandbox docs](https://code.claude.com/docs/en/sandboxing):
+> *"Writes to `hooks/` and `config` inside that directory remain denied"*). That's on purpose — git
+> config and hooks are an **arbitrary-code-execution surface** (`core.pager`, `core.fsmonitor`,
+> `core.hooksPath`, `alias.* = !cmd`, `filter.*.clean/smudge`, a committed `pre-commit` hook…), any of
+> which fires the next time git runs. So the mask is *why* `git config --local`, `git remote add`, and
+> upstream tracking fail under strict mode while ordinary `git commit`/`diff`/`log` work. It's enforced
+> as a **`/dev/null` bind-mount over `.git/config.lock`**: git creates that lockfile with
+> `O_CREAT|O_EXCL` before renaming it over `config`, and the device node already occupying the path makes
+> the exclusive-create fail — hence `error: could not lock config file .git/config: File exists`. It's
+> also the phantom `crw-` `config.lock` you see in `git status` (see Caveats).
+>
+> **`sandbox.filesystem.allowWrite` does *not* lift this** — verified 2026-07-07: with
+> `allowWrite: [".git/config", ".git/config.lock", ".git/worktrees"]` set and Claude Code restarted, the
+> `/dev/null` mask on `.git/config.lock` persisted and `git config --local` still failed with `File
+> exists`. The mask is applied at the **mount layer** as a built-in git protection; `allowWrite` only
+> adjusts the **permission layer**, so it can't dislodge the bind-mount. Don't add these paths to
+> `allowWrite` expecting config writes to work — they won't.
+>
+> The only setting that removes the mask is `excludedCommands: ["git"]`, and you should **not** use it:
+> that runs git *and every subprocess it spawns* fully **unsandboxed**, so a poisoned pager/hook/alias
+> executes with network, credential-dir, and host-filesystem access — you've handed the ACE surface a way
+> out (and `excludedCommands` has a [write/unlink bug, #39078](https://github.com/anthropics/claude-code/issues/39078)
+> on top). Keeping git sandboxed is the whole point; the config mask is a feature, not a bug.
+>
+> **So when you genuinely need a git config/hook write** (`git config`, `git remote add`, setting
+> upstreams, installing a hook), run it in a **real terminal outside Claude Code** — the mask exists only
+> inside the sandbox, so the same command works normally there. This is the same rule as `git config
+> --global` / `~/.gitconfig` edits (see Caveats). Note `git commit`, `git worktree add` (basic), and ref
+> updates are *not* affected — those write refs/index/HEAD, which the sandbox allows.
+
 ---
 
 ## Step 2 — OS-level isolation
@@ -351,8 +383,12 @@ agent operates *inside*, not one it configures.
   editor dirs, `.mcp.json`, and Claude's own `.claude/{hooks,skills,routines,launch.json}`). In a
   sandboxed view these appear as **character-device files** (`ls -l` shows `crw-rw-rw- … 1, 3`), which
   `git status` reports as untracked/modified even though they aren't real project files. This is expected,
-  not corruption. Two consequences: (1) **never `git add -A` / `git commit -a`** — git can't index a
-  device node and the commit may abort; stage explicit paths instead (the agent instructions enforce this).
+  not corruption. (The `.git/config.lock` device is the same thing — a mask, not a stale lock; there's no
+  lock to remove, and `allowWrite` can't dislodge it. If you need git's config writes to land, run them in
+  a real terminal — see the git-config note in the strict-mode section above.) Two consequences: (1)
+  **never `git add -A` / `git commit -a`** — git
+  can't index a device node and the commit may abort; stage explicit paths instead (the agent instructions
+  enforce this).
   (2) The unambiguous personal dotfiles are gitignored so they don't surface; `.mcp.json`/`.gitmodules`/
   `.claude/*` are deliberately *not* ignored (they can be real), so rely on explicit staging there.
 - **Open PRs gate loop advancement.** A typical loop won't start a new ticket while a PR is open —
