@@ -108,6 +108,34 @@ def _has_device_masks():
     return False
 
 
+def _sandbox_enabled():
+    """True if the Bash sandbox is enabled for this session.
+
+    The PreToolUse hook runs *outside* the sandbox, so it cannot see the
+    /dev/null device-node masks — they exist only inside the per-command bwrap
+    namespace, and os.stat here reports the masked paths as absent. So instead of
+    detecting the symptom (masks), detect the cause: an enabled sandbox. When it
+    is on, a blanket `git add` run as a sandboxed Bash command will hit the masks
+    and abort, so we block preemptively. When it is off (non-hardened consumers),
+    this returns False and the guard is a no-op.
+    """
+    home = os.path.expanduser("~")
+    pdir = os.environ.get("CLAUDE_PROJECT_DIR", ".")
+    for path in (
+        os.path.join(pdir, ".claude", "settings.local.json"),
+        os.path.join(pdir, ".claude", "settings.json"),
+        os.path.join(home, ".claude", "settings.json"),
+    ):
+        try:
+            with open(path) as f:
+                cfg = json.load(f)
+        except Exception:
+            continue
+        if (cfg.get("sandbox") or {}).get("enabled") is True:
+            return True
+    return False
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -120,7 +148,9 @@ def main():
         return 0
     if not _is_blanket(cmd):
         return 0
-    if not _has_device_masks():
+    # Fire when the sandbox is active (its masks will abort the blanket add) or,
+    # should a future Claude Code run hooks sandboxed, when masks are visible.
+    if not (_sandbox_enabled() or _has_device_masks()):
         return 0
 
     sys.stderr.write(

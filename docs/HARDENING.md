@@ -389,7 +389,9 @@ agent operates *inside*, not one it configures.
   **never `git add -A` / `git commit -a`** — git
   can't index a device node and the commit may abort; stage explicit paths instead. This is enforced by
   the agent prompts **and** a plugin `PreToolUse` hook (`.claude/scripts/guard-git-add.py`) that blocks
-  blanket adds/commits whenever device-node masks are present (a no-op outside the sandbox).
+  blanket `git add -A/./--all` and `git commit -a`. Note the hook runs *outside* the sandbox, so it can't
+  see the `/dev/null` masks directly (`os.stat` reports them absent); it keys off `sandbox.enabled` in
+  settings instead — active only when the sandbox is on, a no-op for non-hardened repos.
   (2) The unambiguous personal dotfiles are gitignored so they don't surface; `.mcp.json`/`.gitmodules`/
   `.claude/*` are deliberately *not* ignored (they can be real), so rely on explicit staging there.
 - **Open PRs gate loop advancement.** A typical loop won't start a new ticket while a PR is open —
