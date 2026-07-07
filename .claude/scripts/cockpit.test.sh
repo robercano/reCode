@@ -422,6 +422,30 @@ check "worker-inspector degrades gracefully: no matching worktree returns found:
   if (Array.isArray(got.timeline) && got.timeline.length !== 0) throw new Error("expected empty timeline for an unknown worker");
 ' "$resp_missing"
 
+# Crash-fix regression (issue #70 correctness review, BLOCKING): a malformed
+# percent-escape used to reach decodeURIComponent() OUTSIDE
+# handleWorkerInspector's try/catch and throw an uncaught URIError, killing
+# the whole node process (no process.on("uncaughtException") handler
+# existed, or was meant to). Assert the endpoint now responds 400 instead of
+# dropping the connection, AND that the server is still alive/serving
+# afterward -- that second assertion is what actually proves the crash is
+# fixed, since a dead server would also fail every check after it.
+resp_malformed="$(curl -s -o - -w '%{http_code}' "http://127.0.0.1:$insp_port/api/worker/%/1" 2>/dev/null)"
+malformed_code="${resp_malformed: -3}"
+check "worker-inspector: malformed percent-escape (%2F.../1) returns 400, not a dropped connection" [ "$malformed_code" = "400" ]
+
+# Path-traversal / separator-injection hardening (both reviewers flagged):
+# `task` is interpolated into path.join(...) and a RegExp scan, so a decoded
+# value containing "/" or ".." must be rejected up front rather than reaching
+# findWorktree().
+resp_traversal="$(curl -s -o - -w '%{http_code}' "http://127.0.0.1:$insp_port/api/worker/implementer/..%2f.." 2>/dev/null)"
+traversal_code="${resp_traversal: -3}"
+check "worker-inspector: task containing '..' + encoded separator (traversal attempt) returns 400" [ "$traversal_code" = "400" ]
+
+resp_after_attack="$(curl -s -o - -w '%{http_code}' "http://127.0.0.1:$insp_port/api/worker/implementer/70a" 2>/dev/null)"
+after_attack_code="${resp_after_attack: -3}"
+check "worker-inspector: server still serves a valid request after malformed/traversal attempts (proves no crash)" [ "$after_attack_code" = "200" ]
+
 kill "$server_pid" >/dev/null 2>&1 || true
 wait "$server_pid" 2>/dev/null || true
 server_pid=""

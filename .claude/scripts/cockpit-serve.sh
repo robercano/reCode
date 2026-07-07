@@ -620,7 +620,30 @@ function gatherForensics(wtPath) {
   return result;
 }
 
-function handleWorkerInspector(req, res, role, task) {
+// Rejects role/task values that could escape their intended slot: a path
+// separator or ".." would let `task` reach outside WORKTREES_ROOT/.claude/worktrees/
+// in findWorktree()'s path.join(), and a NUL would truncate a C-string arg.
+// All git calls already use execFileSync with arg arrays (no shell), so this
+// is defense-in-depth, not the only guard -- but it closes the traversal note.
+function isUnsafeIdentifier(s) {
+  return /[/\\]|\.\.|\x00/.test(s);
+}
+
+function handleWorkerInspector(req, res, rawRole, rawTask) {
+  let role, task;
+  try {
+    role = decodeURIComponent(rawRole);
+    task = decodeURIComponent(rawTask);
+  } catch (e) {
+    res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "malformed URI component in worker path" }));
+    return;
+  }
+  if (isUnsafeIdentifier(role) || isUnsafeIdentifier(task)) {
+    res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "role/task must not contain path separators, \"..\", or NUL" }));
+    return;
+  }
   try {
     const allEvents = readEventsAll();
     const matching = allEvents.filter((ev) => {
@@ -691,7 +714,7 @@ const server = http.createServer((req, res) => {
   if (url === "/api/refresh") return handleRefresh(req, res);
   const workerMatch = url.match(/^\/api\/worker\/([^/]+)\/([^/]+)$/);
   if (workerMatch) {
-    return handleWorkerInspector(req, res, decodeURIComponent(workerMatch[1]), decodeURIComponent(workerMatch[2]));
+    return handleWorkerInspector(req, res, workerMatch[1], workerMatch[2]);
   }
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("not found");
