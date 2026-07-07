@@ -1,27 +1,52 @@
 #!/usr/bin/env bash
 # cockpit.test.sh — offline smoke test for cockpit.sh (issue #51, extended for
-# Phase 2 live progress in issue #52).
+# Phase 2 live progress in issue #52, and Phase 3a serve/theme/filter in
+# issue #69).
 #
 # Runs the generator against controlled FIXTURE issue/PR/events JSON (never
 # live gh/network, and never the real event log — see cockpit.sh's
 # --fixtures mode), then asserts the produced HTML contains every required
 # section (issues-by-module with blocking relationships, PRs with review/CI
 # badges, a routing table with a real `model:` value, a worktrees section,
-# a live-progress panel deduped to each worker's latest phase) and that the
-# blocking-relationship parser (`cockpit.sh --parse-blocking`) produces the
-# expected edges for a known fixture body. Also exercises the "gh/network
-# unavailable" degrade path via COCKPIT_GH_BIN, entirely offline (no real gh
-# call, no .env).
+# a live-progress panel deduped to each worker's latest phase, the default
+# dark-theme marker) and that the blocking-relationship parser
+# (`cockpit.sh --parse-blocking`) produces the expected edges for a known
+# fixture body. Also exercises the "gh/network unavailable" degrade path via
+# COCKPIT_GH_BIN, entirely offline (no real gh call, no .env), and a serve-mode
+# smoke case (cockpit-serve.sh) against the SAME fixtures, over 127.0.0.1 only
+# — no real network/gh either way.
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/cockpit.test.sh
 set -uo pipefail
 
+# Isolate from the CALLER's environment: this test is now wired into
+# .claude/self/checks.sh's `test` case, which itself typically runs under
+# `GATES_FILE=.claude/self/gates.json` (the self-host loop). Since env vars
+# set before a command propagate to every child process it spawns, an
+# ambient GATES_FILE would silently redirect the DEFAULT-adapter assertions
+# below (section 2) onto the self-adapter. Section 3 sets GATES_FILE
+# explicitly where it actually wants the override; everywhere else must see
+# the default (.claude/gates.json).
+unset GATES_FILE
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cockpit="$script_dir/cockpit.sh"
+cockpit_serve="$script_dir/cockpit-serve.sh"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/cockpit-test.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+# server_pid is set once the serve-mode smoke case (section 5, below) starts
+# cockpit-serve.sh in the background -- declared here so the SAME EXIT trap
+# cleans it up no matter where in the script a later assertion fails.
+server_pid=""
+cleanup() {
+  if [ -n "$server_pid" ]; then
+    kill "$server_pid" >/dev/null 2>&1 || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
 
 fail=0
 ok=0
@@ -177,6 +202,12 @@ check "live-section field escaping: raw <script> absent, escaped form present" b
   grep -qF "&lt;script&gt;xss()&lt;/script&gt;&quot;" "$1"
 ' _ "$html"
 
+# Dark theme by default (issue #69): stable marker a consumer/test can grep
+# for, plus the client-side module-filter hook (data-module on issue <li>s).
+check "dark theme marker present by default" grep -qF 'data-theme="dark"' "$html"
+check "theme-toggle button present" grep -q 'id="theme-toggle"' "$html"
+check "issue rows carry data-module for the client-side filter" grep -q 'data-module="module:harness"' "$html"
+
 # ---------------------------------------------------------------------------
 # 3. GATES_FILE override is honored (self-host adapter), still with fixtures
 #    (no gh/network either way).
@@ -206,6 +237,61 @@ check "issues section shows unavailable placeholder" grep -q '<section id="issue
 check "PRs section shows unavailable placeholder" grep -q '<section id="prs"><h2>Open PRs</h2><p class="unavailable">unavailable (gh/network)</p>' "$html_unavail"
 check "routing/worktrees sections still render (no crash) despite gh failure" bash -c 'grep -q "routing" "$1" && grep -q "worktrees" "$1"' _ "$html_unavail"
 check "missing events file renders 'no active workers' placeholder" grep -q '<section id="live"><h2>Live worker progress</h2><p class="muted">no active workers</p>' "$html_unavail"
+
+# ---------------------------------------------------------------------------
+# 5. Serve mode (cockpit-serve.sh, issue #69): dashboard over HTTP + SSE live
+#    updates, entirely offline against the SAME fixtures used above (127.0.0.1
+#    only, no gh, no real network). server_pid + the EXIT trap declared near
+#    the top of this file guarantee the port/process are reclaimed even if an
+#    assertion below fails.
+# ---------------------------------------------------------------------------
+port="$(node -e '
+  const s = require("net").createServer();
+  s.listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });
+')"
+
+serve_log="$work/serve.log"
+: > "$serve_log"
+bash "$cockpit_serve" "$port" --fixtures "$work/fixtures" >"$serve_log" 2>&1 &
+server_pid=$!
+
+ready=0
+for _ in $(seq 1 50); do
+  grep -q "cockpit serving" "$serve_log" 2>/dev/null && { ready=1; break; }
+  kill -0 "$server_pid" 2>/dev/null || break # server died early -- stop polling
+  sleep 0.2
+done
+check "cockpit-serve.sh prints a startup line within the readiness timeout" [ "$ready" -eq 1 ]
+
+resp="$(curl -s -o - -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null)"
+serve_code="${resp: -3}"
+serve_body="${resp%???}"
+check "GET / returns HTTP 200" [ "$serve_code" = "200" ]
+check "GET / serves the dashboard (issues section present)" bash -c 'printf "%s" "$1" | grep -qF '"'"'<section id="issues"'"'"'' _ "$serve_body"
+check "GET / carries the dark-theme marker" bash -c 'printf "%s" "$1" | grep -qF '"'"'data-theme="dark"'"'"'' _ "$serve_body"
+check "GET / injects the SSE client script (EventSource)" bash -c 'printf "%s" "$1" | grep -q "EventSource"' _ "$serve_body"
+
+# Append a fresh event line to the SAME fixtures events.jsonl the server is
+# watching, then assert an /events subscriber sees it arrive within a few
+# seconds (fs.watch + poll fallback, see cockpit-serve.sh).
+printf '{"ts":"2026-01-01T00:10:00Z","role":"implementer","model":"sonnet","task":"69","phase":"implementing","lens":"","detail":""}\n' >>"$work/fixtures/events.jsonl"
+sse_out="$work/sse.out"
+: > "$sse_out"
+timeout 6 curl -sN "http://127.0.0.1:$port/events" >"$sse_out" 2>/dev/null &
+sse_pid=$!
+deadline=$((SECONDS + 5))
+sse_seen=0
+while [ "$SECONDS" -lt "$deadline" ]; do
+  grep -q '"task":"69"' "$sse_out" 2>/dev/null && { sse_seen=1; break; }
+  sleep 0.2
+done
+kill "$sse_pid" >/dev/null 2>&1 || true
+wait "$sse_pid" 2>/dev/null || true
+check "SSE /events delivers the newly appended events.jsonl line within the timeout" [ "$sse_seen" -eq 1 ]
+
+kill "$server_pid" >/dev/null 2>&1 || true
+wait "$server_pid" 2>/dev/null || true
+server_pid=""
 
 echo ""
 if [ "$fail" -eq 0 ]; then

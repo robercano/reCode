@@ -5,7 +5,11 @@
 #
 #   build → every JSON config parses and each adapter has the required shape
 #   lint  → `bash -n` every shell script + `node --check` every workflow
-#   test  → build + lint smoke (validates the harness end-to-end on itself)
+#   test  → build + lint, PLUS every .claude/scripts/*.test.sh smoke test
+#           (cockpit.test.sh, log-event.test.sh, ...) — each is a standalone,
+#           offline (no gh/network) script that exits non-zero on failure, so
+#           new *.test.sh files are picked up automatically without touching
+#           this file again.
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -70,9 +74,19 @@ do_lint() {
   return "$rc"
 }
 
+do_test() {
+  local rc=0 f
+  for f in .claude/scripts/*.test.sh; do
+    [ -e "$f" ] || continue
+    echo "test: running $f"
+    bash "$f" || { echo "test: FAILED — $f"; rc=1; }
+  done
+  return "$rc"
+}
+
 case "$cmd" in
   build) do_build ;;
   lint)  do_lint ;;
-  test)  do_build && do_lint && echo "test: harness smoke OK" ;;
+  test)  do_build && do_lint && do_test && echo "test: harness smoke OK" ;;
   *) echo "checks.sh: unknown check '$cmd' (build|lint|test)"; exit 2 ;;
 esac
