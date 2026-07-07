@@ -137,20 +137,33 @@ per-tick order, canonically defined in `.claude/commands/pr-loop.md`, is authori
 merge scripts described above are the mechanism it runs. Two human control points
 decide what the loop actually touches:
 
-- **The `module:*` label is an explicit opt-in work queue.** The ADVANCE step only picks up **open issues
-  labelled `module:<name>`** — lowest-numbered first, one at a time, and only when there are zero open PRs.
-  An unlabelled issue is never touched, no matter what its title or body say. Two reasons:
-  - **Intent gate** — most issues are discussions, questions, or half-scoped bugs; a bot shouldn't
-    auto-implement them. The label is you saying "this is scoped and ready for an autonomous worker."
-  - **Mechanism** — the label maps issue → module → the worker's `path` boundary (`gates.json.modules[]`).
-    No module ⇒ no boundary ⇒ nothing safe to hand a worker.
+- **Issue approval is a two-label workflow: `backlog` → `planned`.** An issue enters the loop's work
+  queue only when it carries **both** the `planned` label **and** a `module:<name>` label:
+  - **`backlog`** — filed but *not approved*. This is the default state for every new issue, including
+    issues the bot/agents file themselves (agents MUST label their own issues `backlog`, never
+    `planned`). The loop never touches a `backlog` issue.
+  - **`planned`** — the owner's formal approval: "scoped, reviewed, do it." **Only the repo owner
+    assigns `planned`** — no agent, subagent, or bot may ever add this label, to an issue it filed or
+    to anyone else's. Removing `planned` (or closing) is the owner's way to pull work back out of the
+    queue.
+  - **`module:<name>`** — routing, not approval. It maps issue → module → the worker's `path` boundary
+    (`gates.json.modules[]`). No module ⇒ no boundary ⇒ nothing safe to hand a worker, `planned` or not.
+
+  The ADVANCE step picks the **lowest-numbered open issue labelled `planned` + `module:*`** with no
+  existing `feat/issue-<n>-*` branch — one at a time, and only when there are zero open PRs. Tracking
+  issues (plans split into `Blocked by` sub-issue chains) stay `backlog` forever so the loop works the
+  chain, never the tracker.
 - **Owner-approval merge gate.** Workers author PRs as the **bot** (`bot-gh.sh`); the MERGE step (above)
   only merges PRs the repo **owner** has Approved on GitHub that are CI-green and mergeable. It never
   approves on the owner's behalf.
 
-**Corollary:** non-module (docs/infra) work is not loop-eligible until (a) its area exists as a module in
-`gates.json.modules[]`, and (b) the issue carries the matching `module:*` label. Commenting "approved" on an
-issue does nothing — nothing watches issue text.
+**Corollary:** work is not loop-eligible until (a) its area exists as a module in
+`gates.json.modules[]`, (b) the issue carries the matching `module:*` label, and (c) the **owner** has
+labelled it `planned`. Commenting "approved" on an issue does nothing — nothing watches issue text; the
+`planned` label is the only approval signal.
+
+> Historical note: before the `planned` label existed, the `module:*` label alone was the opt-in queue.
+> If a repo predates the split, treat `module:*`-only issues as `backlog` until the owner adds `planned`.
 
 **Self-hosting this repo's own backlog?** **`/orchestrator:pr-loop-self`** (`.claude/commands/pr-loop-self.md`) runs the
 same loop mechanics self-hosted, against this repo's own `.claude`/`docs`/`examples`/`.github` backlog, using
