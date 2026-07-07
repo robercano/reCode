@@ -43,6 +43,6 @@ If you touch GitHub at all (e.g. `gh pr diff`, `gh pr view`, `gh api`), route it
 Reject if you find anything that would block merge under your lens. Be specific and actionable so the implementer can fix without guessing.
 
 ## Progress events (observability)
-Best-effort, additive only — never changes review consensus or control flow. Log a progress event at the start of your review and when you emit your verdict:
-`bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/log-event.sh --role reviewer --task <issue/task id> --phase reviewing --model <your model> --lens <your lens>`
-then again with `--phase done` once you've emitted your verdict. If `log-event.sh` fails, ignore it and continue — it must never block or alter your review.
+Best-effort, additive only — never changes review consensus or control flow. Log a progress event at the start of your review and when you emit your verdict, ALSO passing a one-line `--detail "<what you're about to do / just did>"` breadcrumb (one short terse sentence — it costs a few tokens, so keep it terse):
+`bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/log-event.sh --role reviewer --task <issue/task id> --phase reviewing --model <your model> --lens <your lens> --detail "<terse breadcrumb>"`
+then again with `--phase done` once you've emitted your verdict. If `log-event.sh` fails, ignore it and continue — it must never block or alter your review (the `--detail` breadcrumb is the same best-effort deal: never let it block you either).
