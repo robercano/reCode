@@ -43,8 +43,9 @@ case "$pr" in
   ''|*[!0-9]*) echo "prepare-pr: PR number must be numeric (got '$pr')" >&2; exit 2 ;;
 esac
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$script_dir/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 cd "$root"
 
 gates="$root/.claude/gates.json"

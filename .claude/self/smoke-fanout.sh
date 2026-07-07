@@ -47,6 +47,8 @@ mkdir -p "$repo/.claude/scripts"
 cp -R "$fixture/src" "$fixture/test" "$repo/" || fail "copy fixture sources"
 cp "$fixture/gates.json" "$repo/.claude/gates.json" || fail "copy adapter"
 cp "$root/.claude/scripts/gate.sh" "$repo/.claude/scripts/gate.sh" || fail "copy gate.sh"
+# gate.sh sources its sibling resolve-roots.sh (issue #63) — stage it alongside.
+cp "$root/.claude/scripts/resolve-roots.sh" "$repo/.claude/scripts/resolve-roots.sh" || fail "copy resolve-roots.sh"
 G init -q -b main . || fail "git init"
 G add -- .claude src test
 G commit -qm "fixture: initial state" || fail "initial commit"

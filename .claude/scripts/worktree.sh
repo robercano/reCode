@@ -19,8 +19,9 @@ case "$phase" in
   *) echo "worktree.sh: phase must be 'setup' or 'teardown' (got '$phase')"; exit 2 ;;
 esac
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$script_dir/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 # Which adapter to read. Defaults to the project adapter; set GATES_FILE to run a
 # different one (e.g. GATES_FILE=.claude/self/gates.json). Relative paths resolve
 # from the repo root.
