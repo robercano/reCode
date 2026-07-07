@@ -250,6 +250,13 @@ port="$(node -e '
   s.listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });
 ')"
 
+# 3a-followup fix (a) regression baseline (issue #70): count any leftover
+# cockpit-serve temp HTML files BEFORE this server ever runs, so the
+# after-shutdown check below only flags a NEW leak, not pre-existing debris.
+tmp_glob="${TMPDIR:-/tmp}"/cockpit-serve.*.html
+tmp_before=0
+for f in $tmp_glob; do [ -e "$f" ] && tmp_before=$((tmp_before + 1)); done
+
 serve_log="$work/serve.log"
 : > "$serve_log"
 bash "$cockpit_serve" "$port" --fixtures "$work/fixtures" >"$serve_log" 2>&1 &
@@ -289,9 +296,137 @@ kill "$sse_pid" >/dev/null 2>&1 || true
 wait "$sse_pid" 2>/dev/null || true
 check "SSE /events delivers the newly appended events.jsonl line within the timeout" [ "$sse_seen" -eq 1 ]
 
+# 3a-followup fix (b) regression (issue #70): log-event.sh's rotation caps
+# events.jsonl to its last N lines via a temp-file + atomic mv, which can
+# shrink the file below a subscriber's current read offset. Start a fresh
+# subscriber, let it read the CURRENT (larger) file at least once so its
+# offset advances past 0, then simulate rotation by replacing the file with a
+# much SMALLER one containing a brand-new marker line -- a subscriber whose
+# offset never resets would sit past EOF forever and never see it.
+rot_out="$work/sse-rotation.out"
+: > "$rot_out"
+timeout 6 curl -sN "http://127.0.0.1:$port/events" >"$rot_out" 2>/dev/null &
+rot_pid=$!
+sleep 1.5
+printf '{"ts":"2026-01-01T00:20:00Z","role":"implementer","model":"sonnet","task":"rot70","phase":"implementing","lens":"","detail":"post-rotation line"}\n' >"$work/fixtures/events.jsonl"
+deadline=$((SECONDS + 5))
+rot_seen=0
+while [ "$SECONDS" -lt "$deadline" ]; do
+  grep -q '"task":"rot70"' "$rot_out" 2>/dev/null && { rot_seen=1; break; }
+  sleep 0.2
+done
+kill "$rot_pid" >/dev/null 2>&1 || true
+wait "$rot_pid" 2>/dev/null || true
+check "SSE /events resumes tailing after events.jsonl shrinks/rotates (3a-followup fix)" [ "$rot_seen" -eq 1 ]
+
 kill "$server_pid" >/dev/null 2>&1 || true
 wait "$server_pid" 2>/dev/null || true
 server_pid=""
+
+# 3a-followup fix (a) regression (issue #70): after the server above exits,
+# its mktemp'd HTML temp file must be gone -- proves cleanup now happens in
+# node's own 'exit' handler rather than the dead bash EXIT trap that used to
+# sit after `exec node` (never fired, since exec replaces the shell).
+tmp_after=0
+for f in $tmp_glob; do [ -e "$f" ] && tmp_after=$((tmp_after + 1)); done
+check "cockpit-serve.sh does not leak its temp HTML file after exit (3a-followup fix)" [ "$tmp_after" -eq "$tmp_before" ]
+
+# ---------------------------------------------------------------------------
+# 6. Worker inspector endpoint (GET /api/worker/<role>/<task>, issue #70):
+#    event timeline + latest breadcrumbs + live worktree forensics, entirely
+#    offline. Forensics are computed by cockpit-serve.sh shelling out to git
+#    against a SYNTHETIC temp git repo/worktree built here under $TMPDIR
+#    (mirrors .claude/self/smoke-fanout.sh's own git-init/worktree-add
+#    pattern) -- never against this checkout, so this stays deterministic and
+#    isolated. Covers BOTH worktree-lookup strategies documented in
+#    cockpit-serve.sh: by conventional directory name
+#    (.claude/worktrees/issue-<task>) and by branch-name fallback
+#    (feat/issue-<task>-*, worktree living anywhere else on disk), plus the
+#    graceful "no worktree found" degrade path.
+# ---------------------------------------------------------------------------
+insp_root="$work/inspector-repo"
+IG() { git -C "$insp_root" -c user.name=insp -c user.email=insp@local -c commit.gpgsign=false "$@"; }
+mkdir -p "$insp_root"
+IG init -q -b main .
+IG commit -q --allow-empty -m "inspector fixture: initial"
+
+# Worker "implementer"/"70a": worktree found by CONVENTIONAL DIRECTORY NAME.
+mkdir -p "$insp_root/.claude/worktrees"
+IG worktree add -q -b feat/issue-70a-inspector "$insp_root/.claude/worktrees/issue-70a" main
+git -C "$insp_root/.claude/worktrees/issue-70a" -c user.name=insp -c user.email=insp@local -c commit.gpgsign=false \
+  commit -q --allow-empty -m "feat: inspector work for 70a"
+
+# Worker "reviewer"/"70b": worktree lives OUTSIDE .claude/worktrees/ entirely
+# -- only discoverable via the BRANCH-NAME FALLBACK (feat/issue-70b-*).
+insp_wt_70b="$work/inspector-wt-elsewhere"
+IG worktree add -q -b feat/issue-70b-other-branch "$insp_wt_70b" main
+git -C "$insp_wt_70b" -c user.name=insp -c user.email=insp@local -c commit.gpgsign=false \
+  commit -q --allow-empty -m "feat: other work for 70b"
+
+mkdir -p "$work/fixtures-inspector"
+echo "[]" >"$work/fixtures-inspector/issues.json"
+echo "[]" >"$work/fixtures-inspector/prs.json"
+cat >"$work/fixtures-inspector/events.jsonl" <<'EOF'
+{"ts":"2026-01-01T01:00:00Z","role":"implementer","model":"sonnet","task":"70a","phase":"implementing","lens":"","detail":"scoped the inspector work"}
+{"ts":"2026-01-01T01:05:00Z","role":"implementer","model":"sonnet","task":"70a","phase":"gate-running","lens":"","detail":"running gates"}
+{"ts":"2026-01-01T01:02:00Z","role":"reviewer","model":"opus","task":"70b","phase":"reviewing","lens":"tests","detail":""}
+EOF
+
+insp_port="$(node -e '
+  const s = require("net").createServer();
+  s.listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });
+')"
+insp_serve_log="$work/serve-inspector.log"
+: > "$insp_serve_log"
+COCKPIT_SERVE_WORKTREES_ROOT="$insp_root" bash "$cockpit_serve" "$insp_port" --fixtures "$work/fixtures-inspector" >"$insp_serve_log" 2>&1 &
+server_pid=$!
+
+insp_ready=0
+for _ in $(seq 1 50); do
+  grep -q "cockpit serving" "$insp_serve_log" 2>/dev/null && { insp_ready=1; break; }
+  kill -0 "$server_pid" 2>/dev/null || break
+  sleep 0.2
+done
+check "worker-inspector server (custom WORKTREES_ROOT) starts within the readiness timeout" [ "$insp_ready" -eq 1 ]
+
+resp_70a="$(curl -s "http://127.0.0.1:$insp_port/api/worker/implementer/70a" 2>/dev/null)"
+check "worker-inspector 70a: timeline has both events, NEWEST FIRST, plus breadcrumbs + forensics fields" node -e '
+  const got = JSON.parse(process.argv[1]);
+  if (!Array.isArray(got.timeline) || got.timeline.length !== 2) throw new Error("expected 2 timeline entries, got " + JSON.stringify(got.timeline));
+  if (got.timeline[0].phase !== "gate-running") throw new Error("expected newest-first (gate-running first), got " + got.timeline[0].phase);
+  if (got.timeline[1].phase !== "implementing") throw new Error("expected implementing second, got " + got.timeline[1].phase);
+  if (!Array.isArray(got.breadcrumbs) || got.breadcrumbs.length !== 2) throw new Error("expected 2 breadcrumbs, got " + JSON.stringify(got.breadcrumbs));
+  if (got.breadcrumbs[0].detail !== "running gates") throw new Error("expected latest breadcrumb first, got " + JSON.stringify(got.breadcrumbs[0]));
+  const wt = got.worktree;
+  if (!wt || wt.found !== true) throw new Error("expected worktree found via directory-name lookup, got " + JSON.stringify(wt));
+  if (wt.branch !== "feat/issue-70a-inspector") throw new Error("unexpected branch " + wt.branch);
+  if (typeof wt.status !== "string") throw new Error("status field missing/wrong type");
+  if (!Array.isArray(wt.commits) || wt.commits.length === 0) throw new Error("commits field missing/empty");
+  if (typeof wt.diffstat !== "string") throw new Error("diffstat field missing/wrong type");
+' "$resp_70a"
+
+resp_70b="$(curl -s "http://127.0.0.1:$insp_port/api/worker/reviewer/70b" 2>/dev/null)"
+check "worker-inspector 70b: worktree found via BRANCH-NAME fallback (not conventional dir name)" node -e '
+  const got = JSON.parse(process.argv[1]);
+  const wt = got.worktree;
+  if (!wt || wt.found !== true) throw new Error("expected worktree found via branch fallback, got " + JSON.stringify(wt));
+  if (wt.branch !== "feat/issue-70b-other-branch") throw new Error("unexpected branch " + wt.branch);
+  if (!Array.isArray(wt.commits) || wt.commits.length === 0) throw new Error("commits field missing/empty");
+  if (typeof wt.diffstat !== "string") throw new Error("diffstat field missing/wrong type");
+' "$resp_70b"
+
+resp_missing="$(curl -s "http://127.0.0.1:$insp_port/api/worker/nobody/999999" 2>/dev/null)"
+check "worker-inspector degrades gracefully: no matching worktree returns found:false, not an error" node -e '
+  const got = JSON.parse(process.argv[1]);
+  if (got.worktree.found !== false) throw new Error("expected found:false, got " + JSON.stringify(got.worktree));
+  if (Array.isArray(got.timeline) && got.timeline.length !== 0) throw new Error("expected empty timeline for an unknown worker");
+' "$resp_missing"
+
+kill "$server_pid" >/dev/null 2>&1 || true
+wait "$server_pid" 2>/dev/null || true
+server_pid=""
+IG worktree remove --force "$insp_root/.claude/worktrees/issue-70a" >/dev/null 2>&1 || true
+IG worktree remove --force "$insp_wt_70b" >/dev/null 2>&1 || true
 
 echo ""
 if [ "$fail" -eq 0 ]; then

@@ -41,6 +41,6 @@ Never call bare `gh`. EVERY `gh` invocation (PR create/update, comments, `gh api
 If a reviewer rejects your work, address every reason, re-run the gates, and report again. Iterate until approved.
 
 ## Progress events (observability)
-Best-effort, additive only — never changes gate enforcement or control flow. Log a progress event at each phase transition:
-`bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/log-event.sh --role implementer --task <issue id> --phase <implementing|gate-running|done> --model <your model>`
-Call it with `--phase implementing` when you start work (step 3), `--phase gate-running` before step 5's gate run, and `--phase done` when you file your report (step 7). If `log-event.sh` fails, ignore it and continue — it must never block or alter your work.
+Best-effort, additive only — never changes gate enforcement or control flow. Log a progress event at each phase transition, ALSO passing a one-line `--detail "<what you're about to do / just did>"` breadcrumb (one short terse sentence — it costs a few tokens, so keep it terse):
+`bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/log-event.sh --role implementer --task <issue id> --phase <implementing|gate-running|done> --model <your model> --detail "<terse breadcrumb>"`
+Call it with `--phase implementing` when you start work (step 3), `--phase gate-running` before step 5's gate run, and `--phase done` when you file your report (step 7). If `log-event.sh` fails, ignore it and continue — it must never block or alter your work (the `--detail` breadcrumb is the same best-effort deal: never let it block you either).

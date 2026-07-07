@@ -33,6 +33,24 @@
 #                      and returns 200 {"ok":true} (or {"ok":false,"error"}
 #                      on failure). The injected client calls this from its
 #                      refresh timer and its manual "Refresh now" button.
+#   GET  /api/worker/<role>/<task>
+#                      Worker inspector (issue #70), backing the drawer that
+#                      opens when a live-progress row is clicked. Returns
+#                      JSON: { role, task, timeline, breadcrumbs, worktree }.
+#                        - timeline: every events.jsonl record matching
+#                          (role,task), NEWEST FIRST.
+#                        - breadcrumbs: the most recent non-empty --detail
+#                          values (subset of timeline), surfaced separately
+#                          so the drawer can show them prominently.
+#                        - worktree: forensics computed LIVE by shelling out
+#                          to git (zero agent tokens) against the worker's
+#                          worktree — located by directory name
+#                          `.claude/worktrees/issue-<task>` or, failing that,
+#                          a registered worktree whose branch matches
+#                          `feat/issue-<task>-*`. { found, path, branch,
+#                          status, commits, diffstat, mergeBase, error }; if
+#                          no worktree matches, found:false with a plain
+#                          "no worktree found" error string (never a crash).
 #
 # Foreground process — SIGTERM/SIGINT close the server cleanly (via `exec`,
 # below, node receives signals directly; no bash wrapper indirection).
@@ -67,9 +85,24 @@ fi
 
 gh_refresh="${COCKPIT_GH_REFRESH:-60}"
 
-tmp_out="$(mktemp "${TMPDIR:-/tmp}/cockpit-serve.XXXXXX.html")"
-trap 'rm -f "$tmp_out"' EXIT
+# Worker-inspector forensics root (issue #70): the directory that CONTAINS
+# .claude/worktrees/ and the git repo itself, so /api/worker/<role>/<task>
+# can locate a worker's worktree by name or by branch. Defaults to $root
+# (same consumer-project root everything else here uses); overridable so
+# cockpit.test.sh can point it at a synthetic temp repo/worktree instead of
+# the real one — no network/gh either way, just local git plumbing.
+worktrees_root="${COCKPIT_SERVE_WORKTREES_ROOT:-$root}"
 
+tmp_out="$(mktemp "${TMPDIR:-/tmp}/cockpit-serve.XXXXXX.html")"
+# NOTE: deliberately NO bash `trap ... EXIT` here. `exec` below REPLACES this
+# shell process image with node (same PID) — a bash-level EXIT trap
+# registered before `exec` would sit there registered but never fire once
+# node takes over, which used to leak one temp HTML file per invocation
+# (3a-followup fix, issue #70). Node now owns TMP_OUT's entire lifecycle and
+# removes it itself via its own 'exit' handler, below, which fires for every
+# exit path (normal return, process.exit() from shutdown(), and uncaught
+# exceptions alike).
+#
 # `exec` replaces this shell with node (same PID) so SIGTERM/SIGINT go
 # straight to node's own handlers below — no bash signal-forwarding needed.
 COCKPIT_SERVE_SELF="$cockpit" \
@@ -78,9 +111,11 @@ COCKPIT_SERVE_PORT="$port" \
 COCKPIT_SERVE_EVENTS_FILE="$events_file" \
 COCKPIT_SERVE_GH_REFRESH="$gh_refresh" \
 COCKPIT_SERVE_TMP_OUT="$tmp_out" \
+COCKPIT_SERVE_WORKTREES_ROOT="$worktrees_root" \
 exec node - <<'NODE_SERVE'
 const http = require("http");
 const fs = require("fs");
+const path = require("path");
 const { execFileSync } = require("child_process");
 
 const SELF = process.env.COCKPIT_SERVE_SELF;
@@ -90,6 +125,15 @@ const EVENTS_FILE = process.env.COCKPIT_SERVE_EVENTS_FILE;
 const GH_REFRESH_SECONDS = parseInt(process.env.COCKPIT_SERVE_GH_REFRESH, 10) || 60;
 const GH_REFRESH_MS = GH_REFRESH_SECONDS * 1000;
 const TMP_OUT = process.env.COCKPIT_SERVE_TMP_OUT;
+const WORKTREES_ROOT = process.env.COCKPIT_SERVE_WORKTREES_ROOT || process.cwd();
+
+// Fix (issue #70, 3a-followup): TMP_OUT cleanup moved here from the now-dead
+// bash EXIT trap (see the shell comment above `exec node`, above) — this
+// fires on every node exit path, so the temp HTML file cockpit.sh renders
+// into no longer leaks one file per invocation.
+process.on("exit", () => {
+  try { fs.unlinkSync(TMP_OUT); } catch (e) { /* already gone, or never created */ }
+});
 
 // ---------------------------------------------------------------------------
 // Render cache: re-run cockpit.sh (the ONE renderer) at most once per
@@ -231,6 +275,144 @@ function clientScript() {
     refreshBtn.addEventListener("click", doRefresh);
     setInterval(doRefresh, ${GH_REFRESH_MS});
 
+    // Worker inspector drawer (issue #70): clicking a live-worker row fetches
+    // GET /api/worker/<role>/<task> and shows its event timeline (newest
+    // first), latest breadcrumbs, and worktree forensics in a side panel.
+    // Every dynamic value lands via textContent only (never innerHTML),
+    // mirroring upsertRow()'s XSS-safety contract above.
+    var drawerStyle = document.createElement("style");
+    drawerStyle.textContent = "#live tbody tr { cursor: pointer; } #live tbody tr:hover { outline: 1px solid currentColor; }";
+    document.head.appendChild(drawerStyle);
+
+    var drawer = null;
+    function ensureDrawer() {
+      if (drawer) return drawer;
+      drawer = document.createElement("div");
+      drawer.id = "worker-drawer";
+      drawer.setAttribute("style", "position:fixed;top:0;right:0;bottom:0;width:min(480px,90vw);overflow-y:auto;" +
+        "background:#161b22;color:#e6edf3;border-left:1px solid #30363d;padding:1rem;" +
+        "box-shadow:-2px 0 8px rgba(0,0,0,0.4);display:none;z-index:1000;");
+
+      var closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.textContent = "Close";
+      closeBtn.addEventListener("click", function () { drawer.style.display = "none"; });
+
+      var title = document.createElement("h2");
+      title.id = "drawer-title";
+
+      var breadcrumbsHeading = document.createElement("h3");
+      breadcrumbsHeading.textContent = "Latest breadcrumbs";
+      var breadcrumbsList = document.createElement("ul");
+      breadcrumbsList.id = "drawer-breadcrumbs";
+
+      var forensicsHeading = document.createElement("h3");
+      forensicsHeading.textContent = "Worktree forensics";
+      var forensicsBody = document.createElement("pre");
+      forensicsBody.id = "drawer-forensics";
+      forensicsBody.style.whiteSpace = "pre-wrap";
+      forensicsBody.style.fontSize = "0.8rem";
+
+      var timelineHeading = document.createElement("h3");
+      timelineHeading.textContent = "Event timeline (newest first)";
+      var timelineList = document.createElement("ul");
+      timelineList.id = "drawer-timeline";
+
+      drawer.appendChild(closeBtn);
+      drawer.appendChild(title);
+      drawer.appendChild(breadcrumbsHeading);
+      drawer.appendChild(breadcrumbsList);
+      drawer.appendChild(forensicsHeading);
+      drawer.appendChild(forensicsBody);
+      drawer.appendChild(timelineHeading);
+      drawer.appendChild(timelineList);
+      document.body.appendChild(drawer);
+      return drawer;
+    }
+
+    function renderDrawer(role, task, data) {
+      var d = ensureDrawer();
+      d.querySelector("#drawer-title").textContent = "Worker: " + role + " / " + task;
+
+      var breadcrumbsList = d.querySelector("#drawer-breadcrumbs");
+      breadcrumbsList.textContent = "";
+      var crumbs = (data && data.breadcrumbs) || [];
+      if (crumbs.length === 0) {
+        var noCrumb = document.createElement("li");
+        noCrumb.textContent = "(no breadcrumbs yet)";
+        breadcrumbsList.appendChild(noCrumb);
+      } else {
+        crumbs.forEach(function (c) {
+          var li = document.createElement("li");
+          li.textContent = "[" + (c.phase || "") + "] " + (c.detail || "") + " (" + (c.ts || "") + ")";
+          breadcrumbsList.appendChild(li);
+        });
+      }
+
+      var forensicsBody = d.querySelector("#drawer-forensics");
+      var wt = (data && data.worktree) || { found: false };
+      if (!wt.found) {
+        forensicsBody.textContent = "no worktree found" + (wt.error ? " (" + wt.error + ")" : "");
+      } else {
+        var lines = [];
+        lines.push("path: " + (wt.path || ""));
+        lines.push("branch: " + (wt.branch || ""));
+        lines.push("");
+        lines.push("status --short:");
+        lines.push(wt.status && wt.status.length ? wt.status : "(clean)");
+        lines.push("last 5 commits:");
+        (wt.commits && wt.commits.length ? wt.commits : ["(none)"]).forEach(function (c) { lines.push("  " + c); });
+        lines.push("");
+        lines.push("diffstat vs main:");
+        lines.push(wt.diffstat && wt.diffstat.length ? wt.diffstat : "(no diff)");
+        if (wt.error) lines.push("\n(note: " + wt.error + ")");
+        forensicsBody.textContent = lines.join("\n");
+      }
+
+      var timelineList = d.querySelector("#drawer-timeline");
+      timelineList.textContent = "";
+      var tl = (data && data.timeline) || [];
+      if (tl.length === 0) {
+        var noEv = document.createElement("li");
+        noEv.textContent = "(no events)";
+        timelineList.appendChild(noEv);
+      } else {
+        tl.forEach(function (ev) {
+          var li = document.createElement("li");
+          var lensPart = ev.lens ? " (" + ev.lens + ")" : "";
+          var detailPart = ev.detail ? ": " + ev.detail : "";
+          li.textContent = (ev.ts || "") + " — " + (ev.phase || "") + lensPart + detailPart;
+          timelineList.appendChild(li);
+        });
+      }
+
+      d.style.display = "block";
+    }
+
+    // Server-rendered rows (cockpit.sh) carry role/task on a hidden trailing
+    // <td class="wrow-meta">; SSE-created rows (upsertRow(), above) carry
+    // them directly as data-role/data-task on the <tr> itself. Support both.
+    function rowRoleTask(tr) {
+      if (!tr) return null;
+      var role = tr.getAttribute("data-role");
+      var task = tr.getAttribute("data-task");
+      if (role != null && task != null) return { role: role, task: task };
+      var meta = tr.querySelector("td.wrow-meta");
+      if (meta) return { role: meta.getAttribute("data-role") || "", task: meta.getAttribute("data-task") || "" };
+      return null;
+    }
+
+    document.addEventListener("click", function (ev) {
+      var tr = ev.target && ev.target.closest ? ev.target.closest("#live tbody tr") : null;
+      if (!tr) return;
+      var rt = rowRoleTask(tr);
+      if (!rt) return;
+      fetch("/api/worker/" + encodeURIComponent(rt.role) + "/" + encodeURIComponent(rt.task))
+        .then(function (r) { return r.json(); })
+        .then(function (data) { renderDrawer(rt.role, rt.task, data); })
+        .catch(function () { /* inert on fetch failure -- drawer just doesn't open */ });
+    });
+
     connect();
   } catch (e) { /* inert on any DOM/EventSource-less environment */ }
 })();
@@ -266,6 +448,15 @@ function handleEvents(req, res) {
     fs.stat(EVENTS_FILE, (err, stat) => {
       if (closed) return;
       if (err) return; // file missing yet -- nothing to send
+      // Fix (issue #70, 3a-followup): log-event.sh rotates events.jsonl (caps
+      // it to the last EVENTS_MAX_LINES lines via a temp-file + atomic mv —
+      // see log-event.sh), which can shrink the file below our current read
+      // offset. Left unhandled, every future stat.size <= offset check below
+      // would stay permanently true and this subscriber would silently stop
+      // tailing forever. If the file is now SMALLER than where we'd read to,
+      // it rotated (or was truncated/replaced) -- reset to 0 and resume
+      // tailing from the top of the new file.
+      if (stat.size < offset) offset = 0;
       if (stat.size <= offset) return; // no new bytes
       fs.open(EVENTS_FILE, "r", (openErr, fd) => {
         if (closed) return;
@@ -315,6 +506,157 @@ function handleEvents(req, res) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// /api/worker/<role>/<task> — worker inspector (issue #70). Zero agent
+// tokens: everything here is either read from the local events.jsonl or
+// computed live by shelling out to git. See the route-table comment near the
+// top of this file for the exact JSON shape.
+// ---------------------------------------------------------------------------
+function readEventsAll() {
+  let text = "";
+  try { text = fs.readFileSync(EVENTS_FILE, "utf8"); } catch (e) { return []; }
+  const out = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      // typeof [] === "object" too -- exclude arrays, mirroring cockpit.sh's
+      // own readEvents() malformed/array-line tolerance.
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) out.push(obj);
+    } catch (e) { /* skip malformed line */ }
+  }
+  return out;
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Locate the worker's worktree: prefer the conventional directory name, else
+// fall back to scanning `git worktree list` for a branch matching
+// feat/issue-<task>-*. Returns an absolute path, or null if neither matches
+// (degrade path -- the caller renders a "no worktree found" marker instead
+// of erroring).
+function findWorktree(taskId) {
+  const byName = path.join(WORKTREES_ROOT, ".claude", "worktrees", `issue-${taskId}`);
+  try {
+    if (fs.statSync(byName).isDirectory()) return byName;
+  } catch (e) { /* not found by name -- fall through to the branch scan */ }
+
+  try {
+    const out = execFileSync("git", ["-C", WORKTREES_ROOT, "worktree", "list", "--porcelain"], {
+      encoding: "utf8",
+    });
+    const branchRe = new RegExp("^refs/heads/feat/issue-" + escapeRegExp(taskId) + "-.*$");
+    let candidatePath = null;
+    let candidateBranch = null;
+    for (const rawLine of out.split("\n")) {
+      const line = rawLine.trim();
+      if (line.startsWith("worktree ")) {
+        candidatePath = line.slice("worktree ".length);
+        candidateBranch = null;
+      } else if (line.startsWith("branch ")) {
+        candidateBranch = line.slice("branch ".length);
+        if (candidatePath && candidateBranch && branchRe.test(candidateBranch)) return candidatePath;
+      } else if (line === "") {
+        candidatePath = null;
+        candidateBranch = null;
+      }
+    }
+  } catch (e) { /* WORKTREES_ROOT isn't a git repo, or git is unavailable */ }
+
+  return null;
+}
+
+// Worktree forensics (issue #70): current branch, short status, last 5
+// commits, and a diffstat vs main's merge-base. Every git call is wrapped
+// individually so one missing ref (e.g. no local "main") degrades that ONE
+// field rather than failing the whole endpoint.
+function gatherForensics(wtPath) {
+  const result = {
+    found: true,
+    path: wtPath,
+    branch: null,
+    status: "",
+    commits: [],
+    diffstat: "",
+    mergeBase: null,
+    error: null,
+  };
+  const errors = [];
+
+  try {
+    result.branch = execFileSync("git", ["-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+  } catch (e) { errors.push("branch: " + String((e && e.message) || e)); }
+
+  try {
+    result.status = execFileSync("git", ["-C", wtPath, "status", "--short"], { encoding: "utf8" });
+  } catch (e) { errors.push("status: " + String((e && e.message) || e)); }
+
+  try {
+    const log = execFileSync("git", ["-C", wtPath, "log", "--oneline", "-5"], { encoding: "utf8" });
+    result.commits = log.split("\n").filter((l) => l.length > 0);
+  } catch (e) { errors.push("log: " + String((e && e.message) || e)); }
+
+  let mergeBaseOk = false;
+  for (const base of ["main", "origin/main"]) {
+    try {
+      const mb = execFileSync("git", ["-C", wtPath, "merge-base", base, "HEAD"], { encoding: "utf8" }).trim();
+      result.mergeBase = mb;
+      result.diffstat = execFileSync("git", ["-C", wtPath, "diff", "--stat", `${mb}...HEAD`], {
+        encoding: "utf8",
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      mergeBaseOk = true;
+      break;
+    } catch (e) { /* try the next base candidate */ }
+  }
+  if (!mergeBaseOk) errors.push("diffstat: no merge-base found against main/origin main");
+
+  if (errors.length) result.error = errors.join("; ");
+  return result;
+}
+
+function handleWorkerInspector(req, res, role, task) {
+  try {
+    const allEvents = readEventsAll();
+    const matching = allEvents.filter((ev) => {
+      const evRole = ev.role != null ? String(ev.role) : "";
+      const evTask = ev.task != null ? String(ev.task) : "";
+      return evRole === role && evTask === task;
+    });
+    const timeline = matching.slice().reverse(); // NEWEST FIRST (file/append order reversed)
+    const breadcrumbs = timeline
+      .filter((ev) => ev.detail != null && String(ev.detail).trim() !== "")
+      .slice(0, 10)
+      .map((ev) => ({ ts: ev.ts || "", phase: ev.phase || "", detail: String(ev.detail) }));
+
+    const wtPath = findWorktree(task);
+    const worktree = wtPath
+      ? gatherForensics(wtPath)
+      : {
+          found: false,
+          path: null,
+          branch: null,
+          status: "",
+          commits: [],
+          diffstat: "",
+          mergeBase: null,
+          error: "no worktree found for task " + task,
+        };
+
+    const body = JSON.stringify({ role, task, timeline, breadcrumbs, worktree });
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(body);
+  } catch (e) {
+    res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: String((e && e.message) || e) }));
+  }
+}
+
 function handleRefresh(req, res) {
   try {
     getHtml(true);
@@ -347,6 +689,10 @@ const server = http.createServer((req, res) => {
   if (url === "/" || url === "/index.html") return handleIndex(req, res);
   if (url === "/events") return handleEvents(req, res);
   if (url === "/api/refresh") return handleRefresh(req, res);
+  const workerMatch = url.match(/^\/api\/worker\/([^/]+)\/([^/]+)$/);
+  if (workerMatch) {
+    return handleWorkerInspector(req, res, decodeURIComponent(workerMatch[1]), decodeURIComponent(workerMatch[2]));
+  }
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("not found");
 });
