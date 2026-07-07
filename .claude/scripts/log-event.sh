@@ -49,8 +49,10 @@ while [ $# -gt 0 ]; do
   shift || break
 done
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || exit 0
-root="$(cd "$script_dir/../.." 2>/dev/null && pwd)" || exit 0
+# Two-root derivation (issue #63) — resolve-roots.sh never fails, matching this
+# script's never-block contract.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/resolve-roots.sh" 2>/dev/null || exit 0
 
 events_file="${CLAUDE_EVENTS_FILE:-$root/.claude/state/events.jsonl}"
 max_lines="${EVENTS_MAX_LINES:-2000}"

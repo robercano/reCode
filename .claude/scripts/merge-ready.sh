@@ -26,9 +26,11 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 # Route EVERY gh call (list/view/merge) through the bot identity (see bot-gh.sh).
-gh() { bash "$root/.claude/scripts/bot-gh.sh" "$@"; }
+gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 owner="${MERGE_APPROVER:-${repo%%/*}}"   # the approver whose APPROVED review authorizes a merge
 gates="$root/.claude/gates.json"

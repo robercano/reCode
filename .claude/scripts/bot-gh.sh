@@ -22,7 +22,9 @@
 # Usage: .claude/scripts/bot-gh.sh pr create --title "..." --body "..."
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 if [ -f "$root/.env" ]; then
   set -a
   # shellcheck disable=SC1091

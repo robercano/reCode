@@ -35,9 +35,15 @@
 # generated artifact). Pass a second positional arg to write elsewhere.
 set -uo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$script_dir/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 self="$script_dir/cockpit.sh"
+# Agent definitions ship with the PLUGIN, not the consumer repo: prefer the
+# project's own .claude/agents (repo/worktree layout, or a consumer override),
+# else the plugin-cache layout where agents/ sits beside scripts/.
+agents_dir="$root/.claude/agents"
+[ -d "$agents_dir" ] || agents_dir="$script_dir/../agents"
 
 # ---------------------------------------------------------------------------
 # Hidden seam: the blocking-graph parser as its own subcommand, so it has
@@ -169,7 +175,7 @@ node -e '
     out.push({ role, model, description });
   }
   fs.writeFileSync(process.argv[2], JSON.stringify(out));
-' "$root/.claude/agents" "$tmpdir/agents.json"
+' "$agents_dir" "$tmpdir/agents.json"
 
 # ---- adapter (review lenses/skills, budget) ------------------------------------
 node -e '
@@ -310,11 +316,11 @@ function phaseBadge(phase) {
   }
 }
 function renderLiveProgress() {
-  const latest = new Map(); // "role task" -> event
+  const latest = new Map(); // "role\u0000task" -> event
   for (const ev of events) {
     const role = ev.role != null ? String(ev.role) : "";
     const task = ev.task != null ? String(ev.task) : "";
-    const key = role + " " + task;
+    const key = role + "\u0000" + task;
     latest.set(key, ev); // later lines overwrite earlier ones for the same key
   }
   const workers = [...latest.values()];

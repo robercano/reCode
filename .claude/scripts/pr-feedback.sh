@@ -15,9 +15,11 @@
 # Invoke as `bash .claude/scripts/pr-feedback.sh` (pre-approve that exact command).
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 # Route EVERY gh call through the bot identity (see bot-gh.sh).
-gh() { bash "$root/.claude/scripts/bot-gh.sh" "$@"; }
+gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 bot="${BOT_LOGIN:-robercano-ghbot}"
 marker="<!-- claude-addressed -->"

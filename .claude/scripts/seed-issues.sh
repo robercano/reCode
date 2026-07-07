@@ -29,7 +29,9 @@ command -v gh   >/dev/null 2>&1 || { echo "gh not on PATH (try: export PATH=\"\$
 command -v node >/dev/null 2>&1 || { echo "node not on PATH"; exit 1; }
 gh auth status  >/dev/null 2>&1 || { echo "Not authenticated. Run: gh auth login"; exit 1; }
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 gates="$root/.claude/gates.json"
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)"
 echo "Seeding issues into ${REPO:-<current repo>}"

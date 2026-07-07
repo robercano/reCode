@@ -6,10 +6,11 @@
 set -uo pipefail
 
 key="${1:?usage: gate.sh <gate-name>}"
-# Repo root is two levels up from this script (<root>/.claude/scripts/gate.sh) —
-# robust whether or not we're nested inside another git repo.
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$script_dir/../.." && pwd)"
+# Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer
+# project (repo-tracked <root>/.claude/scripts layout wins — robust in worktrees —
+# else CLAUDE_PROJECT_DIR/git-toplevel/cwd for the plugin-cache layout).
+# shellcheck source=resolve-roots.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 
 # Dependency-freshness preflight (pnpm-gated: no-ops unless the repo uses pnpm).
 # pnpm copies the resolved lockfile to node_modules/.pnpm/lock.yaml on every
