@@ -34,4 +34,9 @@ re-scoped by the orchestrator, never reached across by a worker.
 ## Don'ts
 - Don't put secrets in the repo.
 - Don't bypass the gates.
+- Don't `git add -A` / `git add .` / `git commit -a` — **stage explicit paths by name.** Under the sandbox,
+  masked config paths (`.mcp.json`, `.gitconfig`, `.claude/{launch.json,routines,…}`, editor dirs) appear as
+  `/dev/null` character-device nodes; git can't index a device node, so a blanket add aborts the whole commit
+  (`can only add regular files, symbolic links or git-directories`). Ignore any `crw-` entries in `git status`
+  — they're sandbox masks, not your changes. See `docs/HARDENING.md` → Caveats.
 - <project-specific landmines>
