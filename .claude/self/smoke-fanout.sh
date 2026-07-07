@@ -82,11 +82,20 @@ step "module boundary respected ($mod); change committed on branch"
 # vacuously even on broken code. The fixture is a consumer repo: it must read
 # its own default .claude/gates.json. (Caught by the failure-path check below.)
 in_gate() { env -u GATES_FILE bash "$1/.claude/scripts/gate.sh" "$2"; }
+step "toolchain: node $(node -v), $(git --version)"
 for g in build lint test; do
-  in_gate "$wt" "$g" >/dev/null 2>&1 || fail "gate '$g' failed in worktree"
+  # Capture output and surface it on failure — a silent gate failure on CI is
+  # undebuggable from the job log (learned the hard way on PR #65).
+  if ! out="$(in_gate "$wt" "$g" 2>&1)"; then
+    printf '%s\n' "$out" | tail -40 >&2
+    fail "gate '$g' failed in worktree (output above)"
+  fi
 done
 step "gates build/lint/test passed in worktree"
-in_gate "$wt" typecheck >/dev/null 2>&1 || fail "unconfigured gate did not skip cleanly"
+if ! out="$(in_gate "$wt" typecheck 2>&1)"; then
+  printf '%s\n' "$out" | tail -40 >&2
+  fail "unconfigured gate did not skip cleanly (output above)"
+fi
 step "unconfigured gate skipped with exit 0"
 
 # --- 5. Merge and verify ------------------------------------------------------
