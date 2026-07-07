@@ -24,3 +24,8 @@
 .ripgreprc
 .idea/
 .vscode/
+
+# Python bytecode cache — generated when the PreToolUse hook script under
+# .claude/scripts/ is imported/run. Regenerable; never commit it.
+__pycache__/
+*.pyc
