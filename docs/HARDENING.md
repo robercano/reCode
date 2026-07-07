@@ -387,8 +387,9 @@ agent operates *inside*, not one it configures.
   lock to remove, and `allowWrite` can't dislodge it. If you need git's config writes to land, run them in
   a real terminal — see the git-config note in the strict-mode section above.) Two consequences: (1)
   **never `git add -A` / `git commit -a`** — git
-  can't index a device node and the commit may abort; stage explicit paths instead (the agent instructions
-  enforce this).
+  can't index a device node and the commit may abort; stage explicit paths instead. This is enforced by
+  the agent prompts **and** a plugin `PreToolUse` hook (`.claude/scripts/guard-git-add.py`) that blocks
+  blanket adds/commits whenever device-node masks are present (a no-op outside the sandbox).
   (2) The unambiguous personal dotfiles are gitignored so they don't surface; `.mcp.json`/`.gitmodules`/
   `.claude/*` are deliberately *not* ignored (they can be real), so rely on explicit staging there.
 - **Open PRs gate loop advancement.** A typical loop won't start a new ticket while a PR is open —
