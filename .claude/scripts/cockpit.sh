@@ -33,6 +33,14 @@
 # Output: self-contained HTML (inline CSS, no external CDN/JS/fonts), default
 # .claude/state/cockpit.html (that dir is gitignored — never commit the
 # generated artifact). Pass a second positional arg to write elsewhere.
+#
+# Phase 3a (issue #69): dark theme by default (with a light-theme toggle,
+# persisted client-side in localStorage — inert/harmless if run in a
+# file:// context with no localStorage), plus a client-side module-header
+# click filter over the issue list. Both are small inline <script> blocks
+# appended near the end of <body>; cockpit-serve.sh (serve mode) injects
+# ITS OWN separate SSE/refresh client script by string-replacing </body>,
+# so the live-stream code never ships in this static output.
 set -uo pipefail
 
 # Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
@@ -328,12 +336,16 @@ function renderLiveProgress() {
   if (workers.length === 0) {
     html += `<p class="muted">no active workers</p>`;
   } else {
-    html += `<table class="routing"><thead><tr><th>Role</th><th>Task</th><th>Model</th><th>Phase</th><th>Lens</th><th>Updated</th></tr></thead><tbody>`;
+    html += `<table class="routing"><thead><tr><th>Role</th><th>Task</th><th>Model</th><th>Phase</th><th>Lens</th><th>Updated</th><th hidden></th></tr></thead><tbody>`;
     for (const w of workers) {
       const badge = phaseBadge(w.phase);
       html += `<tr><td>${esc(w.role)}</td><td>${esc(w.task)}</td><td><code>${esc(w.model || "(none)")}</code></td>`;
       html += `<td><span class="badge ${badge.cls}">${esc(w.phase || "(unknown)")}</span></td>`;
-      html += `<td>${esc(w.lens || "")}</td><td>${esc(w.ts)}</td></tr>`;
+      html += `<td>${esc(w.lens || "")}</td><td>${esc(w.ts)}</td>`;
+      // Hidden trailing cell: stable data-role/data-task hook for a FUTURE
+      // worker inspector (issue 3b). Appended AFTER every column the
+      // existing tests exact-match, so it never disturbs them.
+      html += `<td class="wrow-meta" data-role="${esc(w.role)}" data-task="${esc(w.task)}" hidden></td></tr>`;
     }
     html += `</tbody></table>`;
   }
@@ -368,7 +380,7 @@ function renderIssues() {
     html += `<h3>${esc(key)}</h3><ul class="issue-list">`;
     for (const issue of list) {
       const edges = parseBlocking(issue.body || "");
-      html += `<li id="issue-${issue.number}"><a href="${esc(issue.url || "#")}">#${issue.number}</a> ${esc(issue.title)}`;
+      html += `<li id="issue-${issue.number}" data-module="${esc(key)}"><a href="${esc(issue.url || "#")}">#${issue.number}</a> ${esc(issue.title)}`;
       const rel = [];
       if (edges.blockedBy.length) rel.push(`Blocked by ${refList(edges.blockedBy)}`);
       if (edges.blocks.length) rel.push(`Blocks ${refList(edges.blocks)}`);
@@ -468,42 +480,127 @@ function renderWorktrees() {
 }
 
 const generatedAt = new Date().toISOString();
+// Dark-theme stable marker (issue #69): the `data-theme="dark"` attribute
+// below is the CONTRACT a test/consumer can grep for to confirm the default
+// theme. The tiny <script> right after it restores a saved light-theme
+// preference (localStorage) BEFORE <style> is applied, to avoid a flash;
+// it is wrapped in try/catch so it is inert/harmless under file:// (some
+// browsers restrict localStorage there) or any other odd environment.
 const html = `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <title>Cockpit — ai-project-orchestrator</title>
+<script>(function(){try{var t=localStorage.getItem("cockpit-theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t);}}catch(e){}})();</script>
 <style>
-  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; margin: 2rem; color: #1a1a1a; background: #fafafa; }
-  h1 { margin-bottom: 0.2rem; }
-  .meta { color: #666; font-size: 0.85rem; margin-bottom: 1.5rem; }
-  section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1.5rem; }
-  h2 { margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 0.4rem; }
-  h3 { margin-bottom: 0.3rem; color: #444; }
+  :root {
+    --bg: #0d1117;
+    --bg-elevated: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --link: #6ea8fe;
+    --code-bg: #21262d;
+    --good-bg: #113626; --good-fg: #7ee2a8;
+    --bad-bg: #3d1616; --bad-fg: #ff9b9b;
+    --warn-bg: #3d330f; --warn-fg: #ffd873;
+    --muted-bg: #21262d; --muted-fg: #8b949e;
+    --shadow: rgba(0, 0, 0, 0.4);
+  }
+  html[data-theme="light"] {
+    --bg: #fafafa;
+    --bg-elevated: #fff;
+    --border: #ddd;
+    --text: #1a1a1a;
+    --text-dim: #666;
+    --link: #1a56db;
+    --code-bg: #f2f2f2;
+    --good-bg: #d7f7dd; --good-fg: #1a6b2c;
+    --bad-bg: #fbdada; --bad-fg: #9b1c1c;
+    --warn-bg: #fff3cd; --warn-fg: #8a6100;
+    --muted-bg: #eee; --muted-fg: #888;
+    --shadow: rgba(0, 0, 0, 0.08);
+  }
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; margin: 2rem; color: var(--text); background: var(--bg); }
+  h1 { margin-bottom: 0.2rem; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  #theme-toggle { font: inherit; font-size: 0.75rem; padding: 0.25rem 0.6rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text); cursor: pointer; }
+  #theme-toggle:hover { border-color: var(--link); }
+  .meta { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 1.5rem; }
+  section { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px var(--shadow); }
+  h2 { margin-top: 0; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+  h3 { margin-bottom: 0.3rem; color: var(--text-dim); cursor: pointer; user-select: none; }
+  #issues h3:hover { color: var(--link); }
   ul.issue-list, ul.pr-list { list-style: none; padding-left: 0; }
-  ul.issue-list li, ul.pr-list li { padding: 0.4rem 0; border-bottom: 1px dashed #eee; }
-  .rel { font-size: 0.85rem; color: #555; margin-top: 0.2rem; }
+  ul.issue-list li, ul.pr-list li { padding: 0.4rem 0; border-bottom: 1px dashed var(--border); }
+  .rel { font-size: 0.85rem; color: var(--text-dim); margin-top: 0.2rem; }
   .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.8rem; margin-left: 0.3rem; }
-  .badge.good { background: #d7f7dd; color: #1a6b2c; }
-  .badge.bad { background: #fbdada; color: #9b1c1c; }
-  .badge.warn { background: #fff3cd; color: #8a6100; }
-  .badge.muted { background: #eee; color: #666; }
-  .muted { color: #888; }
-  .unavailable { color: #9b1c1c; font-style: italic; }
+  .badge.good { background: var(--good-bg); color: var(--good-fg); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad-fg); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .badge.muted { background: var(--muted-bg); color: var(--muted-fg); }
+  .muted { color: var(--text-dim); }
+  .unavailable { color: var(--bad-fg); font-style: italic; }
   table.routing { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; }
-  table.routing th, table.routing td { border: 1px solid #eee; padding: 0.3rem 0.6rem; text-align: left; font-size: 0.9rem; }
-  code { background: #f2f2f2; padding: 0.05rem 0.3rem; border-radius: 3px; }
-  a { color: #1a56db; }
+  table.routing th, table.routing td { border: 1px solid var(--border); padding: 0.3rem 0.6rem; text-align: left; font-size: 0.9rem; }
+  code { background: var(--code-bg); padding: 0.05rem 0.3rem; border-radius: 3px; }
+  a { color: var(--link); }
 </style>
 </head>
 <body>
-<h1>Cockpit</h1>
-<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) + Phase 2 live progress (issue #52) &middot; re-run <code>cockpit.sh</code> to refresh</p>
+<h1>Cockpit <button id="theme-toggle" type="button">Toggle theme</button></h1>
+<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) + Phase 2 live progress (issue #52) + Phase 3a serve/theme/filter (issue #69) &middot; re-run <code>cockpit.sh</code> to refresh (or run <code>cockpit-serve.sh</code> for live auto-update)</p>
 ${renderLiveProgress()}
 ${renderIssues()}
 ${renderPRs()}
 ${renderRouting()}
 ${renderWorktrees()}
+<script>
+// Light/dark theme toggle (issue #69): flips html[data-theme] and persists
+// the choice to localStorage. Wrapped in try/catch so a file:// context (or
+// any environment without localStorage) never throws — purely cosmetic, so
+// it is safe to no-op.
+(function () {
+  try {
+    var KEY = "cockpit-theme";
+    var root = document.documentElement;
+    var btn = document.getElementById("theme-toggle");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        var current = root.getAttribute("data-theme") === "light" ? "light" : "dark";
+        var next = current === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        try { localStorage.setItem(KEY, next); } catch (e) { /* ignore */ }
+      });
+    }
+  } catch (e) { /* inert if the DOM/localStorage is unavailable */ }
+})();
+// Module-header click filter (issue #69): clicking a module <h3> in the
+// issues section shows only that module's <li data-module="..."> rows;
+// clicking the same header again (or filtering was already active) restores
+// all rows. Pure client-side, no server round-trip, inert if #issues is
+// absent (e.g. the gh-unavailable degrade path renders no list at all).
+(function () {
+  try {
+    var headers = document.querySelectorAll("#issues h3");
+    var items = document.querySelectorAll("#issues li[data-module]");
+    headers.forEach(function (h) {
+      h.addEventListener("click", function () {
+        var mod = h.textContent;
+        var wasActive = h.getAttribute("data-active") === "1";
+        headers.forEach(function (hh) { hh.removeAttribute("data-active"); });
+        items.forEach(function (li) {
+          if (wasActive) {
+            li.style.display = "";
+          } else {
+            li.style.display = li.getAttribute("data-module") === mod ? "" : "none";
+          }
+        });
+        if (!wasActive) h.setAttribute("data-active", "1");
+      });
+    });
+  } catch (e) { /* inert if the DOM is unavailable */ }
+})();
+</script>
 </body>
 </html>
 `;
