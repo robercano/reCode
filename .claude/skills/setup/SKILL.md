@@ -35,7 +35,7 @@ Do these in order. Stop and report if a step genuinely can't proceed.
 
 ## 2. Explain the model up front (so answers are informed)
 Briefly tell the user how the loop decides what to build:
-- The loop only builds issues **labelled `module:<name>`**, one at a time, when no PRs are open — an explicit opt-in queue.
+- The loop only builds issues labelled **`planned` + `module:<name>`**, one at a time, when no PRs are open — an explicit, owner-gated queue. Every issue starts as `backlog`; **only the owner** promotes it to `planned` (agents never assign `planned`).
 - Each `module` maps to exactly one filesystem `path`, the **hard boundary** a worker may edit within. So the
   module list you define here is both the isolation boundary and the set of labels the loop understands. Include
   any non-code area you want automatable (e.g. `docs`, `.claude`, `examples`).
@@ -98,9 +98,13 @@ before writing. Do **not** touch `.claude/settings.json` or any generic agent/sc
 `.env`, `.claude/settings.local.json`, and `.claude/state/` to confirm they actually resolve as ignored (e.g. a
 repo-level override elsewhere in `.gitignore` could still un-ignore one).
 
-## 6. Create the module labels
+## 6. Create the module + approval labels
 For every module `name`: `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh label create "module:<name>" --description "<desc>" --force`.
-Report created vs already-existing. Remind: **an issue is only loop-eligible once it carries a `module:*` label.**
+Also create the approval-workflow pair (if `gh label create` is unavailable in the installed gh, use `bot-gh.sh api repos/<owner>/<repo>/labels -f name=... -f color=... -f description=...`):
+- `backlog` (color `bfd4f2`) — "Filed, not yet approved by the owner — the loop must NOT pick it up"
+- `planned` (color `0e8a16`) — "Owner-approved for the autonomous loop (assigned ONLY by the owner)"
+
+Report created vs already-existing. Remind: **an issue is only loop-eligible once the OWNER labels it `planned` and it carries a `module:*` label**; issues agents file must be labelled `backlog`.
 
 ## 7. Verify the bot account
 - Confirm `.env` has `GH_BOT_TOKEN` and the bot can see the repo:

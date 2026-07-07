@@ -48,6 +48,11 @@ for m in "${modules[@]}"; do
 done
 gh label create "type:feature" --color 0052cc --description "Feature work scoped to one module" --force >/dev/null 2>&1 && echo "  label ✓ type:feature" || true
 gh label create "type:infra"   --color b60205 --description "Repo-wide tooling/infra (touches root config)" --force >/dev/null 2>&1 && echo "  label ✓ type:infra" || true
+# Approval workflow labels (docs/USAGE.md → "Autonomous loop & the issue queue"):
+# every issue starts `backlog`; ONLY the repo owner moves it to `planned`, which
+# is what makes it loop-eligible (together with a module:* label).
+gh label create "backlog" --color bfd4f2 --description "Filed, not yet approved by the owner — the loop must NOT pick it up" --force >/dev/null 2>&1 && echo "  label ✓ backlog" || true
+gh label create "planned" --color 0e8a16 --description "Owner-approved for the autonomous loop (assigned ONLY by the owner)" --force >/dev/null 2>&1 && echo "  label ✓ planned" || true
 
 # --- helper: create an issue unless an exact-title match already exists -------
 existing="$(gh issue list --state all --limit 500 --json title -q '.[].title' 2>/dev/null)"
@@ -64,9 +69,11 @@ BOUND="**Module boundary:** stay within this module's path; do not edit other mo
 # Replace the lines below with your real backlog. One mkissue per ticket:
 #   mkissue "<title>" "<comma,separated,labels>" "<body>"
 # Keep each ticket scoped to ONE module so workers get non-overlapping boundaries.
+# Seeded tickets are labelled `backlog` — the OWNER promotes each to `planned`
+# when it is approved for the loop (the loop ignores backlog issues).
 
 if [ "${#modules[@]}" -gt 0 ] && [ -n "${modules[0]}" ]; then
-  mkissue "[${modules[0]}] EXAMPLE — replace with a real ticket" "module:${modules[0]},type:feature" \
+  mkissue "[${modules[0]}] EXAMPLE — replace with a real ticket" "module:${modules[0]},type:feature,backlog" \
 "This is a placeholder created by seed-issues.sh to show the pattern. Delete it and add your own.
 
 $BOUND
