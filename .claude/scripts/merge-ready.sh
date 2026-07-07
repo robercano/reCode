@@ -86,4 +86,27 @@ for n in $(gh pr list -R "$repo" --base "$base" --state open --json number -q '.
     echo "{\"pr\":$n,\"action\":\"skip\",\"reason\":\"${verdict#SKIP:}\",\"title\":\"$title\"}"; skipped=$((skipped+1))
   fi
 done
+
+# Post-merge: fast-forward the LOCAL checkout to the freshly-merged base so the
+# owner's terminal/IDE shows the latest code without a manual pull. Strictly safe:
+# acts ONLY when the checkout is on the base branch with a clean tree, and only
+# fast-forwards (never a merge commit, never a branch switch, never clobbers
+# uncommitted work). Untracked sandbox device-node masks don't count as changes.
+# Any obstacle -> skip with a reason; never force. See docs/HARDENING.md.
+if [ "$merged" -gt 0 ]; then
+  wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  cur="$(git -C "${wt:-.}" symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)"
+  if [ -z "$wt" ]; then
+    :
+  elif [ "$cur" != "$base" ]; then
+    echo "{\"local_sync\":\"skip\",\"reason\":\"checkout on '$cur', not '$base'\"}"
+  elif ! git -C "$wt" diff --quiet || ! git -C "$wt" diff --cached --quiet; then
+    echo "{\"local_sync\":\"skip\",\"reason\":\"working tree has tracked changes\"}"
+  elif git -C "$wt" fetch --quiet origin "$base" 2>/dev/null \
+       && git -C "$wt" merge --ff-only -q "origin/$base" 2>/dev/null; then
+    echo "{\"local_sync\":\"ok\",\"branch\":\"$base\",\"head\":\"$(git -C "$wt" rev-parse --short HEAD)\"}"
+  else
+    echo "{\"local_sync\":\"skip\",\"reason\":\"fetch or fast-forward failed (diverged/offline?)\"}"
+  fi
+fi
 echo "=== merge-ready: merged=$merged skipped=$skipped ==="
