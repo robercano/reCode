@@ -1,0 +1,16 @@
+diff --git a/src/farewell.js b/src/farewell.js
+new file mode 100644
+--- /dev/null
++++ b/src/farewell.js
+@@ -0,0 +1,11 @@
++'use strict'
++
++/** Canned "recorded implementer" change (smoke-fanout.sh) — stays inside src/. */
++function farewell(name) {
++  if (typeof name !== 'string' || name.length === 0) {
++    throw new TypeError('name must be a non-empty string')
++  }
++  return `Goodbye, ${name}!`
++}
++
++module.exports = { farewell }

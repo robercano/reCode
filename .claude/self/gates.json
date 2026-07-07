@@ -11,12 +11,12 @@
   ],
 
   "gates": {
-    "_note": "Implemented in .claude/self/checks.sh — node + bash only, no external linters, so they pass in a bare environment.",
+    "_note": "Static checks in .claude/self/checks.sh; end-to-end fan-out smoke in .claude/self/smoke-fanout.sh (issue #64) — node + bash + git only, so they pass in a bare environment. test_affected stays static-only: it's the Stop-hook fast path and shouldn't pay the smoke's git churn on every stop.",
     "install": "",
     "build": "bash .claude/self/checks.sh build",
     "lint": "bash .claude/self/checks.sh lint",
     "typecheck": "",
-    "test": "bash .claude/self/checks.sh test",
+    "test": "bash .claude/self/checks.sh test && bash .claude/self/smoke-fanout.sh",
     "test_affected": "bash .claude/self/checks.sh test",
     "coverage": "",
     "coverage_threshold": 0,
