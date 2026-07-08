@@ -120,6 +120,18 @@ With `pr-per-agent`, the standing loop per ticket looks like:
    haven't reviewed — pushing after approval requires re-approval. Uses ambient `gh` auth (merging is an
    owner action; only PR *creation* uses the bot).
 
+**Or run it as one script:** `.claude/scripts/loop-tick.sh` runs the census (`loop-census.sh`) plus all three
+scripts above, IN ORDER, with their full output preserved, and prints exactly one machine-readable verdict line
+at the end — `action=none`, `action=advance issue=N`, or `action=feedback pr=N` — collapsing the whole tick
+into a single pre-approvable command. It also owns a self-healing spawn lock
+(`.claude/state/loop-advance.lock`) so a second tick fired before the first ADVANCE has even reached PR stage
+never double-spawns an orchestrator for the same issue: the lock is released once the issue's branch exists
+(work has reached PR-race stage) or an open PR exists, OR — if neither ever happens because the spawn
+crashed before pushing a branch — once the lock is older than its 15-minute TTL, so a crashed spawn cannot
+wedge the issue forever. The read-check-write around the lock is additionally serialized with `flock` so two
+overlapping ticks can't both pass the check and double-spawn; see the script's header comment for the full
+contract.
+
 With all three wired, the loop runs hands-off: **add issues → review → approve → it merges and advances**.
 A natural step 4 is to start the next `module:*` issue only when **no PRs are open**, so work stays
 serialized (one issue in flight) and bounded. Caveats: cron jobs fire only while Claude Code is running,
@@ -162,16 +174,26 @@ decide what the loop actually touches:
 labelled it `planned`. Commenting "approved" on an issue does nothing — nothing watches issue text; the
 `planned` label is the only approval signal.
 
+**Model selection.** Drive the loop's tick sessions with **Sonnet**. Ticks are cheap but highly
+repetitive, and repetition is where smaller models degrade: a Haiku-driven tick session has been observed
+to stop invoking the step scripts entirely — fabricating census/merge output from the pattern of earlier
+quiet ticks (missing an owner approval and a `planned` issue for hours) — and to misread an in-flight
+orchestration as hung, double-spawning orchestrators for the same issue. Reserve **Fable or Opus** for
+the owner-side judgment work: scoping, planning, and filing issues. (Script-side hardening that reduces
+the tick's model-dependence landed in issue #81 as `.claude/scripts/loop-tick.sh`: it computes the
+census/feedback/advance verdict and the spawn lock in shell, rather than leaving that arithmetic to be
+re-derived from a prompt every firing — Sonnet remains the recommended driver for the session that invokes
+it, since the driving session still has to read the verdict and act on it, e.g. spawning the orchestrator.)
+
 > Historical note: before the `planned` label existed, the `module:*` label alone was the opt-in queue.
 > If a repo predates the split, treat `module:*`-only issues as `backlog` until the owner adds `planned`.
 
-**Self-hosting this repo's own backlog?** **`.claude/self/pr-loop-self.md`** runs the
-same loop mechanics self-hosted, against this repo's own `.claude`/`docs`/`examples`/`.github` backlog, using
+**Self-hosting this repo's own backlog?** **`.claude/self/pr-loop-self.md`** runs the same loop mechanics
+self-hosted, against this repo's own `.claude`/`docs`/`examples`/`.github` backlog, using
 **`.claude/self/gates.json`** as the adapter (module map, gates, review lenses) instead of the placeholder
-`.claude/gates.json` above. This file lives under `.claude/self/`, not `.claude/commands/`, so it is **not**
-shipped to downstream plugin consumers and is not a registered slash command — ask Claude to read and follow
-it directly (e.g. "read and run `.claude/self/pr-loop-self.md`"). See `.claude/self/README.md` for the full
-self-adapter contract.
+`.claude/gates.json` above. It lives under `.claude/self/` (not `.claude/commands/`), so it is self-hosting-only
+— not a registered slash command and never packaged to downstream installs of the plugin; ask Claude to read and
+follow it directly. See `.claude/self/README.md` for the self-adapter contract.
 
 New project? Wire this up with the **[new-project configuration
 checklist](GETTING_STARTED.md#new-project-configuration-checklist)**.
