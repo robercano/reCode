@@ -2,5 +2,12 @@
   "name": "orchestrator",
   "version": "0.1.3",
   "description": "Multi-agent orchestration harness: fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
-  "author": { "name": "Roberto Cano" }
+  "author": { "name": "Roberto Cano" },
+  "commands": [
+    "./commands/harden.md",
+    "./commands/pr-loop.md",
+    "./commands/setup-orchestrator.md",
+    "./commands/sync-orchestrator.md",
+    "./commands/test-pr.md"
+  ]
 }

@@ -6,11 +6,16 @@ that ship to downstream installs are what runs the live self-hosted PR loop here
 
 ## Dual command invocation
 - **In-repo (dogfooding):** commands run as project-level slash commands, e.g. `/pr-loop`,
-  `/pr-loop-self`, `/harden`, `/setup-orchestrator`, `/test-pr`.
+  `/harden`, `/setup-orchestrator`, `/sync-orchestrator`, `/test-pr`.
 - **Installed as a plugin:** Claude Code auto-namespaces commands under the plugin `name`
   (`orchestrator`), so the same commands become `/orchestrator:pr-loop`,
-  `/orchestrator:pr-loop-self`, etc. No file renames are needed for this — the namespace comes
+  `/orchestrator:harden`, etc. No file renames are needed for this — the namespace comes
   from `name` in `plugin.json`, not from filenames.
+- `plugin.json` carries an explicit `commands` allowlist (issue #76) so only consumer-facing
+  commands ship downstream. `.claude/self/pr-loop-self.md` — this repo's own self-hosting loop
+  prompt — is deliberately excluded: it lives under `.claude/self/` (not `.claude/commands/`), so
+  it is never auto-discovered as a project slash command either. See `.claude/self/README.md` for
+  how to run it in-repo.
 
 ## The `${CLAUDE_PLUGIN_ROOT:-.claude}` fallback
 Agent/command prompts invoke scripts as:
@@ -23,12 +28,16 @@ shipped `scripts/` resolve there. In-repo, the variable is unset, so the fallbac
 the live self-hosting loop is unaffected.
 
 ## What's plugin-distributable (phase 1 scope)
-Auto-discovered from the plugin root: `commands/`, `agents/`, `hooks/hooks.json`, `scripts/`.
+Auto-discovered from the plugin root: `agents/`, `hooks/hooks.json`, `scripts/`. `commands/` is
+instead scoped by `plugin.json`'s explicit `commands` allowlist, which lists only the
+consumer-facing command files — this disables the default directory-wide auto-discovery for
+`commands/` so an in-repo-only file added under `.claude/commands/` wouldn't ship by accident.
 
 Not distributed by this plugin (repo-scaffolded, project-specific):
 - `.claude/workflows/*.js` — deterministic fan-out workflows, not plugin-portable.
-- `.claude/self/*` — this repo's OWN self-hosting adapter (gates, checks), not for downstream
-  projects; downstream adopters get the placeholder `.claude/gates.json` instead.
+- `.claude/self/*` — this repo's OWN self-hosting adapter (gates, checks, and the
+  `pr-loop-self.md` loop prompt), not for downstream projects; downstream adopters get the
+  placeholder `.claude/gates.json` instead.
 
 ## Enabling in a consuming project
 
