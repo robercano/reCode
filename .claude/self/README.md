@@ -39,12 +39,18 @@ To have the autonomous loop work this repo's own `module:*` backlog:
    **`.claude/self/gates.json`** as its adapter (module map + gates) for this repo. The generic agents/scripts
    otherwise behave identically — worker boundaries come from this file's `modules`, gates from its `gates`.
 
-The durable, first-class way to do this is **`/pr-loop-self`** (`.claude/commands/pr-loop-self.md`) — it
-mirrors `/pr-loop` exactly (arm/re-arm cron, adaptive cadence, poll → merge → address-feedback → advance) but
-carries `GATES_FILE=.claude/self/gates.json` through every gate call and every spawned agent, and adapts on
-the self modules (`module:docs`/`module:harness`/`module:examples`/`module:ci`) instead of the project's own
+The durable, first-class way to do this is **`.claude/self/pr-loop-self.md`** — it mirrors `/pr-loop` exactly
+(arm/re-arm cron, adaptive cadence, poll → merge → address-feedback → advance) but carries
+`GATES_FILE=.claude/self/gates.json` through every gate call and every spawned agent, and adapts on the self
+modules (`module:docs`/`module:harness`/`module:examples`/`module:ci`) instead of the project's own
 `gates.json`. It uses a distinct cron identity marker ("self-hosted autonomous PR loop") so it never collides
 with a `/pr-loop` job in the same session.
+
+This file lives under `.claude/self/` (not `.claude/commands/`) so it is **not** shipped to downstream plugin
+consumers — see `.claude/.claude-plugin/plugin.json`'s explicit `commands` allowlist (issue #76). It is
+therefore not a registered `/pr-loop-self` slash command; to (re)arm the self-hosted loop, ask Claude to read
+and follow the instructions in `.claude/self/pr-loop-self.md` directly (e.g. "read and run
+`.claude/self/pr-loop-self.md`").
 
 ## Self-hosting promotion (the one gotcha)
 Agent-definition / `settings.json` / hook changes only take effect on a **fresh session**. So when the loop

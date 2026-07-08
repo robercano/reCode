@@ -165,10 +165,13 @@ labelled it `planned`. Commenting "approved" on an issue does nothing — nothin
 > Historical note: before the `planned` label existed, the `module:*` label alone was the opt-in queue.
 > If a repo predates the split, treat `module:*`-only issues as `backlog` until the owner adds `planned`.
 
-**Self-hosting this repo's own backlog?** **`/orchestrator:pr-loop-self`** (`.claude/commands/pr-loop-self.md`) runs the
+**Self-hosting this repo's own backlog?** **`.claude/self/pr-loop-self.md`** runs the
 same loop mechanics self-hosted, against this repo's own `.claude`/`docs`/`examples`/`.github` backlog, using
 **`.claude/self/gates.json`** as the adapter (module map, gates, review lenses) instead of the placeholder
-`.claude/gates.json` above. See `.claude/self/README.md` for the self-adapter contract.
+`.claude/gates.json` above. This file lives under `.claude/self/`, not `.claude/commands/`, so it is **not**
+shipped to downstream plugin consumers and is not a registered slash command — ask Claude to read and follow
+it directly (e.g. "read and run `.claude/self/pr-loop-self.md`"). See `.claude/self/README.md` for the full
+self-adapter contract.
 
 New project? Wire this up with the **[new-project configuration
 checklist](GETTING_STARTED.md#new-project-configuration-checklist)**.
