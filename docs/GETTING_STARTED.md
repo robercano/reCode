@@ -184,6 +184,14 @@ model (the `module:*` opt-in queue + the owner-approval merge gate) that this ch
    set branch protection / required status checks on `merge.baseBranch` if your plan supports it.
 7. **Arm the loop** — run **`/orchestrator:pr-loop`**. It self-adjusts cadence (FAST when there's ≥1 open PR or
    ≥1 open `module:*` issue, else IDLE) but the cron is session-scoped, so re-run it at the start of each session.
+   **Pick the right model for each side of the loop:** run the tick session on **Sonnet** — the ticks are
+   repetitive, and that repetition is exactly where smaller models drift (a Haiku-driven tick session has been
+   observed to stop running the step scripts and fabricate their output, and to double-spawn orchestrators for
+   one issue). `.claude/scripts/loop-tick.sh` hardens the tick itself — one script computes the census/feedback/
+   advance verdict and a self-healing spawn lock, instead of a model re-deriving it from a prompt every firing
+   (see [`USAGE.md`](USAGE.md) → "Model selection") — but the driving session still needs Sonnet to read that
+   verdict and act on it. Use **Fable or Opus** for the owner-side judgment
+   work — scoping, planning, and filing issues — then let the loop execute the approved queue.
 8. *(optional)* **Hardening** — `/orchestrator:harden` for the bypass + strict-sandbox profile, see
    [`HARDENING.md`](HARDENING.md).
 
