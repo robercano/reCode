@@ -35,14 +35,36 @@
 # `action=advance issue=N`, so a SECOND tick — fired before the first
 # implementer has even pushed a branch — is refused by this script's own
 # logic rather than by model discipline. Format: one line,
-# `issue=N ts=<UTC ISO-8601>`. INVARIANT: the lock for issue N is considered
-# released once EITHER (a) an open PR now exists for N, or (b) no
-# feat/issue-N-* branch exists at all — i.e. census no longer reports N as
-# advance_ready or in_flight. This script self-heals: on every run it checks
-# the held lock (if any) against the FRESH census output and clears it if it
-# no longer qualifies, so a stale lock (e.g. left behind by a crashed
-# orchestrator) never permanently blocks the issue. Written atomically
-# (temp file + mv) to avoid a torn read from a concurrent tick.
+# `issue=N ts=<UTC ISO-8601>`.
+#
+# INVARIANT (corrected — see issue #81 re-review): a lock for issue N is
+# held to cover exactly the narrow window between "this tick just emitted
+# action=advance issue=N" and "an orchestrator has pushed feat/issue-N-*".
+# While that window is open, census reports N as advance_ready (no branch
+# yet) — the SAME signal that means "N still needs advancing" — so the two
+# cannot be told apart by advance_ready alone. The lock is released as soon
+# as EITHER:
+#   (a) an open PR now exists for N (census no longer reports N as
+#       advance_ready — feedback/merge scripts own N from here), OR
+#   (b) a feat/issue-N-* branch now exists with no open PR yet (census
+#       reports N as in_flight) — the orchestrator got at least as far as
+#       pushing a branch, so the pre-branch race this lock guards against is
+#       over; a second tick would refuse to re-advance N anyway once it's
+#       in_flight, OR
+#   (c) the lock is older than LOCK_TTL_SECONDS and N is STILL
+#       advance_ready with no branch — this can only mean the spawn that
+#       should have created the branch crashed (or never started) before
+#       reaching (b), so a lock stuck in this state is treated as a crashed
+#       spawn and cleared to let a later tick re-advance N.
+# This script self-heals: on every run it checks the held lock (if any)
+# against the FRESH census output plus the TTL above and clears it whenever
+# it no longer qualifies, so a crashed orchestrator never permanently wedges
+# the issue. Written atomically (temp file + mv) to avoid a torn read, and
+# the whole read-check-write critical section is additionally serialized
+# with `flock` (a separate .claude/state/loop-advance.flock) so two ticks
+# racing each other cannot both observe "no lock" and both emit
+# `action=advance issue=N` (a TOCTOU double-spawn — atomic temp+mv alone only
+# prevents a torn READ, not two processes interleaving read-then-write).
 #
 # Repo derived from the git remote; override with $1. Bot login via
 # $BOT_LOGIN (passed through to the step scripts). Honors $GATES_FILE exactly
@@ -91,9 +113,31 @@ in_flight_issues="$(printf '%s\n' "$census_out" | sed -n 's/^in_flight=//p')"
 feedback_pr="$(printf '%s\n' "$feedback_out" | awk -F'\t' 'NF>=1 && $1 ~ /^[0-9]+$/ {print $1}' | sort -n | head -1)"
 
 # --- Spawn lock: read + self-heal against the FRESH census above -----------
+# TTL rationale: this lock is written the instant a tick emits
+# `action=advance issue=N`, before the orchestrator that will push
+# `feat/issue-N-*` even exists yet. A real orchestrator reaches that push
+# within at most a few minutes of being spawned. 15 minutes is comfortably
+# above that, so a lock that is STILL "no branch, still advance_ready" past
+# this TTL can only mean the spawn crashed (or was never launched) before
+# creating a branch — self-heal by clearing it rather than wedging the issue
+# forever (see INVARIANT (c) in the header comment above).
+LOCK_TTL_SECONDS=900
+
 state_dir="$root/.claude/state"
 lock_file="$state_dir/loop-advance.lock"
+flock_file="$state_dir/loop-advance.flock"
 mkdir -p "$state_dir"
+
+# Concurrent-tick guard (issue #81 re-review, TOCTOU): two overlapping ticks
+# must not both observe "no lock held for N" and both emit
+# `action=advance issue=N` — exactly the double-spawn bug #81 exists to kill.
+# Atomic temp+mv (below) only prevents a torn READ of the lock file; it does
+# not make "read lock -> self-heal -> decide -> write lock" atomic ACROSS two
+# processes. Serialize that whole critical section with a real file lock so
+# only one tick at a time can be inside it (released automatically when this
+# script exits and fd 9 closes).
+exec 9>"$flock_file"
+flock -x 9
 
 lock_issue=""
 if [ -f "$lock_file" ]; then
@@ -102,10 +146,30 @@ fi
 
 if [ -n "$lock_issue" ]; then
   still_qualifies=0
-  [ "$lock_issue" = "$advance_ready" ] && still_qualifies=1
-  printf '%s\n' "$in_flight_issues" | grep -qx "$lock_issue" && still_qualifies=1
+  reason=""
+  if printf '%s\n' "$in_flight_issues" | grep -qx "$lock_issue"; then
+    # (b): a branch now exists — the pre-branch window this lock guards is
+    # closed (a second tick would refuse to advance N anyway once in_flight).
+    reason="branch now exists (in_flight) — lock's purpose is served"
+  elif [ "$lock_issue" = "$advance_ready" ]; then
+    # Still no branch. Either the spawn just started (keep the lock) or it
+    # crashed before ever pushing a branch (clear it) — (c): use the
+    # recorded ts as a bounded TTL to tell the two apart.
+    lock_ts="$(sed -n 's/^issue=[0-9][0-9]* ts=\(.*\)$/\1/p' "$lock_file" | head -1)"
+    lock_epoch="$(date -u -d "$lock_ts" +%s 2>/dev/null || echo 0)"
+    now_epoch="$(date -u +%s)"
+    age=$(( now_epoch - lock_epoch ))
+    if [ "$lock_epoch" -eq 0 ] || [ "$age" -gt "$LOCK_TTL_SECONDS" ]; then
+      reason="lock is older than ${LOCK_TTL_SECONDS}s with still no branch — treating as a crashed spawn"
+    else
+      still_qualifies=1
+    fi
+  else
+    # (a): no longer advance_ready and no branch -> an open PR must exist now.
+    reason="no longer advance_ready/in_flight — open PR exists or branch is gone"
+  fi
   if [ "$still_qualifies" -eq 0 ]; then
-    echo "# lock self-heal: cleared stale spawn lock for issue=$lock_issue (no longer advance_ready/in_flight — open PR exists or branch is gone)"
+    echo "# lock self-heal: cleared stale spawn lock for issue=$lock_issue ($reason)"
     rm -f "$lock_file"
     lock_issue=""
   fi

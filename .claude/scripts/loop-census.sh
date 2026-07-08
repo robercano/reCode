@@ -74,7 +74,11 @@ while IFS=$'\t' read -r num labels title; do
   [ "$hit" -eq 1 ] || continue
   planned_count=$((planned_count + 1))
   # Existing feat/issue-<n>-* branch (local or remote) means it's already in flight.
-  branch=$(git -C "$root" branch -a --list "*feat/issue-$num-*" | head -1 | sed 's/^[* ]*//;s|^remotes/||')
+  # NOTE: `| head -1` can make `git` see SIGPIPE (exit 141) if head closes the
+  # pipe before git finishes writing; under `set -euo pipefail` that would abort
+  # this whole script. `|| true` on the assignment absorbs that non-fatal
+  # pipeline failure — the captured output (head's one line) is unaffected.
+  branch=$(git -C "$root" branch -a --list "*feat/issue-$num-*" | head -1 | sed 's/^[* ]*//;s|^remotes/||') || true
   [ -n "$branch" ] || branch="none"
   detail+="issue=$num branch=$branch title=$title"$'\n'
   if [ "$advance_ready" = "none" ] && [ "$branch" = "none" ] && [ "$open_prs" -eq 0 ]; then

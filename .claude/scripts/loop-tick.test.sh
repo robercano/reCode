@@ -178,6 +178,67 @@ check "all four labeled step headers appear in the tick's output" bash -c '
 ' _ "$out1"
 check "notify-poll.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "fake notify-poll output"' _ "$out1"
 check "merge-ready.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "merge-ready: merged=0 skipped=0"' _ "$out1"
+# census_out and feedback_out are captured into shell variables and re-printed
+# via `printf '%s\n' "$census_out"` / `"$feedback_out"` (loop-tick.sh) — assert
+# a BODY line from each fake fixture (not just the "N/4 ..." header banner
+# above it) survives verbatim, so silently deleting either printf (which
+# would swallow exactly the output a human needs to debug a wrong verdict)
+# fails this test loudly. Mutation-checked: removing either printf line from
+# loop-tick.sh makes the corresponding check below fail while all the header
+# checks above stay green.
+check "loop-census.sh full BODY line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "cadence=IDLE cron=*/15 * * * *"' _ "$out1"
+check "pr-feedback.sh full BODY line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "9	feat/issue-9-x	owner	2026-01-01T00:00:00Z"' _ "$out4"
+
+# ---------------------------------------------------------------------------
+# 8. TTL self-heal: a lock for the SAME issue that's older than LOCK_TTL_SECONDS
+#    and STILL advance_ready (no branch ever showed up) must be treated as a
+#    crashed spawn — cleared and re-advanced — not kept forever the way a
+#    fresh same-issue lock correctly is (scenario 3).
+# ---------------------------------------------------------------------------
+dir8="$(new_fixture scenario8 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=9 branch=none title=Fresh issue
+advance_ready=9
+cadence=FAST cron=* * * * *' '')"
+lock8="$dir8/../state/loop-advance.lock"
+mkdir -p "$(dirname "$lock8")"
+printf 'issue=9 ts=2020-01-01T00:00:00Z\n' > "$lock8"
+out8="$(run_tick "$dir8")"
+check "scenario 8 (TTL self-heal): stale same-issue lock past TTL is cleared and re-advanced" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=advance issue=9" ]' _ "$out8"
+check "scenario 8: diagnostic cites a crashed spawn (TTL expiry), not just self-heal" bash -c 'printf "%s\n" "$1" | grep -q "crashed spawn"' _ "$out8"
+check "scenario 8: lock file now has a FRESH ts, not the stale 2020 one" bash -c '! grep -q "2020-01-01" "$1"' _ "$lock8"
+
+# ---------------------------------------------------------------------------
+# 9. Concurrent-tick TOCTOU (issue #81 re-review): two ticks fired back to
+#    back, before either has written the lock, must not BOTH pass the
+#    check-then-write and both emit action=advance for the same issue — the
+#    exact double-spawn bug #81 exists to kill. Fire them as real overlapping
+#    background processes against the SAME fixture/state dir; `flock` must
+#    serialize the read-check-write so exactly one advances and the other
+#    backs off having observed the first tick's lock.
+# ---------------------------------------------------------------------------
+dir9="$(new_fixture scenario9 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=42 branch=none title=Concurrent thing
+advance_ready=42
+cadence=FAST cron=* * * * *' '')"
+outA_file="$work/scenario9.a.out"
+outB_file="$work/scenario9.b.out"
+run_tick "$dir9" > "$outA_file" &
+pidA=$!
+run_tick "$dir9" > "$outB_file" &
+pidB=$!
+wait "$pidA"
+wait "$pidB"
+verdictA="$(tail -1 "$outA_file")"
+verdictB="$(tail -1 "$outB_file")"
+advances=0
+[ "$verdictA" = "action=advance issue=42" ] && advances=$((advances + 1))
+[ "$verdictB" = "action=advance issue=42" ] && advances=$((advances + 1))
+check "scenario 9 (concurrent ticks): exactly ONE of two overlapping ticks advances issue=42" bash -c '[ "$1" -eq 1 ]' _ "$advances"
+check "scenario 9: the other tick backs off with action=none instead of double-advancing" bash -c '[ "$1" = "action=none" ] || [ "$2" = "action=none" ]' _ "$verdictA" "$verdictB"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

@@ -125,7 +125,12 @@ scripts above, IN ORDER, with their full output preserved, and prints exactly on
 at the end — `action=none`, `action=advance issue=N`, or `action=feedback pr=N` — collapsing the whole tick
 into a single pre-approvable command. It also owns a self-healing spawn lock
 (`.claude/state/loop-advance.lock`) so a second tick fired before the first ADVANCE has even reached PR stage
-never double-spawns an orchestrator for the same issue; see the script's header comment for the full contract.
+never double-spawns an orchestrator for the same issue: the lock is released once the issue's branch exists
+(work has reached PR-race stage) or an open PR exists, OR — if neither ever happens because the spawn
+crashed before pushing a branch — once the lock is older than its 15-minute TTL, so a crashed spawn cannot
+wedge the issue forever. The read-check-write around the lock is additionally serialized with `flock` so two
+overlapping ticks can't both pass the check and double-spawn; see the script's header comment for the full
+contract.
 
 With all three wired, the loop runs hands-off: **add issues → review → approve → it merges and advances**.
 A natural step 4 is to start the next `module:*` issue only when **no PRs are open**, so work stays
