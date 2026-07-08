@@ -33,6 +33,11 @@ do_build() {
       }
     }
   ' || rc=1
+  # pr-loop-self.md is self-hosting-only (issue #76): available locally as
+  # /pr-loop-self slash command (.claude/commands/pr-loop-self.md) but excluded
+  # from downstream distribution via .claude/.claude-plugin/.gitignore.
+  [ -e ".claude/commands/pr-loop-self.md" ] || { echo "build: pr-loop-self.md missing from .claude/commands/ (issue #76)"; rc=1; }
+  [ -e ".claude/self/pr-loop-self.md" ] || { echo "build: pr-loop-self.md missing from .claude/self/ (issue #76)"; rc=1; }
   [ "$rc" -eq 0 ] && echo "build: JSON configs valid + adapters well-shaped"
   return "$rc"
 }
