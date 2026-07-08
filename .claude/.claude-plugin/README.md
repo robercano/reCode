@@ -9,8 +9,12 @@ that ship to downstream installs are what runs the live self-hosted PR loop here
   `/pr-loop-self`, `/harden`, `/setup-orchestrator`, `/test-pr`.
 - **Installed as a plugin:** Claude Code auto-namespaces commands under the plugin `name`
   (`orchestrator`), so the same commands become `/orchestrator:pr-loop`,
-  `/orchestrator:pr-loop-self`, etc. No file renames are needed for this — the namespace comes
+  `/orchestrator:harden`, etc. No file renames are needed for this — the namespace comes
   from `name` in `plugin.json`, not from filenames.
+- **`/pr-loop-self` is self-hosting-only** (issue #76): It lives in `.claude/commands/pr-loop-self.md`
+  and IS auto-discovered as a slash command `/pr-loop-self` in this repo, but is **excluded from
+  plugin distribution to downstream projects** via `.claude/.claude-plugin/.gitignore`. The reference
+  documentation lives at `.claude/self/pr-loop-self.md` (not auto-discovered). See `.claude/self/README.md`.
 
 ## The `${CLAUDE_PLUGIN_ROOT:-.claude}` fallback
 Agent/command prompts invoke scripts as:

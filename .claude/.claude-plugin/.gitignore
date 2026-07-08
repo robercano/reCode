@@ -1,0 +1,4 @@
+# Self-hosting-only commands — available locally via slash commands but excluded from
+# plugin distribution to downstream projects. See .claude/self/README.md → Running the loop
+# self-hosted; these commands are read directly from .claude/self/ or used locally, never shipped.
+/commands/pr-loop-self.md
