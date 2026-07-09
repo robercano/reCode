@@ -41,6 +41,7 @@
       "Bash(bash .claude/scripts/notify-poll.sh:*)",
       "Bash(bash .claude/scripts/pr-feedback.sh:*)",
       "Bash(bash .claude/scripts/merge-ready.sh:*)",
+      "Bash(bash .claude/scripts/loop-tick.sh:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
