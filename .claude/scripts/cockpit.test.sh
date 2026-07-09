@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # cockpit.test.sh — offline smoke test for cockpit.sh (issue #51, extended for
-# Phase 2 live progress in issue #52, and Phase 3a serve/theme/filter in
-# issue #69).
+# Phase 2 live progress in issue #52, Phase 3a serve/theme/filter in issue #69,
+# and the "Loop health" panel in issue #85).
 #
-# Runs the generator against controlled FIXTURE issue/PR/events JSON (never
-# live gh/network, and never the real event log — see cockpit.sh's
-# --fixtures mode), then asserts the produced HTML contains every required
-# section (issues-by-module with blocking relationships, PRs with review/CI
-# badges, a routing table with a real `model:` value, a worktrees section,
-# a live-progress panel deduped to each worker's latest phase, the default
-# dark-theme marker) and that the blocking-relationship parser
-# (`cockpit.sh --parse-blocking`) produces the expected edges for a known
-# fixture body. Also exercises the "gh/network unavailable" degrade path via
-# COCKPIT_GH_BIN, entirely offline (no real gh call, no .env), and a serve-mode
-# smoke case (cockpit-serve.sh) against the SAME fixtures, over 127.0.0.1 only
-# — no real network/gh either way.
+# Runs the generator against controlled FIXTURE issue/PR/events/loop-ticks
+# JSON (never live gh/network, and never the real event/tick logs — see
+# cockpit.sh's --fixtures mode), then asserts the produced HTML contains every
+# required section (issues-by-module with blocking relationships, PRs with
+# review/CI badges, a routing table with a real `model:` value, a worktrees
+# section, a live-progress panel deduped to each worker's latest phase, the
+# default dark-theme marker, and a loop-health panel showing the last tick +
+# cadence + newest-first verdict history + a STALLED banner once a tick is
+# overdue) and that the blocking-relationship parser (`cockpit.sh
+# --parse-blocking`) produces the expected edges for a known fixture body.
+# Also exercises the "gh/network unavailable" / "no log at all" degrade paths
+# via COCKPIT_GH_BIN / missing CLAUDE_EVENTS_FILE / CLAUDE_TICKS_FILE, entirely
+# offline (no real gh call, no .env), and a serve-mode smoke case
+# (cockpit-serve.sh) against the SAME fixtures, over 127.0.0.1 only — no real
+# network/gh either way.
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/cockpit.test.sh
@@ -121,9 +124,20 @@ cat > "$work/fixtures/events.jsonl" <<'EOF'
 {"ts":"2026-01-01T00:02:00Z","role":"reviewer","model":"opus","task":"52b","phase":"reviewing","lens":"correctness","detail":""}
 {"ts":"2026-01-01T00:03:00Z","role":"<script>xss()</script>\"","model":"sonnet","task":"52c","phase":"scoped","lens":"","detail":""}
 EOF
+# Loop tick fixture (issue #85, "Loop health" panel): two ticks, file order =
+# chronological, so the LAST line (FAST/advance) is the most recent tick and
+# must render as "Last tick" while BOTH rows appear in the verdict history,
+# newest first.
+cat > "$work/fixtures/loop-ticks.jsonl" <<'EOF'
+{"ts":"2026-01-01T00:00:00Z","verdict":"action=none","cadence":"IDLE","action":"none","issue":"","pr":""}
+{"ts":"2026-01-01T00:15:00Z","verdict":"action=advance issue=7","cadence":"FAST","action":"advance","issue":"7","pr":""}
+EOF
 
 html="$work/cockpit.html"
-bash "$cockpit" --fixtures "$work/fixtures" "$html" >"$work/stdout.log" 2>"$work/stderr.log"
+# COCKPIT_NOW pins "now" to 90s after the last tick above -- inside FAST's
+# 120s stall threshold, so this run must NOT show the STALLED banner (that
+# path is exercised separately in section 2b below).
+COCKPIT_NOW="2026-01-01T00:16:30Z" bash "$cockpit" --fixtures "$work/fixtures" "$html" >"$work/stdout.log" 2>"$work/stderr.log"
 rc=$?
 check "generator exits 0 on fixture run" [ "$rc" -eq 0 ]
 check "generator prints the output path" grep -qF "$html" "$work/stdout.log"
@@ -208,6 +222,35 @@ check "dark theme marker present by default" grep -qF 'data-theme="dark"' "$html
 check "theme-toggle button present" grep -q 'id="theme-toggle"' "$html"
 check "issue rows carry data-module for the client-side filter" grep -q 'data-module="module:harness"' "$html"
 
+# Loop health panel (issue #85): last tick, cadence, verdict history newest
+# first, and NO stall banner (COCKPIT_NOW above is only 90s past the last
+# tick, inside FAST's 120s threshold).
+check "loop health section present" grep -q '<section id="loop-health"' "$html"
+check "last tick's ts and verdict are rendered" grep -qF '<code>2026-01-01T00:15:00Z</code> &middot; verdict <code>action=advance issue=7</code>' "$html"
+check "current cadence (FAST) is rendered" grep -qF '<span class="badge muted">FAST</span>' "$html"
+check "no STALLED banner when the last tick is within the cadence threshold" bash -c '! grep -q "STALLED" "$1"' _ "$html"
+check "verdict history renders BOTH ticks, newest first" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="loop-health">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("loop-health section not found");
+  const rows = [...m[0].matchAll(/<tr><td>([^<]*)<\/td><td><code>([^<]*)<\/code><\/td>/g)].map((r) => r[2]);
+  const want = ["action=advance issue=7", "action=none"];
+  if (JSON.stringify(rows) !== JSON.stringify(want)) {
+    throw new Error("got " + JSON.stringify(rows) + " want " + JSON.stringify(want));
+  }
+' "$html"
+
+# ---------------------------------------------------------------------------
+# 2b. Loop health STALLED banner: a last tick far older than 2x its cadence's
+#     expected interval must render the STALLED banner. Reuses the SAME
+#     fixtures dir (issues/prs/events unrelated) but pins COCKPIT_NOW well
+#     past the FAST tick's 120s threshold.
+# ---------------------------------------------------------------------------
+html_stalled="$work/cockpit-stalled.html"
+COCKPIT_NOW="2026-01-01T01:00:00Z" bash "$cockpit" --fixtures "$work/fixtures" "$html_stalled" >/dev/null 2>"$work/stderr-stalled.log"
+check "STALLED banner renders once the last tick exceeds 2x its cadence interval" grep -qF 'STALLED — no tick in over 120s (cadence FAST)' "$html_stalled"
+
 # ---------------------------------------------------------------------------
 # 3. GATES_FILE override is honored (self-host adapter), still with fixtures
 #    (no gh/network either way).
@@ -227,16 +270,19 @@ exit 1
 EOF
 chmod +x "$fake_gh"
 html_unavail="$work/cockpit-unavail.html"
-# CLAUDE_EVENTS_FILE points at a guaranteed-missing path so this run is fully
-# offline/deterministic (never touches the real, gitignored event log) and
-# doubles as the "no events file at all" -> "no active workers" assertion.
-COCKPIT_GH_BIN="$fake_gh" CLAUDE_EVENTS_FILE="$work/no-such-events.jsonl" bash "$cockpit" "$html_unavail" >/dev/null 2>"$work/stderr-unavail.log"
+# CLAUDE_EVENTS_FILE/CLAUDE_TICKS_FILE point at guaranteed-missing paths so
+# this run is fully offline/deterministic (never touches the real,
+# gitignored logs) and doubles as the "no log at all" degrade assertions for
+# both the live-progress panel ("no active workers") and the loop-health
+# panel ("loop not armed", issue #85) -- neither must crash the render.
+COCKPIT_GH_BIN="$fake_gh" CLAUDE_EVENTS_FILE="$work/no-such-events.jsonl" CLAUDE_TICKS_FILE="$work/no-such-ticks.jsonl" bash "$cockpit" "$html_unavail" >/dev/null 2>"$work/stderr-unavail.log"
 rc_unavail=$?
 check "generator still exits 0 when gh is unavailable" [ "$rc_unavail" -eq 0 ]
 check "issues section shows unavailable placeholder" grep -q '<section id="issues"><h2>Open issues</h2><p class="unavailable">unavailable (gh/network)</p>' "$html_unavail"
 check "PRs section shows unavailable placeholder" grep -q '<section id="prs"><h2>Open PRs</h2><p class="unavailable">unavailable (gh/network)</p>' "$html_unavail"
 check "routing/worktrees sections still render (no crash) despite gh failure" bash -c 'grep -q "routing" "$1" && grep -q "worktrees" "$1"' _ "$html_unavail"
 check "missing events file renders 'no active workers' placeholder" grep -q '<section id="live"><h2>Live worker progress</h2><p class="muted">no active workers</p>' "$html_unavail"
+check "missing loop-ticks log renders 'loop not armed' placeholder, no crash" grep -qF '<section id="loop-health"><h2>Loop health</h2><p class="muted">loop not armed</p></section>' "$html_unavail"
 
 # ---------------------------------------------------------------------------
 # 5. Serve mode (cockpit-serve.sh, issue #69): dashboard over HTTP + SSE live
