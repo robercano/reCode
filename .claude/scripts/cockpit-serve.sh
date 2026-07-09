@@ -36,7 +36,8 @@
 #   GET  /api/worker/<role>/<task>
 #                      Worker inspector (issue #70), backing the drawer that
 #                      opens when a live-progress row is clicked. Returns
-#                      JSON: { role, task, timeline, breadcrumbs, worktree }.
+#                      JSON: { role, task, timeline, breadcrumbs, worktree,
+#                      activity }.
 #                        - timeline: every events.jsonl record matching
 #                          (role,task), NEWEST FIRST.
 #                        - breadcrumbs: the most recent non-empty --detail
@@ -51,6 +52,14 @@
 #                          status, commits, diffstat, mergeBase, error }; if
 #                          no worktree matches, found:false with a plain
 #                          "no worktree found" error string (never a crash).
+#                        - activity: (issue #84) up to the most recent 20
+#                          records from the worker-tools mirror log
+#                          (log-worker-tool.sh's JSONL, default
+#                          <root>/.claude/state/worker-tools.jsonl, override
+#                          via CLAUDE_WORKER_TOOLS_FILE) whose `path` falls
+#                          under the worker's worktree path, NEWEST FIRST.
+#                          Empty array if the log is missing/unreadable or no
+#                          worktree was found — never a crash.
 #
 # Foreground process — SIGTERM/SIGINT close the server cleanly (via `exec`,
 # below, node receives signals directly; no bash wrapper indirection).
@@ -93,6 +102,12 @@ gh_refresh="${COCKPIT_GH_REFRESH:-60}"
 # the real one — no network/gh either way, just local git plumbing.
 worktrees_root="${COCKPIT_SERVE_WORKTREES_ROOT:-$root}"
 
+# Worker-tools mirror log (issue #84): log-worker-tool.sh's PostToolUse
+# mirror JSONL, read by the worker inspector to populate the "activity"
+# field. Same override seam as the hook script itself so tests can point
+# this at a synthetic temp file instead of the real, gitignored state dir.
+worker_tools_file="${CLAUDE_WORKER_TOOLS_FILE:-$root/.claude/state/worker-tools.jsonl}"
+
 tmp_out="$(mktemp "${TMPDIR:-/tmp}/cockpit-serve.XXXXXX.html")"
 # NOTE: deliberately NO bash `trap ... EXIT` here. `exec` below REPLACES this
 # shell process image with node (same PID) — a bash-level EXIT trap
@@ -112,6 +127,7 @@ COCKPIT_SERVE_EVENTS_FILE="$events_file" \
 COCKPIT_SERVE_GH_REFRESH="$gh_refresh" \
 COCKPIT_SERVE_TMP_OUT="$tmp_out" \
 COCKPIT_SERVE_WORKTREES_ROOT="$worktrees_root" \
+CLAUDE_WORKER_TOOLS_FILE="$worker_tools_file" \
 exec node - <<'NODE_SERVE'
 const http = require("http");
 const fs = require("fs");
@@ -126,6 +142,11 @@ const GH_REFRESH_SECONDS = parseInt(process.env.COCKPIT_SERVE_GH_REFRESH, 10) ||
 const GH_REFRESH_MS = GH_REFRESH_SECONDS * 1000;
 const TMP_OUT = process.env.COCKPIT_SERVE_TMP_OUT;
 const WORKTREES_ROOT = process.env.COCKPIT_SERVE_WORKTREES_ROOT || process.cwd();
+// Worker-tools mirror log (issue #84): env override for testability, else
+// the default log-worker-tool.sh itself writes to.
+const WORKER_TOOLS_FILE =
+  process.env.CLAUDE_WORKER_TOOLS_FILE ||
+  path.join(process.cwd(), ".claude", "state", "worker-tools.jsonl");
 
 // Fix (issue #70, 3a-followup): TMP_OUT cleanup moved here from the now-dead
 // bash EXIT trap (see the shell comment above `exec node`, above) — this
@@ -318,6 +339,11 @@ function clientScript() {
       var timelineList = document.createElement("ul");
       timelineList.id = "drawer-timeline";
 
+      var activityHeading = document.createElement("h3");
+      activityHeading.textContent = "Live activity (newest first)";
+      var activityList = document.createElement("ul");
+      activityList.id = "drawer-activity";
+
       drawer.appendChild(closeBtn);
       drawer.appendChild(title);
       drawer.appendChild(breadcrumbsHeading);
@@ -326,6 +352,8 @@ function clientScript() {
       drawer.appendChild(forensicsBody);
       drawer.appendChild(timelineHeading);
       drawer.appendChild(timelineList);
+      drawer.appendChild(activityHeading);
+      drawer.appendChild(activityList);
       document.body.appendChild(drawer);
       return drawer;
     }
@@ -383,6 +411,21 @@ function clientScript() {
           var detailPart = ev.detail ? ": " + ev.detail : "";
           li.textContent = (ev.ts || "") + " — " + (ev.phase || "") + lensPart + detailPart;
           timelineList.appendChild(li);
+        });
+      }
+
+      var activityList = d.querySelector("#drawer-activity");
+      activityList.textContent = "";
+      var activity = (data && data.activity) || [];
+      if (activity.length === 0) {
+        var noActivity = document.createElement("li");
+        noActivity.textContent = "(no activity yet)";
+        activityList.appendChild(noActivity);
+      } else {
+        activity.forEach(function (rec) {
+          var li = document.createElement("li");
+          li.textContent = (rec.ts || "") + "  " + (rec.tool || "") + "  " + (rec.summary || "");
+          activityList.appendChild(li);
         });
       }
 
@@ -523,6 +566,25 @@ function readEventsAll() {
       const obj = JSON.parse(trimmed);
       // typeof [] === "object" too -- exclude arrays, mirroring cockpit.sh's
       // own readEvents() malformed/array-line tolerance.
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) out.push(obj);
+    } catch (e) { /* skip malformed line */ }
+  }
+  return out;
+}
+
+// Worker-tools mirror log (issue #84) reader: same JSONL-tolerant pattern as
+// readEventsAll() -- skip blank/malformed lines, exclude arrays. A
+// missing/unreadable file yields [] (never throws), matching the hook
+// script's own never-block contract.
+function readWorkerToolsAll() {
+  let text = "";
+  try { text = fs.readFileSync(WORKER_TOOLS_FILE, "utf8"); } catch (e) { return []; }
+  const out = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
       if (obj && typeof obj === "object" && !Array.isArray(obj)) out.push(obj);
     } catch (e) { /* skip malformed line */ }
   }
@@ -671,7 +733,20 @@ function handleWorkerInspector(req, res, rawRole, rawTask) {
           error: "no worktree found for task " + task,
         };
 
-    const body = JSON.stringify({ role, task, timeline, breadcrumbs, worktree });
+    // Live activity (issue #84): worker-tools mirror records whose `path`
+    // falls under the matched worktree, NEWEST FIRST, capped to the most
+    // recent 20. No worktree found -> []; never throws.
+    let activity = [];
+    if (wtPath) {
+      const allTools = readWorkerToolsAll();
+      const matchingTools = allTools.filter((rec) => {
+        const recPath = rec && rec.path != null ? String(rec.path) : "";
+        return recPath === wtPath || recPath.startsWith(wtPath + "/");
+      });
+      activity = matchingTools.slice().reverse().slice(0, 20);
+    }
+
+    const body = JSON.stringify({ role, task, timeline, breadcrumbs, worktree, activity });
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(body);
   } catch (e) {
