@@ -240,6 +240,102 @@ advances=0
 check "scenario 9 (concurrent ticks): exactly ONE of two overlapping ticks advances issue=42" bash -c '[ "$1" -eq 1 ]' _ "$advances"
 check "scenario 9: the other tick backs off with action=none instead of double-advancing" bash -c '[ "$1" = "action=none" ] || [ "$2" = "action=none" ]' _ "$verdictA" "$verdictB"
 
+# ---------------------------------------------------------------------------
+# 10. Tick record (issue #85): every run appends exactly ONE JSONL line to
+#     CLAUDE_TICKS_FILE with the expected fields, and — critically — writing
+#     that record never disturbs the invariant that the verdict stays the
+#     LAST line of stdout (the daemon/tick parser reads the last line).
+# ---------------------------------------------------------------------------
+dir10="$(new_fixture scenario10 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=55 branch=none title=Tick record thing
+advance_ready=55
+cadence=FAST cron=* * * * *' '')"
+ticks10="$work/scenario10-ticks.jsonl"
+out10="$(CLAUDE_TICKS_FILE="$ticks10" run_tick "$dir10")"
+check "scenario 10: verdict is still the LAST stdout line when tick recording is on" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=advance issue=55" ]' _ "$out10"
+check "scenario 10: tick record file has exactly 1 line" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 1 ]' _ "$ticks10"
+check "scenario 10: tick record is valid JSON with the expected fields" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.verdict !== "action=advance issue=55") throw new Error("verdict mismatch: " + JSON.stringify(obj));
+  if (obj.action !== "advance") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (obj.issue !== "55") throw new Error("issue mismatch: " + JSON.stringify(obj));
+  if (obj.cadence !== "FAST") throw new Error("cadence mismatch: " + JSON.stringify(obj));
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(obj.ts)) throw new Error("ts not ISO-8601 UTC: " + obj.ts);
+' "$ticks10"
+
+# action=none tick record: issue/pr must serialize as empty strings.
+dir11="$(new_fixture scenario11 'open_prs=0
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=IDLE cron=*/15 * * * *' '')"
+ticks11="$work/scenario11-ticks.jsonl"
+out11="$(CLAUDE_TICKS_FILE="$ticks11" run_tick "$dir11")"
+check "scenario 11: verdict is still the LAST stdout line for action=none" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out11"
+check "scenario 11: action=none tick record parses issue/pr as empty" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.action !== "none") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (obj.issue !== "" || obj.pr !== "") throw new Error("expected empty issue/pr, got " + JSON.stringify(obj));
+' "$ticks11"
+
+# action=feedback tick record: pr number captured, cadence round-trips.
+dir12="$(new_fixture scenario12 'open_prs=0
+feedback_prs=1
+planned_issues=0
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' "$(printf '3\tfeat/issue-3-x\towner\t2026-01-01T00:00:00Z')")"
+ticks12="$work/scenario12-ticks.jsonl"
+out12="$(CLAUDE_TICKS_FILE="$ticks12" run_tick "$dir12")"
+check "scenario 12: verdict is still the LAST stdout line for action=feedback" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=feedback pr=3" ]' _ "$out12"
+check "scenario 12: action=feedback tick record captures pr number and cadence" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.action !== "feedback") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (obj.pr !== "3") throw new Error("pr mismatch: " + JSON.stringify(obj));
+  if (obj.cadence !== "WATCH") throw new Error("cadence mismatch: " + JSON.stringify(obj));
+' "$ticks12"
+
+# ---------------------------------------------------------------------------
+# 11. Rotation: LOOP_TICKS_MAX_LINES caps the tick log to the last N lines
+#     across repeated ticks (mirrors log-event.sh's rotation).
+# ---------------------------------------------------------------------------
+dir13="$(new_fixture scenario13 'open_prs=0
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=IDLE cron=*/15 * * * *' '')"
+ticks13="$work/scenario13-ticks.jsonl"
+for _ in 1 2 3 4 5 6 7; do
+  LOOP_TICKS_MAX_LINES=3 CLAUDE_TICKS_FILE="$ticks13" run_tick "$dir13" >/dev/null
+done
+check "scenario 13: rotation caps the tick log to exactly 3 lines" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 3 ]' _ "$ticks13"
+check "scenario 13: every remaining line is still valid JSON after rotation" node -e '
+  const fs = require("fs");
+  const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+  for (const l of lines) JSON.parse(l);
+' "$ticks13"
+
+# ---------------------------------------------------------------------------
+# 12. Best-effort: tick recording must never disturb the verdict or exit
+#     status, even when the ticks file cannot be written at all (its parent
+#     dir path collides with a plain file, so mkdir -p fails).
+# ---------------------------------------------------------------------------
+dir14="$(new_fixture scenario14 'open_prs=0
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=IDLE cron=*/15 * * * *' '')"
+blocker="$work/scenario14-blocker"
+: > "$blocker"   # a plain FILE where the ticks file's PARENT DIR needs to be
+out14="$(CLAUDE_TICKS_FILE="$blocker/loop-ticks.jsonl" run_tick "$dir14" 2>/dev/null)"
+rc14=$?
+check "scenario 14: tick-record write failure never changes the exit status" [ "$rc14" -eq 0 ]
+check "scenario 14: verdict is still the LAST stdout line despite the write failure" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out14"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-tick.test.sh: PASS ($ok checks)"
