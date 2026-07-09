@@ -6,7 +6,7 @@ that ship to downstream installs are what runs the live self-hosted PR loop here
 
 ## Dual command invocation
 - **In-repo (dogfooding):** commands run as project-level slash commands, e.g. `/pr-loop`,
-  `/harden`, `/setup-orchestrator`, `/sync-orchestrator`, `/test-pr`.
+  `/harden`, `/test-pr`.
 - **Installed as a plugin:** Claude Code auto-namespaces commands under the plugin `name`
   (`orchestrator`), so the same commands become `/orchestrator:pr-loop`,
   `/orchestrator:harden`, etc. No file renames are needed for this — the namespace comes
