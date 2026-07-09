@@ -1,5 +1,5 @@
 {
-  "name": "ai-project-orchestrator",
+  "name": "recode",
   "owner": {
     "name": "Roberto Cano"
   },
@@ -7,7 +7,7 @@
     {
       "name": "orchestrator",
       "source": "./.claude",
-      "description": "Multi-agent orchestration harness: fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers."
+      "description": "reCode: multi-agent orchestration harness — fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers."
     }
   ]
 }

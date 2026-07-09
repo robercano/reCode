@@ -14,7 +14,7 @@ repository, use a path starting with `./`... paths resolve relative to the marke
 - `.claude/.claude-plugin/marketplace.json` — for the local-clone install method (`/plugin marketplace add
   <path-to-clone>/.claude`), where the plugin root IS the marketplace root (`"source": "./"`).
 - `.claude-plugin/marketplace.json` (this file) — for the GitHub-source install method
-  (`extraKnownMarketplaces` with `"source": "github", "repo": "robercano/ai-project-orchestrator"`), where the
+  (`extraKnownMarketplaces` with `"source": "github", "repo": "robercano/reCode"`), where the
   marketplace root is the repo root and the plugin lives one level down (`"source": "./.claude"`).
 
 Deliberately omits `version`/`author` (present on the other manifest) — a `version` here would *pin* the

@@ -1,15 +1,15 @@
 {
-  "name": "ai-project-orchestrator",
+  "name": "recode",
   "owner": {
     "name": "Roberto Cano"
   },
-  "description": "Multi-agent orchestration harness: fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
+  "description": "reCode: multi-agent orchestration harness — fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
   "version": "0.1.4",
   "plugins": [
     {
       "name": "orchestrator",
       "source": "./",
-      "description": "Multi-agent orchestration harness: fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
+      "description": "reCode: multi-agent orchestration harness — fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
       "version": "0.1.4",
       "author": {
         "name": "Roberto Cano"

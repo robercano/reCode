@@ -1,7 +1,7 @@
 {
   "name": "orchestrator",
   "version": "0.1.4",
-  "description": "Multi-agent orchestration harness: fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
+  "description": "reCode: multi-agent orchestration harness — fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
   "author": { "name": "Roberto Cano" },
   "commands": [
     "./commands/harden.md",

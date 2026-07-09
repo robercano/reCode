@@ -490,7 +490,7 @@ const html = `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<title>Cockpit — ai-project-orchestrator</title>
+<title>Cockpit — reCode</title>
 <script>(function(){try{var t=localStorage.getItem("cockpit-theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t);}}catch(e){}})();</script>
 <style>
   :root {
