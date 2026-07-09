@@ -80,11 +80,16 @@ idempotently:
   in the repo is older than the version scaffold.sh ships, it re-stamps (overwrites); if it's the same or
   newer, it's left alone. This is the seam a future plugin-upgrade flow uses to push workflow fixes into
   already-onboarded repos without touching hand-edited copies that opted out (by bumping their own marker).
+- `.claude/systemd/pr-loop.service`, `.claude/systemd/claude-rc.service`, `.claude/scripts/arm-loop.sh`
+  (issue #102) — the cron-less loop daemon's systemd unit TEMPLATES and the installer script, all `managed`
+  the same way as `feature-fanout.js` (own `@orchestrator-managed <name> vN` marker, re-stamped on upgrade).
+  These carry `__WORKDIR__`/`__REPO_SLUG__`/etc. placeholders that `arm-loop.sh` substitutes at ARM time, not
+  at scaffold time — scaffolding them here does NOT install or start anything. See step 9 below for arming.
 - `.github/workflows/gates.yml` + `.github/actions/setup/action.yml` — the CI gate. Created if absent, left
   untouched if present.
 - `.gitignore` entries (append-if-missing, never duplicated): `.env`, `.env.*`, `!.env.example`,
   `.claude/settings.local.json`, `.claude/state/`.
-- `.claude/state/` directory (the notify-poll cursor lives here).
+- `.claude/state/` directory (the notify-poll cursor and the loop daemon's run ledger live here).
 
 Report the script's per-file summary (created / kept / restamped / up to date / appended) to the user. Then
 write the interview answers into `.claude/gates.json` (validate with `node -e "require('./.claude/gates.json')"`)
@@ -119,7 +124,63 @@ Report created vs already-existing. Remind: **an issue is only loop-eligible onc
   to reconcile. Note that **branch protection / required checks** (making CI a hard merge gate) is an owner
   action in repo Settings — flag it as a manual step.
 
-## 9. Arm the PR loop
+## 9. Arm the loop
+Two ways to fire the loop; ask the user which one (`AskUserQuestion`), presenting the daemon as the default:
+
+- **Daemon (RECOMMENDED, new default) — issue #102.** A `systemd --user` service (`loop-daemon.sh`)
+  supervises the loop forever, independent of any Claude Code session: it runs a tick, and only when the
+  tick's verdict is actionable does it spawn a headless driver (`claude -p`), contained (`setsid` + `timeout`)
+  and ledgered (`.claude/state/loop-runs.log`). `action=none` spawns nothing — the dominant cost of the old
+  cron (a fresh full-context session on every quiet firing) is gone. Survives Claude Code restarting/exiting.
+  Requires Linux systemd (native, or WSL2 with systemd enabled).
+- **Legacy cron — `/pr-loop`.** Session-scoped `CronCreate`; dies with the Claude Code session that armed it
+  and must be re-armed every session. Kept for environments without systemd, or as a fallback. **Never run
+  both at once** against the same repo — the spawn lock in `loop-tick.sh` makes it *safe* (no double-spawn),
+  merely wasteful (two firing sources burning ticks against the same state).
+
+### If the user picks the daemon
+1. **Ask the environment**: `Linux` or `WSL2` (`AskUserQuestion`).
+2. **WSL2 only — verify systemd first.** Ask the user to check `/etc/wsl.conf` for a `[boot]` section with
+   `systemd=true`. If it's missing or false, this MUST be fixed before continuing:
+   - Print the edit for them to make (in a real editor, on the Windows side or via `wsl.exe`):
+     ```
+     [boot]
+     systemd=true
+     ```
+   - Print the command to apply it: `wsl --shutdown` (run from Windows, then reopen the WSL terminal).
+   - **Stop here** for this sub-step — do not proceed to unit install until they confirm systemd is enabled
+     (re-check with `systemctl --version` inside WSL2 after the restart).
+3. **Sandbox caveat (both Linux and WSL2).** Installing systemd units under `~/.config/systemd/user/`,
+   `loginctl enable-linger`, and starting a detached tmux session all touch `$HOME` and systemd — **the
+   sandbox blocks this** (`docs/HARDENING.md` → Caveats). Tell the user to run the following in a **real
+   terminal outside Claude Code**:
+   ```
+   bash .claude/scripts/arm-loop.sh
+   ```
+   (Self-hosting: `bash .claude/scripts/arm-loop.sh --gates-file .claude/self/gates.json`.) This one script
+   installs both `pr-loop-<repo>.service` (the loop daemon) and `claude-rc-<repo>.service` (`claude
+   remote-control` in a detached tmux session, so planning sessions can be spawned from claude.ai/mobile),
+   enables + starts them, and runs `loginctl enable-linger $USER` so they keep running without an open login
+   session. It substitutes this checkout's actual path/repo-slug/permission-mode into the templates
+   scaffolded at `.claude/systemd/pr-loop.service` and `.claude/systemd/claude-rc.service` — do not hand-edit
+   the installed copies under `~/.config/systemd/user/`; edit the checked-in templates and re-run
+   `arm-loop.sh` instead.
+4. **WSL2 only — offer Windows-logon autostart.** Ask whether they want WSL2 to relaunch automatically when
+   Windows logs in (so the daemon survives a Windows reboot without a manual `wsl` open):
+   - **Yes** → print the exact command to run in an **elevated Windows terminal** (not WSL):
+     ```
+     schtasks /create /tn "WSL pr-loop autostart" /tr "wsl.exe -d <distro> --exec true" /sc onlogon
+     ```
+     substituting `<distro>` from `wsl -l` (run on the Windows side) — booting the distro starts systemd,
+     which starts both units automatically (`WantedBy=default.target` + linger).
+   - **No** → tell them this is safe to skip: GitHub is the loop's only source of truth, so any events that
+     land while WSL2 is stopped are simply picked up by the first tick after the next manual WSL2 start —
+     nothing is dropped, it's just delayed.
+5. Report the units' names and how to inspect them (`systemctl --user status pr-loop-<repo>.service`,
+   `journalctl --user -u pr-loop-<repo>.service -f`, `tail -f .claude/state/loop-runs.log`,
+   `tmux attach -t rc-<repo>`).
+
+### If the user picks the legacy cron
 - Explain `/pr-loop` (session-scoped cron; adaptive cadence). **Offer to run it now** (ask; don't auto-run).
   If they decline, note they can run `/pr-loop` anytime — and must re-arm it each session.
 
@@ -128,9 +189,11 @@ Report created vs already-existing. Remind: **an issue is only loop-eligible onc
   hands-off autonomous runs (`docs/HARDENING.md` is the source of truth, if present). **Offer to run `/harden`
   now** (ask).
 - Sequencing the user must know: hardening only takes effect after a **restart**, once hardened the agent can no
-  longer edit `.claude/settings*.json` (by design), and the restart drops the in-session PR-loop cron. So the
+  longer edit `.claude/settings*.json` (by design), and the restart drops any in-session PR-loop cron. So the
   correct order is: finish setup → `/harden` → restart Claude Code → **re-run `/pr-loop`** in the hardened
-  session. Do not harden before the rest of setup is done.
+  session (legacy cron path only). Do not harden before the rest of setup is done. The **daemon path is
+  unaffected by this** — `loop-daemon.sh` runs under systemd, entirely outside any Claude Code session, so a
+  restart (or hardening) never drops it; no re-arming needed.
 
 ## 11. Hand off
 Summarize what changed (files written/kept/restamped by `scaffold.sh`, `gates.json`/`CLAUDE.md` filled,
@@ -140,10 +203,13 @@ with an ordered checklist of everything only the human can complete, e.g.:
 - add `GH_BOT_TOKEN` to `.env` / add the bot as a write collaborator (if step 7 flagged it),
 - set branch protection / required status checks (if wanted),
 - OS-level isolation from `docs/HARDENING.md` Step 2 (sudo / VM / WSL interop) if hardening,
-- restart, then re-run `/pr-loop`.
+- if the daemon path was chosen: run `bash .claude/scripts/arm-loop.sh` in a real terminal outside Claude
+  Code (sandbox caveat), plus the WSL2-only `systemd=true` fix and/or `schtasks` autostart command if flagged
+  in step 9,
+- if the legacy cron path was chosen: restart, then re-run `/pr-loop`.
 
 ## Reference: file inventory this skill scaffolds
 See `.claude/skills/setup/templates/MANIFEST.md` for the full template → destination map, and
 `.claude/skills/setup/scaffold.sh` for the idempotent implementation (safe to re-run any time; it never
-touches user-owned files that already exist, and only re-stamps the managed workflow when its version marker
+touches user-owned files that already exist, and only re-stamps a managed file when its version marker
 is behind).

@@ -29,12 +29,21 @@ target_root="${1:-$PWD}"
 mkdir -p "$target_root"
 target_root="$(cd "$target_root" && pwd)"
 
-# Single source of truth for the managed workflow's version. Bump this whenever
-# templates/feature-fanout.js's behavior changes; scaffold.sh will then re-stamp any
-# destination whose marker is older (see issue #38, which drives re-stamping on
-# plugin upgrade).
-MANAGED_VERSION=2
-MARKER_PREFIX="@orchestrator-managed feature-fanout v"
+# --- managed-file table -------------------------------------------------------------
+# "template-name|dest-relpath|marker-prefix" — one entry per file scaffold.sh manages
+# going forward (re-stamped, never silently clobbered once at/above the shipped
+# version). shipped_version is read straight out of EACH TEMPLATE's own marker line
+# (managed_version_of, below) rather than a separately hand-maintained constant — see
+# sync.sh's `managed_version_of` comment for why keeping those in two places invites
+# drift (issue #102 generalized this from the single-entry feature-fanout-only form).
+# Adding a new managed file is exactly one more line here, plus the matching line in
+# sync.sh's MANAGED_FILES table and a row in templates/MANIFEST.md.
+MANAGED_FILES=(
+  "feature-fanout.js|.claude/workflows/feature-fanout.js|@orchestrator-managed feature-fanout v"
+  "pr-loop.service|.claude/systemd/pr-loop.service|@orchestrator-managed pr-loop-service v"
+  "claude-rc.service|.claude/systemd/claude-rc.service|@orchestrator-managed claude-rc-service v"
+  "arm-loop.sh|.claude/scripts/arm-loop.sh|@orchestrator-managed arm-loop v"
+)
 
 echo "orchestrator setup: scaffolding into $target_root"
 
@@ -52,37 +61,54 @@ copy_if_absent() {
 }
 
 managed_version_of() {
-  # Prints the version number found in the marker line of $1, or empty if none.
-  local f="$1"
+  # Prints the version number found in $1's marker line (matched via the literal
+  # marker prefix $2), or empty if no marker line / the file doesn't exist.
+  local f="$1" prefix="$2"
   [ -f "$f" ] || { echo ""; return 0; }
-  grep -o "${MARKER_PREFIX}[0-9]\+" "$f" 2>/dev/null | head -1 | grep -o '[0-9]\+$' || true
+  grep -F -- "$prefix" "$f" 2>/dev/null | head -1 | grep -o '[0-9]\+$' || true
 }
 
 # --- 1. user-owned files: create only if absent, never overwritten -----------------
 copy_if_absent "$templates_dir/gates.json" "$target_root/.claude/gates.json" "project adapter (.claude/gates.json)"
 copy_if_absent "$templates_dir/CLAUDE.md"  "$target_root/CLAUDE.md"          "CLAUDE.md"
 
-# --- 2. managed workflow: re-stamp when the destination's marker is older ----------
-fanout_dst="$target_root/.claude/workflows/feature-fanout.js"
-existing_version="$(managed_version_of "$fanout_dst")"
-if [ ! -f "$fanout_dst" ]; then
-  mkdir -p "$(dirname "$fanout_dst")"
-  cp "$templates_dir/feature-fanout.js" "$fanout_dst"
-  echo "  created:   managed workflow (.claude/workflows/feature-fanout.js) at v$MANAGED_VERSION"
-elif [ -z "$existing_version" ]; then
-  # Present but carries no recognizable marker (e.g. hand-authored or pre-marker file)
-  # — treat as older than any managed version and re-stamp.
-  cp "$templates_dir/feature-fanout.js" "$fanout_dst"
-  echo "  restamped: managed workflow (.claude/workflows/feature-fanout.js) — no marker found, now v$MANAGED_VERSION"
-elif [ "$existing_version" -lt "$MANAGED_VERSION" ]; then
-  cp "$templates_dir/feature-fanout.js" "$fanout_dst"
-  echo "  restamped: managed workflow (.claude/workflows/feature-fanout.js) v$existing_version -> v$MANAGED_VERSION"
-elif [ "$existing_version" -eq "$MANAGED_VERSION" ]; then
-  echo "  up to date: managed workflow (.claude/workflows/feature-fanout.js) already v$MANAGED_VERSION"
-else
-  # Destination carries a NEWER version than this scaffold.sh ships — never clobber.
-  echo "  kept:      managed workflow (.claude/workflows/feature-fanout.js) is v$existing_version, newer than this installer's v$MANAGED_VERSION — left untouched"
-fi
+# --- 2. managed files: create if absent, re-stamp when the destination's marker is
+#        older than the template's own, never downgrade a newer local marker --------
+for entry in "${MANAGED_FILES[@]}"; do
+  IFS='|' read -r tmpl_name dest_rel marker_prefix <<<"$entry"
+  template="$templates_dir/$tmpl_name"
+  dst="$target_root/$dest_rel"
+  label="managed file ($dest_rel)"
+
+  shipped_version="$(managed_version_of "$template" "$marker_prefix")"
+  if [ -z "$shipped_version" ]; then
+    echo "  error:     $label — shipped template $template has no valid @orchestrator-managed marker; plugin install looks broken" >&2
+    continue
+  fi
+
+  existing_version="$(managed_version_of "$dst" "$marker_prefix")"
+  if [ ! -f "$dst" ]; then
+    mkdir -p "$(dirname "$dst")"
+    cp "$template" "$dst"
+    case "$tmpl_name" in *.sh) chmod +x "$dst" ;; esac
+    echo "  created:   $label at v$shipped_version"
+  elif [ -z "$existing_version" ]; then
+    # Present but carries no recognizable marker (e.g. hand-authored or pre-marker
+    # file) — treat as older than any managed version and re-stamp.
+    cp "$template" "$dst"
+    case "$tmpl_name" in *.sh) chmod +x "$dst" ;; esac
+    echo "  restamped: $label — no marker found, now v$shipped_version"
+  elif [ "$existing_version" -lt "$shipped_version" ]; then
+    cp "$template" "$dst"
+    case "$tmpl_name" in *.sh) chmod +x "$dst" ;; esac
+    echo "  restamped: $label v$existing_version -> v$shipped_version"
+  elif [ "$existing_version" -eq "$shipped_version" ]; then
+    echo "  up to date: $label already v$shipped_version"
+  else
+    # Destination carries a NEWER version than this scaffold.sh ships — never clobber.
+    echo "  kept:      $label is v$existing_version, newer than this installer's v$shipped_version — left untouched"
+  fi
+done
 
 # --- 3. CI templates: create only if absent ----------------------------------------
 copy_if_absent "$templates_dir/gates.yml"  "$target_root/.github/workflows/gates.yml"      "CI gate workflow (.github/workflows/gates.yml)"
