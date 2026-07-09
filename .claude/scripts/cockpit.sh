@@ -9,6 +9,12 @@
 # no persistent server, no watch daemon (re-run this script, or wrap it in
 # `watch -n 30 bash .claude/scripts/cockpit.sh`).
 #
+# Issue #85 adds a "Loop health" panel, sourced from loop-tick.sh's tick
+# record log (see loop-tick.sh's write_tick_record): the last tick's verdict,
+# the current cadence (FAST/WATCH/IDLE), the full verdict history (newest
+# first), and a STALLED banner if no tick has landed in over 2x the cadence's
+# expected interval (FAST=60s -> 120s, WATCH=300s -> 600s, IDLE=900s -> 1800s).
+#
 # Usage:
 #   cockpit.sh [--fixtures <dir>] [output-path]
 #   cockpit.sh --parse-blocking
@@ -22,8 +28,9 @@
 # like `gh issue|pr list --json ...` output) instead of calling gh at all.
 # This is the offline seam cockpit.test.sh uses — no live gh/network in tests.
 # In this mode, the live-progress panel also reads <dir>/events.jsonl (if
-# present; missing = "no active workers") instead of the real event log, so
-# tests never touch .claude/state/.
+# present; missing = "no active workers") instead of the real event log, and
+# the loop-health panel likewise reads <dir>/loop-ticks.jsonl (if present;
+# missing = "loop not armed"), so tests never touch .claude/state/.
 #
 # Degrades gracefully: if a bot-gh.sh call fails (no network / no gh auth),
 # that section renders an "unavailable (gh/network)" placeholder instead of
@@ -212,6 +219,20 @@ else
 fi
 if [ -f "$events_file" ]; then cp "$events_file" "$tmpdir/events.jsonl"; else : >"$tmpdir/events.jsonl"; fi
 
+# ---- loop tick records (issue #85, "Loop health" panel) --------------------
+# Same offline seam as the events.jsonl block above: fixtures mode reads
+# <dir>/loop-ticks.jsonl (if present); otherwise honors CLAUDE_TICKS_FILE for
+# parity with loop-tick.sh's own override, defaulting to the same gitignored
+# .claude/state/loop-ticks.jsonl. A missing/empty log just means the loop has
+# never ticked (or isn't armed yet) — rendered as a placeholder below, never
+# an error.
+if [ -n "$fixtures" ]; then
+  ticks_file="$fixtures/loop-ticks.jsonl"
+else
+  ticks_file="${CLAUDE_TICKS_FILE:-$root/.claude/state/loop-ticks.jsonl}"
+fi
+if [ -f "$ticks_file" ]; then cp "$ticks_file" "$tmpdir/loop-ticks.jsonl"; else : >"$tmpdir/loop-ticks.jsonl"; fi
+
 # ---- active worktrees -----------------------------------------------------------
 node -e '
   const fs = require("fs");
@@ -233,6 +254,8 @@ COCKPIT_OUT="$out" \
 COCKPIT_ISSUES_UNAVAILABLE="$issues_unavailable" \
 COCKPIT_PRS_UNAVAILABLE="$prs_unavailable" \
 COCKPIT_GATES_REF="$gates_ref" \
+COCKPIT_NOW="${COCKPIT_NOW:-}" \
+COCKPIT_VERDICT_HISTORY_N="${COCKPIT_VERDICT_HISTORY_N:-10}" \
 node - <<'NODE_RENDER'
 const fs = require("fs");
 const path = require("path");
@@ -270,6 +293,26 @@ function readEvents() {
   return events;
 }
 const events = readEvents();
+
+// Loop tick records (issue #85): JSONL, one object per line, appended by
+// loop-tick.sh's write_tick_record — schema {ts, verdict, cadence, action,
+// issue, pr}. Same tolerate-and-skip contract as readEvents() above: a
+// blank/malformed line must never crash the whole render.
+function readTicks() {
+  let text = "";
+  try { text = fs.readFileSync(path.join(tmpdir, "loop-ticks.jsonl"), "utf8"); } catch (e) { return []; }
+  const ticks = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) ticks.push(obj);
+    } catch (e) { /* skip malformed line */ }
+  }
+  return ticks;
+}
+const ticks = readTicks();
 
 function esc(s) {
   return String(s == null ? "" : s)
@@ -349,6 +392,61 @@ function renderLiveProgress() {
     }
     html += `</tbody></table>`;
   }
+  html += `</section>`;
+  return html;
+}
+
+// ---- Loop health section (issue #85) ---------------------------------------
+// Sourced from loop-tick.sh's tick record log (loop-ticks.jsonl, one line per
+// firing, file order == append order == chronological). No records at all
+// (missing file, or a file with zero valid lines) means the loop has never
+// ticked in this environment -- rendered as "loop not armed", never a crash.
+// Otherwise: the last tick's ts/verdict, the current cadence, a STALLED
+// banner when now - lastTick exceeds 2x the cadence's expected interval, and
+// the last N verdict lines, newest-first (N is bounded, NOT the full
+// potentially ~2000-row retained log -- see COCKPIT_VERDICT_HISTORY_N below).
+const CADENCE_INTERVAL_SECONDS = { FAST: 60, WATCH: 300, IDLE: 900 };
+const nowMs = process.env.COCKPIT_NOW ? Date.parse(process.env.COCKPIT_NOW) : Date.now();
+// Verdict-history table depth: "the last N verdict lines, newest first"
+// (issue #85). Overridable for testability, consistent with the
+// COCKPIT_NOW/CLAUDE_TICKS_FILE override style used elsewhere in this file.
+// Falls back to 10 if unset/non-numeric/non-positive.
+const VERDICT_HISTORY_N = (() => {
+  const n = parseInt(process.env.COCKPIT_VERDICT_HISTORY_N, 10);
+  return Number.isFinite(n) && n > 0 ? n : 10;
+})();
+function renderLoopHealth() {
+  let html = `<section id="loop-health"><h2>Loop health</h2>`;
+  if (ticks.length === 0) {
+    html += `<p class="muted">loop not armed</p></section>`;
+    return html;
+  }
+  const last = ticks[ticks.length - 1]; // file order = append order -> last line = most recent tick
+  const cadence = last.cadence != null ? String(last.cadence) : "";
+  const intervalSec = CADENCE_INTERVAL_SECONDS[cadence];
+
+  html += `<p>Last tick: <code>${esc(last.ts)}</code> &middot; verdict <code>${esc(last.verdict)}</code></p>`;
+  html += `<p>Cadence: <span class="badge muted">${esc(cadence || "(unknown)")}</span>`;
+  if (intervalSec) html += ` <span class="muted">(every ${intervalSec}s)</span>`;
+  html += `</p>`;
+
+  const lastMs = Date.parse(last.ts);
+  let stalled = false;
+  if (intervalSec && Number.isFinite(lastMs) && Number.isFinite(nowMs)) {
+    stalled = nowMs - lastMs > intervalSec * 2 * 1000;
+  }
+  if (stalled) {
+    html += `<p class="unavailable">STALLED — no tick in over ${intervalSec * 2}s (cadence ${esc(cadence)})</p>`;
+  }
+
+  html += `<table class="routing"><thead><tr><th>Time</th><th>Verdict</th><th>Cadence</th></tr></thead><tbody>`;
+  const historyStop = Math.max(0, ticks.length - VERDICT_HISTORY_N);
+  for (let i = ticks.length - 1; i >= historyStop; i--) {
+    const t = ticks[i];
+    html += `<tr><td>${esc(t.ts)}</td><td><code>${esc(t.verdict)}</code></td><td>${esc(t.cadence)}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+
   html += `</section>`;
   return html;
 }
@@ -479,7 +577,7 @@ function renderWorktrees() {
   return html;
 }
 
-const generatedAt = new Date().toISOString();
+const generatedAt = Number.isFinite(nowMs) ? new Date(nowMs).toISOString() : new Date().toISOString();
 // Dark-theme stable marker (issue #69): the `data-theme="dark"` attribute
 // below is the CONTRACT a test/consumer can grep for to confirm the default
 // theme. The tiny <script> right after it restores a saved light-theme
@@ -548,8 +646,9 @@ const html = `<!doctype html>
 </head>
 <body>
 <h1>Cockpit <button id="theme-toggle" type="button">Toggle theme</button></h1>
-<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) + Phase 2 live progress (issue #52) + Phase 3a serve/theme/filter (issue #69) &middot; re-run <code>cockpit.sh</code> to refresh (or run <code>cockpit-serve.sh</code> for live auto-update)</p>
+<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) + Phase 2 live progress (issue #52) + Phase 3a serve/theme/filter (issue #69) + loop health panel (issue #85) &middot; re-run <code>cockpit.sh</code> to refresh (or run <code>cockpit-serve.sh</code> for live auto-update)</p>
 ${renderLiveProgress()}
+${renderLoopHealth()}
 ${renderIssues()}
 ${renderPRs()}
 ${renderRouting()}

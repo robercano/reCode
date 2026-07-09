@@ -87,6 +87,88 @@ set -uo pipefail
 gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 
+# ---------------------------------------------------------------------------
+# Tick record (issue #85): append ONE record per firing to
+# .claude/state/loop-ticks.jsonl, so the cockpit's "Loop health" panel can
+# show the last tick, current cadence, verdict history, and detect a stalled
+# loop. Mirrors log-event.sh's EXACT pattern: the JSON line is built with
+# `node` (never hand-rolled string interpolation) so values are safely
+# escaped, and the file is rotated to the last N lines via temp-file + atomic
+# `mv` (crash-safe).
+#
+# CRITICAL INVARIANT: this must NEVER print to stdout and must NEVER change
+# this script's exit status or verdict -- the verdict line printed at the end
+# of this script MUST remain the LAST line of stdout (the daemon/tick parser
+# reads the last line). Best-effort/never-break, exactly like log-event.sh:
+# every step below is guarded so a failure here can never affect the tick.
+#
+# Log file: defaults to <root>/.claude/state/loop-ticks.jsonl. Override with
+# CLAUDE_TICKS_FILE=<absolute path> (used by tests to point at a temp file
+# instead of the real, gitignored state dir). Override the rotation cap with
+# LOOP_TICKS_MAX_LINES (default 2000), matching log-event.sh's
+# EVENTS_MAX_LINES.
+write_tick_record() {
+  local verdict="$1" cadence="$2"
+  local ticks_file="${CLAUDE_TICKS_FILE:-$root/.claude/state/loop-ticks.jsonl}"
+  local max_lines="${LOOP_TICKS_MAX_LINES:-2000}"
+  local action="" issue="" pr=""
+  case "$verdict" in
+    "action=advance issue="*) action="advance"; issue="${verdict#action=advance issue=}" ;;
+    "action=feedback pr="*) action="feedback"; pr="${verdict#action=feedback pr=}" ;;
+    "action=none") action="none" ;;
+    *)
+      action="${verdict#action=}"
+      action="${action%% *}"
+      ;;
+  esac
+
+  mkdir -p "$(dirname "$ticks_file")" 2>/dev/null || return 0
+
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || ts=""
+
+  CLAUDE_TICK_TS="$ts" \
+  CLAUDE_TICK_VERDICT="$verdict" \
+  CLAUDE_TICK_CADENCE="$cadence" \
+  CLAUDE_TICK_ACTION="$action" \
+  CLAUDE_TICK_ISSUE="$issue" \
+  CLAUDE_TICK_PR="$pr" \
+  node -e '
+    const line = JSON.stringify({
+      ts: process.env.CLAUDE_TICK_TS || "",
+      verdict: process.env.CLAUDE_TICK_VERDICT || "",
+      cadence: process.env.CLAUDE_TICK_CADENCE || "",
+      action: process.env.CLAUDE_TICK_ACTION || "",
+      issue: process.env.CLAUDE_TICK_ISSUE || "",
+      pr: process.env.CLAUDE_TICK_PR || "",
+    });
+    process.stdout.write(line + "\n");
+  ' >>"$ticks_file" 2>/dev/null || return 0
+
+  # ---- rotation: cap to the last $max_lines lines, atomically -------------
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const max = parseInt(process.argv[2], 10);
+    const tmp = process.argv[3];
+    try {
+      if (!Number.isFinite(max) || max <= 0) process.exit(0);
+      const text = fs.readFileSync(file, "utf8");
+      const lines = text.split("\n");
+      // drop a single trailing empty string from the final newline, if present
+      if (lines.length && lines[lines.length - 1] === "") lines.pop();
+      if (lines.length <= max) process.exit(0);
+      const kept = lines.slice(lines.length - max);
+      fs.writeFileSync(tmp, kept.join("\n") + "\n");
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      process.exit(0);
+    }
+  ' "$ticks_file" "$max_lines" "$ticks_file.tmp.$$" 2>/dev/null
+
+  return 0
+}
+
 echo "=== 1/4 loop-census.sh ==="
 census_out="$(bash "$script_dir/loop-census.sh" "$repo")"
 printf '%s\n' "$census_out"
@@ -107,6 +189,9 @@ echo "=== verdict ==="
 advance_ready="$(printf '%s\n' "$census_out" | sed -n 's/^advance_ready=//p' | tail -1)"
 advance_ready="${advance_ready:-none}"
 in_flight_issues="$(printf '%s\n' "$census_out" | sed -n 's/^in_flight=//p')"
+# Cadence (FAST/WATCH/IDLE), for the tick record (issue #85) -- census emits
+# e.g. "cadence=FAST cron=* * * * *"; keep only the leading token.
+cadence="$(printf '%s\n' "$census_out" | sed -n 's/^cadence=\([A-Za-z]*\).*/\1/p' | tail -1)"
 
 # --- Parse pr-feedback.sh's TSV (num, branch, reviewer, changes_requested_at) --
 # Lowest-numbered PR wins when several need feedback addressed.
@@ -176,21 +261,33 @@ if [ -n "$lock_issue" ]; then
 fi
 
 # --- Decide the verdict -----------------------------------------------------
+# The verdict string is captured into a variable (rather than echoed inline)
+# so it can ALSO be persisted to the tick log below without disturbing the
+# invariant that the verdict line is the LAST line of stdout.
+verdict=""
 if [ -n "$feedback_pr" ]; then
-  echo "action=feedback pr=$feedback_pr"
+  verdict="action=feedback pr=$feedback_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
   if printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready"; then
     echo "# advance refused: issue=$advance_ready is in_flight (a feat/issue-$advance_ready-* branch already exists with no open PR)"
-    echo "action=none"
+    verdict="action=none"
   elif [ "$lock_issue" = "$advance_ready" ]; then
     echo "# advance refused: spawn lock already held for issue=$advance_ready ($(cat "$lock_file" 2>/dev/null))"
-    echo "action=none"
+    verdict="action=none"
   else
     tmp="$(mktemp "$state_dir/.loop-advance.lock.XXXXXX")"
     printf 'issue=%s ts=%s\n' "$advance_ready" "$(date -u +%FT%TZ)" > "$tmp"
     mv -f "$tmp" "$lock_file"
-    echo "action=advance issue=$advance_ready"
+    verdict="action=advance issue=$advance_ready"
   fi
 else
-  echo "action=none"
+  verdict="action=none"
 fi
+
+echo "$verdict"
+
+# Persist the tick record (issue #85) AFTER the verdict has been echoed, and
+# writing to the FILE ONLY -- never stdout -- so the verdict line above stays
+# the last line of this script's stdout. Best-effort: never allowed to affect
+# the exit status set below.
+write_tick_record "$verdict" "$cadence" || true
