@@ -101,10 +101,12 @@ With `pr-per-agent`, the standing loop per ticket looks like:
    (*"address the comments on PR #N"*): same implementer loop, same branch, push updates the PR in place.
 5. **Merge** — owner approves, merge per `gates.json.merge`, clean the worktree (below).
 
-**Closing the loop automatically:** webhooks rarely reach a dev box, so poll. Either a Claude Code cron
-(`CronCreate`, durable) or an in-session `/loop` that every ~10–15 min runs the three loop scripts in order
-— each is a single stable command to pre-approve in `settings.json`, since an inline compound command
-(loops, `$()`, redirects) never matches a permission rule and would block on a prompt every firing:
+**Closing the loop automatically:** webhooks rarely reach a dev box, so poll. Two firing sources exist — the
+**cron-less loop daemon** (`systemd --user`, recommended — see [below](#cron-less-loop-daemon)) or the
+**legacy session-scoped cron** (`/orchestrator:pr-loop`, kept as a fallback for environments without
+systemd). Both ultimately run the same three loop scripts in order — each a single stable command to
+pre-approve in `settings.json`, since an inline compound command (loops, `$()`, redirects) never matches a
+permission rule and would block on a prompt every firing:
 
 1. **`bash .claude/scripts/notify-poll.sh`** — prints new issues and PR comments/reviews since a cursor file
    (`.claude/state/notify-cursor`, gitignored), plus a cursor-independent **`open pr status`** section (per
@@ -134,19 +136,135 @@ contract.
 
 With all three wired, the loop runs hands-off: **add issues → review → approve → it merges and advances**.
 A natural step 4 is to start the next `module:*` issue only when **no PRs are open**, so work stays
-serialized (one issue in flight) and bounded. Caveats: cron jobs fire only while Claude Code is running,
-auto-expire after 7 days, and may be session-scoped on some versions — re-arm at session start (the
-**`/orchestrator:pr-loop`** command does exactly that: arms or re-arms the cron and runs one tick immediately).
+serialized (one issue in flight) and bounded. **How it actually fires** — the recommended cron-less daemon
+vs. the legacy session-scoped cron, adaptive cadence, the run ledger, and the one non-self-healing failure
+state — is covered in [Cron-less loop (daemon)](#cron-less-loop-daemon) below.
 
 **Running it fully hands-off?** Polling still leaves a human approving each tool call. To let the loop
 run unattended (Claude Code `bypassPermissions`), first harden the environment so the prompt is replaced
 by always-enforced guardrails — see **[`HARDENING.md`](HARDENING.md)** (deny list + OS sandbox + host
-isolation). Don't enable bypass without it.
+isolation). Don't enable bypass without it — this applies equally to the daemon's headless driver spawns,
+which have no interactive tty to prompt at all.
+
+## Cron-less loop (daemon)
+**Recommended default (issue #102).** Two `systemd --user` services replace the session-scoped cron:
+
+- **`pr-loop-<repo>.service`** → `.claude/scripts/loop-daemon.sh`, `Restart=always`. A genuine forever loop
+  supervised by `systemd`, not a Claude Code session — it survives Claude Code restarting or exiting
+  entirely. Each iteration runs **`.claude/scripts/loop-event.sh`**, which runs the deterministic tick
+  (`loop-tick.sh`) and parses its LAST-line verdict byte-identical (issue #81 contract: the verdict is
+  computed once, in shell, never re-derived by a model). On `action=none` the daemon sleeps and loops —
+  **no model/driver process is ever touched**, so a quiet repo costs nothing beyond the tick's own `gh`
+  calls. On an actionable verdict (`action=advance issue=N` / `action=feedback pr=N`) it spawns exactly
+  **one** contained driver: `setsid timeout --kill-after=30s <LOOP_DRIVER_TIMEOUT, default 90m> claude
+  --model <model> -p "<verdict-obeying prompt>" --output-format json`. `setsid` gives the driver (and any
+  bash children it spawns) its own process group, independent of the daemon's; on timeout the whole group
+  is targeted, not just the immediate child, so a driver's own children can never be orphaned by a bare
+  `SIGTERM`. The daemon itself never runs two drivers concurrently (it's a single-threaded loop), and
+  `loop-tick.sh`'s own spawn lock additionally guards against a second overlapping tick anywhere else
+  (e.g. the legacy cron armed at the same time) double-firing the same ADVANCE.
+- **`claude-rc-<repo>.service`** → `claude remote-control` inside a detached tmux session (`rc-<repo>`), for
+  spawning **new planning sessions remotely** — from claude.ai or the Claude Code mobile app — decoupled
+  from the loop's own ticking. `arm-loop.sh --capacity N --permission-mode <mode>` controls its
+  concurrency/permission posture.
+
+**Cadence.** The daemon's sleep between ticks is read straight off `loop-tick.sh`'s own census, whose
+`cadence=FAST|WATCH|IDLE cron=<expr>` line already encodes the loop's desired attentiveness (FAST only when
+there's something actionable *now*). `loop-daemon.sh`'s `cadence_to_sleep_seconds()` maps that line to:
+
+| Census cadence | Sleep |
+|---|---|
+| `FAST` | 60s |
+| `WATCH` | 300s |
+| `IDLE` | 900s |
+| *(unparseable / missing)* | 300s (fallback) |
+
+Override any of the four via `LOOP_DAEMON_SLEEP_FAST` / `_WATCH` / `_IDLE` / `_FALLBACK` (seconds, test/debug
+hooks).
+
+**Ledger.** Every driver spawn — successful, timed out, or refused-to-spawn — appends one line to
+`.claude/state/loop-runs.log` (gitignored, never committed):
+```
+pid=<pgid> session=<session_id|unknown> verdict=<advance issue=N|feedback pr=N> ts=<ISO8601> [result=exit|timeout|spawn-error rc=N]
+```
+`session_id` is parsed out of the driver's own `--output-format json` stdout, which is what makes a
+hung or already-finished driver resumable later.
+
+**Supervision.** Three read-only windows into a driver, cheapest first:
+1. `tail -f .claude/state/loop-runs.log` — the ledger line above, one per spawn.
+2. The live transcript: `~/.claude/projects/<proj>/<session-id>.jsonl` (`<session-id>` from the ledger
+   line) — this file is **append-only**, so `tail -f` it (or read it directly) to watch a driver's tool
+   calls as they happen without disturbing it.
+3. `claude --resume <session_id> --fork-session` — a full interactive replay/continuation. Safe to run
+   **while the driver is still executing**: `--fork-session` never mutates the original session, it only
+   reads the append-only transcript and branches a new one.
+
+**Intervention is kill-and-let-it-re-advance, never steer.** A driver is a headless `claude -p` process with
+no attach point — there is no "type into it and redirect it" option. To stop one: find its `pid=` (a
+process **group** id) in the ledger and `kill -TERM -- -<pgid>` (the same target `timeout --kill-after`
+would eventually use anyway). Do **not** try to nudge a running driver's behavior. Instead, let
+`loop-tick.sh`'s own pre-branch spawn lock (`.claude/state/loop-advance.lock`, 15-minute TTL) self-heal so a
+later tick can re-advance the same issue cleanly, or fix forward with a normal orchestrator pass once
+whatever state the killed driver left behind (a branch, a PR) is visible to a fresh tick.
+
+**Remote planning sessions.** `claude-rc-<repo>.service` keeps a `claude remote-control` process alive in a
+detached tmux session, independent of the loop daemon's own ticking, so you can spawn a **new** planning
+session from claude.ai or the Claude Code mobile app against this checkout at any time — useful for filing
+or scoping work from your phone without a terminal open. `tmux attach -t rc-<repo>` to see its QR/status
+locally, or restart it with `systemctl --user restart claude-rc-<repo>.service`.
+
+**Linux vs WSL2.** Both need `systemd`, `tmux`, and `node`/`git` on `PATH`. WSL2 does **not** run systemd by
+default — add (or verify) a `[boot]` section with `systemd=true` in `/etc/wsl.conf`, then `wsl --shutdown`
+from **Windows** (not WSL) and reopen the WSL terminal; re-check with `systemctl --version` inside WSL2.
+Both platforms: installing units under `~/.config/systemd/user/`, `loginctl enable-linger`, and starting the
+detached tmux session all touch `$HOME`/systemd, which the Claude Code sandbox blocks — **run**
+```bash
+bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N]
+```
+**in a real terminal outside Claude Code.** It's idempotent (safe to re-run any time). Self-hosting: add
+`--gates-file .claude/self/gates.json`. WSL2-only extra: optionally make the loop survive a Windows reboot
+by relaunching WSL2 at Windows logon — from an **elevated Windows** terminal (substituting `<distro>` from
+`wsl -l`, run on the Windows side):
+```
+schtasks /create /tn "WSL pr-loop autostart" /tr "wsl.exe -d <distro> --exec true" /sc onlogon
+```
+Skipping this is safe: GitHub is the loop's only source of truth, so anything that happened while WSL2 was
+stopped is simply picked up by the first tick after the next manual WSL2 start.
+
+Inspect what's armed:
+```bash
+systemctl --user status pr-loop-<repo>.service
+journalctl --user -u pr-loop-<repo>.service -f
+tail -f .claude/state/loop-runs.log
+tmux attach -t rc-<repo>
+```
+
+**Failure contract.**
+
+| Failure | Detected as | Self-heals? | Manual fix |
+|---|---|---|---|
+| Driver exits non-zero (gate failure, crash mid-run, …) | ledger `result=exit rc=N` | Yes — the next tick's fresh census decides the next action from scratch | none |
+| Driver runs past `LOOP_DRIVER_TIMEOUT` (default 90m) | ledger `result=timeout rc=124\|137`; `timeout --kill-after=30s` plus an explicit process-group kill | Yes — same as above | none, unless it left a half-finished branch behind — inspect and fix forward |
+| `claude` CLI not found on `PATH` (nor via the `nvm` fallback) | ledger `result=spawn-error rc=127`, logged before any spawn attempt | Partially — the pre-branch spawn lock's 15-minute TTL clears and lets a later tick retry, but every retry hits the same missing-`PATH` wall | fix `PATH`/`nvm` in the daemon's environment (e.g. the systemd unit's `Environment=`), then `systemctl --user restart pr-loop-<repo>.service` |
+| `loop-tick.sh` / `loop-event.sh` itself exits non-zero (broken tick) | daemon logs "not spawning a driver on a broken tick", sleeps the fallback cadence, retries | Yes — retried automatically every tick | investigate only if it persists across many ticks |
+| **Driver pushed `feat/issue-N-*` but died before opening the PR** | census reports `N` as `in_flight`; `loop-tick.sh`'s advance check refuses (`# advance refused: issue=N is in_flight`, logged every single tick) and emits `action=none` | **No** — unlike the pre-branch spawn lock, `in_flight` has no TTL/self-heal; it refuses forever until the branch or a PR's state changes | **delete the abandoned branch** (frees the issue back to `advance_ready`), **or** open the PR by hand for that branch (moves it into the normal review/merge or feedback flow) |
+| `claude-rc-<repo>.service`'s inner `claude remote-control` process crashes | **not detected by systemd** — the unit is `Type=oneshot`/`RemainAfterExit=yes`; systemd only observes `tmux new -d`'s own (successful) exit, never the health of the process running *inside* that tmux session | No | `tmux attach -t rc-<repo>` to check, then `systemctl --user restart claude-rc-<repo>.service` |
+
+**Never run the daemon and the legacy `/pr-loop` cron against the same repo at the same time** —
+`loop-tick.sh`'s spawn lock makes double-firing *safe* (no double-spawn), just wasteful (two firing sources
+burning ticks against identical state).
+
+**Legacy cron (`/pr-loop` / `/orchestrator:pr-loop`).** Kept as the fallback for environments without
+systemd: session-scoped `CronCreate`, dies with the Claude Code session that armed it, so it must be
+re-armed at the start of each session (**`/orchestrator:pr-loop`** does that plus runs one tick
+immediately). Same adaptive cadence, same `loop-tick.sh` mechanics underneath — it just fires from inside a
+Claude Code cron instead of `loop-daemon.sh`.
 
 ## Autonomous loop & the issue queue
-Each `/orchestrator:pr-loop` tick runs, in order: **poll → merge → address-feedback → advance** — this
-per-tick order, canonically defined in `.claude/commands/pr-loop.md`, is authoritative; the poll / address-feedback /
-merge scripts described above are the mechanism it runs. Two human control points
+Each tick — whether fired by the daemon's `loop-event.sh`/`loop-tick.sh` or the legacy `/orchestrator:pr-loop`
+cron — runs, in order: **poll → merge → address-feedback → advance** — this per-tick order, canonically
+defined in `.claude/commands/pr-loop.md` and `.claude/scripts/loop-tick.sh`, is authoritative; the poll /
+address-feedback / merge scripts described above are the mechanism it runs. Two human control points
 decide what the loop actually touches:
 
 - **Issue approval is a two-label workflow: `backlog` → `planned`.** An issue enters the loop's work
