@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # log-worker-tool.test.sh — offline smoke test for log-worker-tool.sh
-# (issue #71, Cockpit 3c SPIKE).
+# (issue #71, Cockpit 3c SPIKE; enabled by default as of issue #84).
 #
 # Asserts: Bash/Edit/Write tool calls yield exactly one valid-JSON record
 # each with the expected tool/summary/path fields; non-mirrored tools (Read,

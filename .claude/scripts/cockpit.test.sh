@@ -378,7 +378,14 @@ insp_port="$(node -e '
 ')"
 insp_serve_log="$work/serve-inspector.log"
 : > "$insp_serve_log"
-COCKPIT_SERVE_WORKTREES_ROOT="$insp_root" bash "$cockpit_serve" "$insp_port" --fixtures "$work/fixtures-inspector" >"$insp_serve_log" 2>&1 &
+# CLAUDE_WORKER_TOOLS_FILE (issue #84) deliberately points at a file that
+# does not exist, so this primary server instance also covers the
+# "no worker-tools log present" case below -- activity must come back as an
+# empty array, never missing/an error, and never accidentally pick up this
+# checkout's own real (gitignored) worker-tools.jsonl.
+COCKPIT_SERVE_WORKTREES_ROOT="$insp_root" \
+CLAUDE_WORKER_TOOLS_FILE="$work/no-such-worker-tools.jsonl" \
+  bash "$cockpit_serve" "$insp_port" --fixtures "$work/fixtures-inspector" >"$insp_serve_log" 2>&1 &
 server_pid=$!
 
 insp_ready=0
@@ -403,6 +410,18 @@ check "worker-inspector 70a: timeline has both events, NEWEST FIRST, plus breadc
   if (typeof wt.status !== "string") throw new Error("status field missing/wrong type");
   if (!Array.isArray(wt.commits) || wt.commits.length === 0) throw new Error("commits field missing/empty");
   if (typeof wt.diffstat !== "string") throw new Error("diffstat field missing/wrong type");
+' "$resp_70a"
+
+# Activity (issue #84), no-log-file case: CLAUDE_WORKER_TOOLS_FILE for this
+# server points at a nonexistent file -- activity must be an empty array
+# (not missing, not an error), and the rest of the response (timeline,
+# worktree) must still be intact.
+check "worker-inspector 70a: no worker-tools log present -> activity is [] (not missing/error), timeline/worktree intact" node -e '
+  const got = JSON.parse(process.argv[1]);
+  if (!Array.isArray(got.activity)) throw new Error("expected activity to be an array, got " + JSON.stringify(got.activity));
+  if (got.activity.length !== 0) throw new Error("expected empty activity with no log file, got " + JSON.stringify(got.activity));
+  if (!Array.isArray(got.timeline) || got.timeline.length !== 2) throw new Error("timeline should still be intact");
+  if (!got.worktree || got.worktree.found !== true) throw new Error("worktree should still be intact");
 ' "$resp_70a"
 
 resp_70b="$(curl -s "http://127.0.0.1:$insp_port/api/worker/reviewer/70b" 2>/dev/null)"
@@ -449,6 +468,64 @@ check "worker-inspector: server still serves a valid request after malformed/tra
 kill "$server_pid" >/dev/null 2>&1 || true
 wait "$server_pid" 2>/dev/null || true
 server_pid=""
+
+# ---------------------------------------------------------------------------
+# 6b. Worker inspector "activity" field (issue #84): a populated worker-tools
+#     mirror log (log-worker-tool.sh's JSONL), pointed at via
+#     CLAUDE_WORKER_TOOLS_FILE. Records under 70a's worktree path must come
+#     back NEWEST FIRST; a record under a DIFFERENT path (70b's worktree)
+#     must be excluded.
+# ---------------------------------------------------------------------------
+insp_wtools_file="$work/inspector-worker-tools.jsonl"
+insp_wt_70a="$insp_root/.claude/worktrees/issue-70a"
+cat >"$insp_wtools_file" <<EOF
+{"ts":"2026-01-01T02:00:00Z","tool":"Bash","summary":"git status","path":"$insp_wt_70a"}
+{"ts":"2026-01-01T02:01:00Z","tool":"Edit","summary":"$insp_wt_70a/src/foo.js","path":"$insp_wt_70a/src/foo.js"}
+{"ts":"2026-01-01T02:02:00Z","tool":"Bash","summary":"git status","path":"$insp_wt_70b"}
+{"ts":"2026-01-01T02:03:00Z","tool":"Write","summary":"$insp_wt_70a/src/bar.js","path":"$insp_wt_70a/src/bar.js"}
+EOF
+
+insp_port2="$(node -e '
+  const s = require("net").createServer();
+  s.listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });
+')"
+insp_serve_log2="$work/serve-inspector-activity.log"
+: > "$insp_serve_log2"
+COCKPIT_SERVE_WORKTREES_ROOT="$insp_root" \
+CLAUDE_WORKER_TOOLS_FILE="$insp_wtools_file" \
+  bash "$cockpit_serve" "$insp_port2" --fixtures "$work/fixtures-inspector" >"$insp_serve_log2" 2>&1 &
+server_pid2=$!
+
+insp_ready2=0
+for _ in $(seq 1 50); do
+  grep -q "cockpit serving" "$insp_serve_log2" 2>/dev/null && { insp_ready2=1; break; }
+  kill -0 "$server_pid2" 2>/dev/null || break
+  sleep 0.2
+done
+check "worker-inspector (activity) server starts within the readiness timeout" [ "$insp_ready2" -eq 1 ]
+
+resp_70a_activity="$(curl -s "http://127.0.0.1:$insp_port2/api/worker/implementer/70a" 2>/dev/null)"
+check "worker-inspector 70a: activity present, is an array, NEWEST FIRST, excludes records under a different worktree path" node -e '
+  const got = JSON.parse(process.argv[1]);
+  if (!Array.isArray(got.activity)) throw new Error("expected activity to be an array, got " + JSON.stringify(got.activity));
+  if (got.activity.length !== 3) throw new Error("expected 3 activity records (70a-scoped only), got " + JSON.stringify(got.activity));
+  const summaries = got.activity.map((r) => r.summary);
+  const wantOrder = [got.activity[0], got.activity[1], got.activity[2]].map((r) => r.ts);
+  if (wantOrder[0] !== "2026-01-01T02:03:00Z") throw new Error("expected newest (bar.js write) first, got " + JSON.stringify(got.activity));
+  if (wantOrder[1] !== "2026-01-01T02:01:00Z") throw new Error("expected foo.js edit second, got " + JSON.stringify(got.activity));
+  if (wantOrder[2] !== "2026-01-01T02:00:00Z") throw new Error("expected git status last (oldest), got " + JSON.stringify(got.activity));
+  if (summaries.some((s) => String(s).indexOf("bar.js") === -1 && String(s).indexOf("foo.js") === -1 && s !== "git status")) {
+    throw new Error("unexpected summary content: " + JSON.stringify(summaries));
+  }
+  if (got.activity.some((r) => r.path && r.path.indexOf("issue-70a") === -1)) {
+    throw new Error("activity leaked a record outside 70a worktree: " + JSON.stringify(got.activity));
+  }
+' "$resp_70a_activity"
+
+kill "$server_pid2" >/dev/null 2>&1 || true
+wait "$server_pid2" 2>/dev/null || true
+server_pid2=""
+
 IG worktree remove --force "$insp_root/.claude/worktrees/issue-70a" >/dev/null 2>&1 || true
 IG worktree remove --force "$insp_wt_70b" >/dev/null 2>&1 || true
 

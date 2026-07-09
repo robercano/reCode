@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# log-worker-tool.sh — PostToolUse mirror hook (issue #71, Cockpit 3c SPIKE).
+# log-worker-tool.sh — PostToolUse mirror hook (issue #71, Cockpit 3c SPIKE;
+# enabled by default as of issue #84).
 #
-# NOT ENABLED BY DEFAULT — see the "Wiring (disabled by default)" section
-# below for the copy-paste snippet that turns it on. This is a spike to
-# gather evidence on signal/noise and log growth before committing to always-
-# on tool mirroring.
+# ENABLED BY DEFAULT — wired into .claude/settings.json's hooks.PostToolUse
+# (see the "Wiring" section below, kept here as reference for what's live).
+# The issue #71 spike gathered evidence on signal/noise and log growth
+# (readable, truncated/collapsed Bash summaries; rotation via atomic mv keeps
+# the JSONL valid; manageable lines/hour for a typical fan-out) and issue #84
+# concluded: enable it. Cockpit's worker inspector (cockpit-serve.sh) reads
+# this log to power the "Live activity" drawer section.
 #
 # Reads the PostToolUse hook event JSON on STDIN and mirrors ONLY the tools
 # Bash, Edit, Write (every other tool — Read, Grep, Glob, ... — is silently
@@ -42,7 +46,8 @@
 # agent never sees this happen and it costs zero agent tokens.
 #
 # ---------------------------------------------------------------------------
-# Wiring (DISABLED by default — copy into .claude/settings.json to enable):
+# Wiring — this is the wiring now live in .claude/settings.json's
+# hooks.PostToolUse array (kept here as reference, not a to-do):
 #
 #   "PostToolUse": [
 #     {
@@ -56,7 +61,9 @@
 #     }
 #   ]
 #
-# A "go" decision is this one array entry — nothing else to wire up.
+# The evaluation (issue #84) concluded: enable — this is a single array
+# entry alongside the existing Edit|Write -> lint entry, nothing else to
+# wire up.
 # ---------------------------------------------------------------------------
 set -u
 

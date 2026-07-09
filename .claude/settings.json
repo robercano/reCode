@@ -10,6 +10,15 @@
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh\" lint"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/log-worker-tool.sh\""
+          }
+        ]
       }
     ],
     "Stop": [
