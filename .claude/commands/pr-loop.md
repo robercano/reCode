@@ -2,6 +2,15 @@
 description: Arm (or re-arm) the autonomous PR-loop cron and run one tick now
 ---
 
+**LEGACY path (issue #102).** This is the session-scoped cron. The RECOMMENDED replacement is the cron-less
+daemon: `systemd --user` supervises `.claude/scripts/loop-daemon.sh` forever, independent of any Claude Code
+session, and spawns a driver only on an actionable verdict (never on `action=none`). Install it with
+`bash .claude/scripts/arm-loop.sh` (run in a real terminal outside Claude Code — see `docs/HARDENING.md` →
+Caveats), or via `/orchestrator:setup`'s "arm the loop" step. **Never run both the cron and the daemon against
+the same repo at once** — `loop-tick.sh`'s spawn lock makes it *safe* (no double-spawn), merely wasteful (two
+firing sources burning ticks against the same state). Keep reading below only if you're intentionally using
+the legacy cron (no systemd available, or as a fallback).
+
 You are (re)arming this project's autonomous PR loop. The loop is session-scoped (cron jobs die when Claude Code exits and may not persist across restarts even when durable), so it is lost at the start of each new session. This command restores the whole loop in one step. Do BOTH parts.
 
 The repo is derived from the git remote (`bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh repo view --json nameWithOwner -q .nameWithOwner`); the bot login defaults to `$BOT_LOGIN`. Nothing here is project-specific — it reads `.claude/gates.json`, `.claude/scripts/*`, and `docs/USAGE.md`.

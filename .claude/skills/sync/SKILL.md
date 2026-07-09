@@ -12,8 +12,17 @@ upgrade reach into repos that already onboarded, without a human re-running the 
 
 ## Ownership model (reuse the setup MANIFEST — do not invent a new scheme)
 See `.claude/skills/setup/templates/MANIFEST.md` for the authoritative ownership classes. Sync only acts on
-the **managed** row (today: `feature-fanout.js` -> `.claude/workflows/feature-fanout.js`). It is designed so
-adding a new managed file later is a one-line addition to `sync.sh`'s managed-file table, not a rewrite.
+the **managed** rows — today: `feature-fanout.js` -> `.claude/workflows/feature-fanout.js`, and (issue #102)
+the cron-less loop daemon's systemd unit templates + installer:
+`pr-loop.service` -> `.claude/systemd/pr-loop.service`, `claude-rc.service` -> `.claude/systemd/claude-rc.service`,
+and `arm-loop.sh` -> `.claude/scripts/arm-loop.sh`. All four are reconciled by the exact same marker-version
+ladder below — the loop-daemon files are ordinary managed files, not a special case. It is designed so adding
+a new managed file later is a one-line addition to `sync.sh`'s managed-file table, not a rewrite.
+
+Re-stamping the loop-daemon templates only updates the checked-in files in the repo — it never touches an
+already-installed unit under `~/.config/systemd/user/` or restarts a running daemon. Tell the user to re-run
+`bash .claude/scripts/arm-loop.sh` (in a real terminal, per the sandbox caveat) after a restamp if they want
+the installed units to pick up the change.
 
 Sync **never** touches user-owned files, under any circumstance:
 - `.claude/gates.json`

@@ -39,7 +39,14 @@ To have the autonomous loop work this repo's own `module:*` backlog:
    **`.claude/self/gates.json`** as its adapter (module map + gates) for this repo. The generic agents/scripts
    otherwise behave identically — worker boundaries come from this file's `modules`, gates from its `gates`.
 
-The durable, first-class way to do this is **`.claude/self/pr-loop-self.md`** — it mirrors `/pr-loop` exactly
+**Recommended (issue #102): the cron-less daemon.** `bash .claude/scripts/arm-loop.sh --gates-file .claude/self/gates.json`
+(run in a real terminal outside Claude Code — installing systemd units/`enable-linger`/tmux touches `$HOME`
+and is blocked by the sandbox) arms `.claude/scripts/loop-daemon.sh` under `systemd --user`, forever, adapted
+to this repo's own module set. It survives session restarts and spawns a driver only on an actionable
+verdict. Never run it alongside `.claude/self/pr-loop-self.md`'s cron at the same time — safe (spawn lock),
+just wasteful.
+
+The legacy, session-scoped way to do this is **`.claude/self/pr-loop-self.md`** — it mirrors `/pr-loop` exactly
 (arm/re-arm cron, adaptive cadence, poll → merge → address-feedback → advance) but carries
 `GATES_FILE=.claude/self/gates.json` through every gate call and every spawned agent, and adapts on the self
 modules (`module:docs`/`module:harness`/`module:examples`/`module:ci`) instead of the project's own

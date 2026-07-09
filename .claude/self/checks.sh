@@ -39,7 +39,11 @@ do_build() {
 
 do_lint() {
   local rc=0 f
-  for f in .claude/scripts/*.sh .claude/self/*.sh; do
+  # .claude/skills/*/*.sh (scaffold.sh, sync.sh) and .claude/skills/*/templates/*.sh
+  # (issue #102's arm-loop.sh template) are included so a syntax regression in the
+  # setup/sync machinery or a scaffolded script template is caught here too, not just
+  # .claude/scripts/*.sh and .claude/self/*.sh.
+  for f in .claude/scripts/*.sh .claude/self/*.sh .claude/skills/*/*.sh .claude/skills/*/templates/*.sh; do
     [ -e "$f" ] || continue
     bash -n "$f" || { echo "lint: shell syntax error — $f"; rc=1; }
   done

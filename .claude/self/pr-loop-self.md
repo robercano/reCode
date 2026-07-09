@@ -2,6 +2,14 @@
 description: Arm (or re-arm) the self-hosted PR-loop cron and run one tick now
 ---
 
+**LEGACY path (issue #102).** This is the session-scoped cron. The RECOMMENDED replacement is the cron-less
+daemon: `systemd --user` supervises `.claude/scripts/loop-daemon.sh` forever, independent of any Claude Code
+session, and spawns a driver only on an actionable verdict (never on `action=none`). Install it with
+`bash .claude/scripts/arm-loop.sh --gates-file .claude/self/gates.json` (run in a real terminal outside Claude
+Code — see `docs/HARDENING.md` → Caveats). **Never run both this cron and the daemon against this repo at
+once** — `loop-tick.sh`'s spawn lock makes it *safe* (no double-spawn), merely wasteful (two firing sources
+burning ticks against the same state). Keep reading below only if you're intentionally using the legacy cron.
+
 You are (re)arming this project's self-hosted PR loop — the loop that works THIS repo's own
 `.claude`/`docs`/`examples`/`.github` backlog instead of a downstream project's. The loop is session-scoped
 (cron jobs die when Claude Code exits and may not persist across restarts even when durable), so it is lost at

@@ -65,6 +65,9 @@ echo "orchestrator sync: reconciling managed files in $target_root"
 # straight from its own template, so there is nothing else to wire up.
 MANAGED_FILES=(
   "feature-fanout.js|.claude/workflows/feature-fanout.js|@orchestrator-managed feature-fanout v"
+  "pr-loop.service|.claude/systemd/pr-loop.service|@orchestrator-managed pr-loop-service v"
+  "claude-rc.service|.claude/systemd/claude-rc.service|@orchestrator-managed claude-rc-service v"
+  "arm-loop.sh|.claude/scripts/arm-loop.sh|@orchestrator-managed arm-loop v"
 )
 
 # --- user-owned files: NEVER written by sync, only reported for visibility ---------

@@ -71,7 +71,8 @@ collects and scaffolds:
   updates, see [`USAGE.md` → "Updating the plugin"](USAGE.md#updating-the-plugin)).
 - **`.github/workflows/gates.yml`** + **`.github/actions/setup/action.yml`** — the CI gate workflow (Step 4
   below).
-- **`module:*` GitHub labels**, a **bot-account check** (`GH_BOT_TOKEN`), and offers to arm **`/orchestrator:pr-loop`**
+- **`module:*` GitHub labels**, a **bot-account check** (`GH_BOT_TOKEN`), and offers to arm the loop — the
+  **cron-less loop daemon** (recommended, `systemd --user`) or the legacy **`/orchestrator:pr-loop`** cron —
   and, last, **`/orchestrator:harden`**.
 
 **Sanity-check the gates once it's written** (ask Claude Code to run these, so `${CLAUDE_PLUGIN_ROOT}`
@@ -182,16 +183,29 @@ model (the `module:*` opt-in queue + the owner-approval merge gate) that this ch
    `.claude/scripts/seed-issues.sh`. Without the label, ADVANCE can never queue the issue.
 6. **Server-side gates** — confirm `.github/workflows/gates.yml` runs your gate commands (Step 4 above), and
    set branch protection / required status checks on `merge.baseBranch` if your plan supports it.
-7. **Arm the loop** — run **`/orchestrator:pr-loop`**. It self-adjusts cadence (FAST when there's ≥1 open PR or
-   ≥1 open `module:*` issue, else IDLE) but the cron is session-scoped, so re-run it at the start of each session.
-   **Pick the right model for each side of the loop:** run the tick session on **Sonnet** — the ticks are
-   repetitive, and that repetition is exactly where smaller models drift (a Haiku-driven tick session has been
-   observed to stop running the step scripts and fabricate their output, and to double-spawn orchestrators for
-   one issue). `.claude/scripts/loop-tick.sh` hardens the tick itself — one script computes the census/feedback/
-   advance verdict and a self-healing spawn lock, instead of a model re-deriving it from a prompt every firing
-   (see [`USAGE.md`](USAGE.md) → "Model selection") — but the driving session still needs Sonnet to read that
-   verdict and act on it. Use **Fable or Opus** for the owner-side judgment
-   work — scoping, planning, and filing issues — then let the loop execute the approved queue.
+7. **Arm the loop** — recommended: **`bash .claude/scripts/arm-loop.sh`** (run in a real terminal *outside*
+   Claude Code — installing systemd units, `loginctl enable-linger`, and a detached tmux session all touch
+   `$HOME`, which the sandbox blocks). This installs `pr-loop-<repo>.service` (the cron-less daemon —
+   supervised by `systemd --user`, survives Claude Code restarts, adaptive FAST/WATCH/IDLE sleep read
+   straight off the census) and `claude-rc-<repo>.service` (`claude remote-control` in a detached tmux
+   session, for spawning planning sessions remotely). Self-hosting: add `--gates-file
+   .claude/self/gates.json`. See [`USAGE.md` → "Cron-less loop
+   (daemon)"](USAGE.md#cron-less-loop-daemon) for the full architecture, cadence, run ledger, and
+   failure-contract details, including WSL2's `systemd=true` prerequisite.
+   Fallback (no systemd available): **`/orchestrator:pr-loop`** — the legacy session-scoped cron. It
+   self-adjusts cadence the same way (FAST when there's ≥1 open PR or ≥1 open `module:*` issue, else IDLE)
+   but dies with the Claude Code session that armed it, so it must be re-run at the start of each session.
+   **Never run both against the same repo at once** — `loop-tick.sh`'s spawn lock makes it *safe* (no
+   double-spawn), just wasteful.
+   **Pick the right model for each side of the loop:** the daemon's driver sessions default to **Sonnet**
+   (`LOOP_MODEL` env, read by `loop-event.sh`) — the ticks are repetitive, and that repetition is exactly
+   where smaller models drift (a Haiku-driven tick session has been observed to stop running the step
+   scripts and fabricate their output, and to double-spawn orchestrators for one issue).
+   `.claude/scripts/loop-tick.sh` hardens the tick itself — one script computes the census/feedback/advance
+   verdict and a self-healing spawn lock, instead of a model re-deriving it from a prompt every firing (see
+   [`USAGE.md`](USAGE.md) → "Model selection") — but a driving cron session still needs Sonnet to read that
+   verdict and act on it. Use **Fable or Opus** for the owner-side judgment work — scoping, planning, and
+   filing issues — then let the loop execute the approved queue.
 8. *(optional)* **Hardening** — `/orchestrator:harden` for the bypass + strict-sandbox profile, see
    [`HARDENING.md`](HARDENING.md).
 
