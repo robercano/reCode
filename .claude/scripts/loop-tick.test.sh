@@ -301,15 +301,24 @@ check "scenario 12: action=feedback tick record captures pr number and cadence" 
 
 # ---------------------------------------------------------------------------
 # 11. Rotation: LOOP_TICKS_MAX_LINES caps the tick log to the last N lines
-#     across repeated ticks (mirrors log-event.sh's rotation).
+#     across repeated ticks (mirrors log-event.sh's rotation, log-event.test.sh
+#     lines ~87-115).
+#
+#     Each iteration below gets a DISTINCT advance_ready/issue so every
+#     retained JSONL line is byte-DIFFERENT (not the same static fixture
+#     replayed N times) -- otherwise line-count + JSON-validity checks alone
+#     cannot tell "kept the last N" apart from e.g. "kept the FIRST N" or any
+#     other N lines. We assert the exact retained `issue` values, in order,
+#     mirroring log-event.test.sh's `want` array.
 # ---------------------------------------------------------------------------
-dir13="$(new_fixture scenario13 'open_prs=0
-feedback_prs=0
-planned_issues=0
-advance_ready=none
-cadence=IDLE cron=*/15 * * * *' '')"
 ticks13="$work/scenario13-ticks.jsonl"
-for _ in 1 2 3 4 5 6 7; do
+for i in 1 2 3 4 5 6 7; do
+  dir13="$(new_fixture "scenario13-$i" "open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=$i branch=none title=Rotation issue $i
+advance_ready=$i
+cadence=FAST cron=* * * * *" '')"
   LOOP_TICKS_MAX_LINES=3 CLAUDE_TICKS_FILE="$ticks13" run_tick "$dir13" >/dev/null
 done
 check "scenario 13: rotation caps the tick log to exactly 3 lines" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 3 ]' _ "$ticks13"
@@ -318,6 +327,39 @@ check "scenario 13: every remaining line is still valid JSON after rotation" nod
   const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
   for (const l of lines) JSON.parse(l);
 ' "$ticks13"
+check "scenario 13: rotation keeps the LAST 3 ticks (issues 5,6,7), in order" node -e '
+  const fs = require("fs");
+  const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+  const issues = lines.map((l) => JSON.parse(l).issue);
+  const want = ["5", "6", "7"];
+  if (JSON.stringify(issues) !== JSON.stringify(want)) {
+    throw new Error("got " + JSON.stringify(issues) + " want " + JSON.stringify(want));
+  }
+' "$ticks13"
+
+# Rotation boundary: writing EXACTLY LOOP_TICKS_MAX_LINES ticks must leave
+# exactly that many lines -- i.e. rotation must not trigger (or drop
+# anything) right at the boundary, only once the count exceeds the cap.
+ticks13b="$work/scenario13b-ticks.jsonl"
+for i in 1 2 3; do
+  dir13b="$(new_fixture "scenario13b-$i" "open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=$i branch=none title=Boundary issue $i
+advance_ready=$i
+cadence=FAST cron=* * * * *" '')"
+  LOOP_TICKS_MAX_LINES=3 CLAUDE_TICKS_FILE="$ticks13b" run_tick "$dir13b" >/dev/null
+done
+check "scenario 13b: writing exactly LOOP_TICKS_MAX_LINES ticks leaves exactly that many lines" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 3 ]' _ "$ticks13b"
+check "scenario 13b: boundary case keeps all 3 ticks in order (no spurious drop)" node -e '
+  const fs = require("fs");
+  const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+  const issues = lines.map((l) => JSON.parse(l).issue);
+  const want = ["1", "2", "3"];
+  if (JSON.stringify(issues) !== JSON.stringify(want)) {
+    throw new Error("got " + JSON.stringify(issues) + " want " + JSON.stringify(want));
+  }
+' "$ticks13b"
 
 # ---------------------------------------------------------------------------
 # 12. Best-effort: tick recording must never disturb the verdict or exit

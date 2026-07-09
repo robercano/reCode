@@ -10,8 +10,9 @@
 # review/CI badges, a routing table with a real `model:` value, a worktrees
 # section, a live-progress panel deduped to each worker's latest phase, the
 # default dark-theme marker, and a loop-health panel showing the last tick +
-# cadence + newest-first verdict history + a STALLED banner once a tick is
-# overdue) and that the blocking-relationship parser (`cockpit.sh
+# cadence + a verdict history capped to the last COCKPIT_VERDICT_HISTORY_N
+# ticks (newest first) + a STALLED banner once a tick is overdue) and that
+# the blocking-relationship parser (`cockpit.sh
 # --parse-blocking`) produces the expected edges for a known fixture body.
 # Also exercises the "gh/network unavailable" / "no log at all" degrade paths
 # via COCKPIT_GH_BIN / missing CLAUDE_EVENTS_FILE / CLAUDE_TICKS_FILE, entirely
@@ -250,6 +251,58 @@ check "verdict history renders BOTH ticks, newest first" node -e '
 html_stalled="$work/cockpit-stalled.html"
 COCKPIT_NOW="2026-01-01T01:00:00Z" bash "$cockpit" --fixtures "$work/fixtures" "$html_stalled" >/dev/null 2>"$work/stderr-stalled.log"
 check "STALLED banner renders once the last tick exceeds 2x its cadence interval" grep -qF 'STALLED — no tick in over 120s (cadence FAST)' "$html_stalled"
+
+# ---------------------------------------------------------------------------
+# 2c. Verdict-history cap (review fix for issue #85): the panel must show only
+#     the last N verdict lines, newest first -- NOT every retained tick (the
+#     ticks file itself may hold up to LOOP_TICKS_MAX_LINES/2000 rows). Uses a
+#     dedicated fixtures dir with 5 DISTINGUISHABLE ticks (unique issue= per
+#     line, mirroring the loop-tick.test.sh rotation fix) and
+#     COCKPIT_VERDICT_HISTORY_N=3 so the cap is exercised deterministically
+#     without needing a huge fixture.
+# ---------------------------------------------------------------------------
+mkdir -p "$work/fixtures-history"
+echo "[]" >"$work/fixtures-history/issues.json"
+echo "[]" >"$work/fixtures-history/prs.json"
+: >"$work/fixtures-history/events.jsonl"
+cat > "$work/fixtures-history/loop-ticks.jsonl" <<'EOF'
+{"ts":"2026-01-01T00:00:00Z","verdict":"action=advance issue=1","cadence":"FAST","action":"advance","issue":"1","pr":""}
+{"ts":"2026-01-01T00:01:00Z","verdict":"action=advance issue=2","cadence":"FAST","action":"advance","issue":"2","pr":""}
+{"ts":"2026-01-01T00:02:00Z","verdict":"action=advance issue=3","cadence":"FAST","action":"advance","issue":"3","pr":""}
+{"ts":"2026-01-01T00:03:00Z","verdict":"action=advance issue=4","cadence":"FAST","action":"advance","issue":"4","pr":""}
+{"ts":"2026-01-01T00:04:00Z","verdict":"action=advance issue=5","cadence":"FAST","action":"advance","issue":"5","pr":""}
+EOF
+html_history="$work/cockpit-history.html"
+COCKPIT_NOW="2026-01-01T00:04:30Z" COCKPIT_VERDICT_HISTORY_N=3 bash "$cockpit" --fixtures "$work/fixtures-history" "$html_history" >/dev/null 2>"$work/stderr-history.log"
+check "verdict-history cap: last tick is still the most recent (issue=5)" grep -qF '<code>2026-01-01T00:04:00Z</code> &middot; verdict <code>action=advance issue=5</code>' "$html_history"
+check "verdict-history cap: table renders exactly COCKPIT_VERDICT_HISTORY_N=3 rows, newest first" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="loop-health">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("loop-health section not found");
+  const rows = [...m[0].matchAll(/<tr><td>([^<]*)<\/td><td><code>([^<]*)<\/code><\/td>/g)].map((r) => r[2]);
+  const want = ["action=advance issue=5", "action=advance issue=4", "action=advance issue=3"];
+  if (JSON.stringify(rows) !== JSON.stringify(want)) {
+    throw new Error("got " + JSON.stringify(rows) + " want " + JSON.stringify(want));
+  }
+' "$html_history"
+
+# Default (COCKPIT_VERDICT_HISTORY_N unset) with only 5 ticks retained must
+# still render all 5 -- the default cap (10) must not truncate BELOW what's
+# actually there.
+html_history_default="$work/cockpit-history-default.html"
+COCKPIT_NOW="2026-01-01T00:04:30Z" bash "$cockpit" --fixtures "$work/fixtures-history" "$html_history_default" >/dev/null 2>"$work/stderr-history-default.log"
+check "verdict-history default cap (10) does not truncate a shorter (5-tick) history" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="loop-health">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("loop-health section not found");
+  const rows = [...m[0].matchAll(/<tr><td>([^<]*)<\/td><td><code>([^<]*)<\/code><\/td>/g)].map((r) => r[2]);
+  const want = ["action=advance issue=5", "action=advance issue=4", "action=advance issue=3", "action=advance issue=2", "action=advance issue=1"];
+  if (JSON.stringify(rows) !== JSON.stringify(want)) {
+    throw new Error("got " + JSON.stringify(rows) + " want " + JSON.stringify(want));
+  }
+' "$html_history_default"
 
 # ---------------------------------------------------------------------------
 # 3. GATES_FILE override is honored (self-host adapter), still with fixtures

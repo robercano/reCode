@@ -255,6 +255,7 @@ COCKPIT_ISSUES_UNAVAILABLE="$issues_unavailable" \
 COCKPIT_PRS_UNAVAILABLE="$prs_unavailable" \
 COCKPIT_GATES_REF="$gates_ref" \
 COCKPIT_NOW="${COCKPIT_NOW:-}" \
+COCKPIT_VERDICT_HISTORY_N="${COCKPIT_VERDICT_HISTORY_N:-10}" \
 node - <<'NODE_RENDER'
 const fs = require("fs");
 const path = require("path");
@@ -402,9 +403,18 @@ function renderLiveProgress() {
 // ticked in this environment -- rendered as "loop not armed", never a crash.
 // Otherwise: the last tick's ts/verdict, the current cadence, a STALLED
 // banner when now - lastTick exceeds 2x the cadence's expected interval, and
-// the full verdict history newest-first.
+// the last N verdict lines, newest-first (N is bounded, NOT the full
+// potentially ~2000-row retained log -- see COCKPIT_VERDICT_HISTORY_N below).
 const CADENCE_INTERVAL_SECONDS = { FAST: 60, WATCH: 300, IDLE: 900 };
 const nowMs = process.env.COCKPIT_NOW ? Date.parse(process.env.COCKPIT_NOW) : Date.now();
+// Verdict-history table depth: "the last N verdict lines, newest first"
+// (issue #85). Overridable for testability, consistent with the
+// COCKPIT_NOW/CLAUDE_TICKS_FILE override style used elsewhere in this file.
+// Falls back to 10 if unset/non-numeric/non-positive.
+const VERDICT_HISTORY_N = (() => {
+  const n = parseInt(process.env.COCKPIT_VERDICT_HISTORY_N, 10);
+  return Number.isFinite(n) && n > 0 ? n : 10;
+})();
 function renderLoopHealth() {
   let html = `<section id="loop-health"><h2>Loop health</h2>`;
   if (ticks.length === 0) {
@@ -430,7 +440,8 @@ function renderLoopHealth() {
   }
 
   html += `<table class="routing"><thead><tr><th>Time</th><th>Verdict</th><th>Cadence</th></tr></thead><tbody>`;
-  for (let i = ticks.length - 1; i >= 0; i--) {
+  const historyStop = Math.max(0, ticks.length - VERDICT_HISTORY_N);
+  for (let i = ticks.length - 1; i >= historyStop; i--) {
     const t = ticks[i];
     html += `<tr><td>${esc(t.ts)}</td><td><code>${esc(t.verdict)}</code></td><td>${esc(t.cadence)}</td></tr>`;
   }
