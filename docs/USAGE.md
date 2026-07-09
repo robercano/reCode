@@ -202,7 +202,7 @@ checklist](GETTING_STARTED.md#new-project-configuration-checklist)**.
 When a new version of the `orchestrator` plugin ships (new agents, commands, gate fixes, etc.), refresh the
 marketplace listing and let Claude Code update the installed plugin:
 ```
-/plugin marketplace update ai-project-orchestrator
+/plugin marketplace update recode
 ```
 Then re-stamp the files `/orchestrator:setup` scaffolded into **your** repo (`gates.json`, `CLAUDE.md`, the
 fan-out workflow, the CI gate workflow) so they pick up any changes shipped in the update:
@@ -219,7 +219,7 @@ and left alone on every re-run).
 > re-fetches plugin content when the plugin's version string actually changes (`.claude/.claude-plugin/plugin.json`
 > and, for the local-clone method, `.claude/.claude-plugin/marketplace.json`'s matching entry). Merging a fix to
 > `main` without bumping that version means every existing installer's cached copy — at
-> `~/.claude/plugins/cache/ai-project-orchestrator/orchestrator/<version>/` — silently never updates, even
+> `~/.claude/plugins/cache/recode/orchestrator/<version>/` — silently never updates, even
 > after `/plugin marketplace update`. Caught 2026-07-06: a `hooks/hooks.json` schema fix merged to `main` but
 > didn't reach an already-installed consumer until the version string was bumped too.
 
