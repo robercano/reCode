@@ -2,13 +2,13 @@
 
 Copy-paste these into Claude Code. The first two populate the files you must fill; the rest drive day-to-day work.
 
-> **Shortcut:** the **`/setup-orchestrator`** command runs an interactive interview that covers prompts 1–2
+> **Shortcut:** the **`/orchestrator:setup`** command runs an interactive interview that covers prompts 1–2
 > (draft `CLAUDE.md`, fill `gates.json`) *and* the rest of onboarding (labels, bot check, CI, arming the loop,
 > hardening). Use it for a fresh project; reach for the individual prompts below when you want to redo one piece.
 >
 > **Brand-new project?** Read the **[new-project configuration
 > checklist](GETTING_STARTED.md#new-project-configuration-checklist)** and **[USAGE.md → "Autonomous loop &
-> the issue queue"](USAGE.md#autonomous-loop--the-issue-queue)** first — they explain what `/setup-orchestrator`
+> the issue queue"](USAGE.md#autonomous-loop--the-issue-queue)** first — they explain what `/orchestrator:setup`
 > (and prompts 1–2 below) are actually wiring up, and the one convention that trips people up: only issues
 > labelled `module:*` are ever picked up automatically.
 

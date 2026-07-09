@@ -12,7 +12,7 @@ If you haven't installed the plugin yet, do that first — see [`GETTING_STARTED
 Remove the copied harness that the plugin now carries — it's generic, not project-specific, and staying on a
 frozen copy means you never get fixes/improvements:
 - `.claude/agents/` — orchestrator, implementer, reviewer, test-runner.
-- `.claude/commands/` — `pr-loop.md`, `harden.md`, `setup-orchestrator.md`, `test-pr.md`, etc. (they resolve
+- `.claude/commands/` — `pr-loop.md`, `harden.md`, `test-pr.md`, etc. (they resolve
   as namespaced `/orchestrator:*` commands once the plugin is enabled). Note: `pr-loop-self.md` is **not**
   among these — it lives under `.claude/self/` (not `.claude/commands/`) and is not plugin-distributed; see
   `.claude/self/README.md` if your repo has a self-hosting setup of its own.

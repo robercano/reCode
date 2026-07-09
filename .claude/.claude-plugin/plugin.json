@@ -6,8 +6,6 @@
   "commands": [
     "./commands/harden.md",
     "./commands/pr-loop.md",
-    "./commands/setup-orchestrator.md",
-    "./commands/sync-orchestrator.md",
     "./commands/test-pr.md"
   ]
 }
