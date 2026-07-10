@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @orchestrator-managed arm-loop v3
+# @orchestrator-managed arm-loop v4
 # arm-loop.sh — installs the cron-less PR-loop as systemd (user) units
 # (issue #102). Templated + re-stamped by `/orchestrator:setup`/`sync`; do
 # not hand-edit the copy scaffold.sh wrote into this repo if you want future
@@ -98,6 +98,7 @@ if [ -z "$claude_bin" ]; then
 fi
 
 rc_name="${rc_name:-$repo_slug-planner}"
+claude_dir="$(dirname "$claude_bin")"
 
 units_dir="$HOME/.config/systemd/user"
 mkdir -p "$units_dir"
@@ -125,6 +126,7 @@ sed -e "s#__WORKDIR__#$repo_root#g" \
     -e "s#__CAPACITY__#$capacity#g" \
     -e "s#__CLAUDE_BIN__#$claude_bin#g" \
     -e "s#__RC_NAME__#$rc_name#g" \
+    -e "s#__CLAUDE_DIR__#$claude_dir#g" \
     "$claude_rc_src" > "$claude_rc_dst"
 
 echo "arm-loop.sh: wrote $pr_loop_dst"
