@@ -75,12 +75,29 @@ decide() {
 
 merged=0; skipped=0
 for n in $(gh pr list -R "$repo" --base "$base" --state open --json number -q '.[].number'); do
-  data="$(gh pr view "$n" -R "$repo" --json number,title,isDraft,baseRefName,mergeable,reviews,statusCheckRollup,commits)"
+  data="$(gh pr view "$n" -R "$repo" --json number,title,isDraft,baseRefName,headRefName,mergeable,reviews,statusCheckRollup,commits)"
   verdict="$(printf '%s' "$data" | decide)"
   title="$(printf '%s' "$data" | node -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(0,"utf8")).title)||"")')"
+  head_branch="$(printf '%s' "$data" | node -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(0,"utf8")).headRefName)||"")')"
   if [ "$verdict" = "MERGE" ]; then
     if gh pr merge "$n" -R "$repo" --merge --delete-branch >/dev/null 2>&1; then
       echo "{\"pr\":$n,\"action\":\"merged\",\"title\":\"$title\"}"; merged=$((merged+1))
+      # Auto-cleanup (issue #91): the merged branch's local worktree + local
+      # branch are now stale. worktree-cleanup.sh applies its OWN safety
+      # rails (worker-path naming, clean tree, fully merged into $base) and
+      # NEVER forces — a "skip" line from it is expected and fine, just
+      # tag it with the PR number and pass it through.
+      if [ -n "$head_branch" ]; then
+        while IFS= read -r cleanup_line; do
+          [ -z "$cleanup_line" ] && continue
+          printf '%s\n' "$cleanup_line" | node -e '
+            const pr = process.argv[1];
+            const obj = JSON.parse(require("fs").readFileSync(0,"utf8"));
+            obj.pr = Number(pr);
+            console.log(JSON.stringify(obj));
+          ' "$n"
+        done < <(bash "$script_dir/worktree-cleanup.sh" "$base" "$head_branch")
+      fi
     else
       echo "{\"pr\":$n,\"action\":\"merge-failed\",\"title\":\"$title\"}"
     fi
