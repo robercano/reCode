@@ -43,10 +43,22 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/cockpit-test.XXXXXX")"
 # cockpit-serve.sh in the background -- declared here so the SAME EXIT trap
 # cleans it up no matter where in the script a later assertion fails.
 server_pid=""
+# alias_npm_pid/alias_node_pid: same idea, for the `npm run cockpit` alias
+# smoke (section 5b) -- npm wraps the real node server behind npm -> sh ->
+# node, so cleanup needs to reach the actual node PID too, not just npm's.
+alias_npm_pid=""
+alias_node_pid=""
 cleanup() {
   if [ -n "$server_pid" ]; then
     kill "$server_pid" >/dev/null 2>&1 || true
     wait "$server_pid" 2>/dev/null || true
+  fi
+  if [ -n "$alias_node_pid" ]; then
+    kill "$alias_node_pid" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$alias_npm_pid" ]; then
+    kill "$alias_npm_pid" >/dev/null 2>&1 || true
+    wait "$alias_npm_pid" 2>/dev/null || true
   fi
   rm -rf "$work"
 }
@@ -429,6 +441,72 @@ server_pid=""
 tmp_after=0
 for f in $tmp_glob; do [ -e "$f" ] && tmp_after=$((tmp_after + 1)); done
 check "cockpit-serve.sh does not leak its temp HTML file after exit (3a-followup fix)" [ "$tmp_after" -eq "$tmp_before" ]
+
+# ---------------------------------------------------------------------------
+# 5b. `pnpm cockpit` alias smoke (issue #90 review fix): exercises the ROOT
+#     package.json's `scripts.cockpit` entry itself -- not cockpit-serve.sh
+#     directly -- via `npm run cockpit`. npm (not pnpm) is used here
+#     deliberately: npm ships with node, so it needs no extra toolchain
+#     (corepack/pnpm) in CI, and it reads the SAME scripts.cockpit entry pnpm
+#     would resolve, so this validates the alias wiring end-to-end. Same
+#     offline --fixtures seam and 127.0.0.1-only contract as section 5's
+#     cockpit-serve.sh smoke, on a fresh free port, against the SAME
+#     fixtures dir used above.
+# ---------------------------------------------------------------------------
+# shellcheck source=resolve-roots.sh
+. "$script_dir/resolve-roots.sh"
+
+check "root package.json has a cockpit script wired to cockpit-serve.sh" node -e '
+  const p = require(process.argv[1]);
+  const s = p.scripts && p.scripts.cockpit;
+  if (typeof s !== "string" || s.indexOf("cockpit-serve.sh") === -1) {
+    console.error("scripts.cockpit =", s);
+    process.exit(1);
+  }
+' "$root/package.json"
+
+alias_port="$(node -e '
+  const s = require("net").createServer();
+  s.listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });
+')"
+
+# --prefix (rather than a `cd`) so the script'"'"'s own relative path
+# (.claude/scripts/cockpit-serve.sh) resolves against the repo root
+# regardless of this test'"'"'s own cwd.
+alias_log="$work/npm-run-cockpit.log"
+: > "$alias_log"
+npm --prefix "$root" run cockpit -- "$alias_port" --fixtures "$work/fixtures" >"$alias_log" 2>&1 &
+alias_npm_pid=$!
+
+alias_ready=0
+for _ in $(seq 1 50); do
+  grep -q "cockpit serving" "$alias_log" 2>/dev/null && { alias_ready=1; break; }
+  kill -0 "$alias_npm_pid" 2>/dev/null || break # npm exited early -- stop polling
+  sleep 0.2
+done
+check "npm run cockpit (the scripts.cockpit alias) prints a startup line within the readiness timeout" [ "$alias_ready" -eq 1 ]
+
+alias_resp="$(curl -s -o - -w '%{http_code}' "http://127.0.0.1:$alias_port/" 2>/dev/null)"
+alias_code="${alias_resp: -3}"
+alias_body="${alias_resp%???}"
+check "npm run cockpit: GET / returns HTTP 200" [ "$alias_code" = "200" ]
+check "npm run cockpit: GET / serves the dashboard (issues section present)" bash -c 'printf "%s" "$1" | grep -qF '"'"'<section id="issues"'"'"'' _ "$alias_body"
+
+# npm wraps the real node server behind npm -> sh -> (bash exec) node, so
+# killing only npm's own PID can leave the node process (and the listening
+# port) orphaned. Find the actual PID bound to the port and kill it
+# directly (lsof, falling back to ss if lsof isn't installed), then npm's
+# own PID as a best-effort belt-and-braces cleanup.
+if command -v lsof >/dev/null 2>&1; then
+  alias_node_pid="$(lsof -ti tcp:"$alias_port" 2>/dev/null | head -1)"
+elif command -v ss >/dev/null 2>&1; then
+  alias_node_pid="$(ss -ltnp 2>/dev/null | grep ":$alias_port " | grep -oP 'pid=\K[0-9]+' | head -1)"
+fi
+[ -n "$alias_node_pid" ] && kill "$alias_node_pid" >/dev/null 2>&1 || true
+kill "$alias_npm_pid" >/dev/null 2>&1 || true
+wait "$alias_npm_pid" 2>/dev/null || true
+alias_node_pid=""
+alias_npm_pid=""
 
 # ---------------------------------------------------------------------------
 # 6. Worker inspector endpoint (GET /api/worker/<role>/<task>, issue #70):
