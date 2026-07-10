@@ -23,11 +23,11 @@ This template ships as a Claude Code plugin named `orchestrator` (plugin root `.
 ```json
 {
   "extraKnownMarketplaces": {
-    "ai-project-orchestrator": {
-      "source": { "source": "github", "repo": "robercano/ai-project-orchestrator" }
+    "recode": {
+      "source": { "source": "github", "repo": "robercano/reCode" }
     }
   },
-  "enabledPlugins": { "orchestrator@ai-project-orchestrator": true }
+  "enabledPlugins": { "orchestrator@recode": true }
 }
 ```
 This works because a thin `.claude-plugin/marketplace.json` at the repo **root** (where Claude Code's
@@ -38,12 +38,12 @@ files in this repo.
 **Local clone (alternative, e.g. if you want a pinned/offline copy).** Claude Code's `/plugin marketplace add`
 also accepts a plain filesystem path, using `.claude/` directly as the marketplace root:
 ```bash
-git clone https://github.com/robercano/ai-project-orchestrator.git ../ai-project-orchestrator
+git clone https://github.com/robercano/reCode.git ../reCode
 ```
 Then, in Claude Code, inside **your own project**:
 ```
-/plugin marketplace add ../ai-project-orchestrator/.claude
-/plugin install orchestrator@ai-project-orchestrator
+/plugin marketplace add ../reCode/.claude
+/plugin install orchestrator@recode
 ```
 (`/plugin` alone opens an interactive picker if you'd rather browse marketplaces/plugins than type the
 commands above.)

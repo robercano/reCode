@@ -1,7 +1,7 @@
 {
   "_README": "SELF-ADAPTER (issue #11). Lets this template dogfood itself WITHOUT polluting the shipped placeholder .claude/gates.json (which stays pristine for downstream adopters). The loop uses THIS file only when pointed at it via GATES_FILE=.claude/self/gates.json (see .claude/self/README.md). Gate commands are node/bash-only so they run with no extra tooling installed.",
 
-  "project": { "name": "ai-project-orchestrator", "language": "shell+markdown+js", "packageManager": "none" },
+  "project": { "name": "recode", "language": "shell+markdown+js", "packageManager": "none" },
 
   "modules": [
     { "name": "docs",     "path": "docs",     "description": "User-facing docs: GETTING_STARTED, USAGE, HARDENING, PROMPTS, ARCHITECTURE, TOKEN_BUDGET." },

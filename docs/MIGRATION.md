@@ -8,6 +8,24 @@ own git history.
 If you haven't installed the plugin yet, do that first — see [`GETTING_STARTED.md` → Step 1 — Install the
 `orchestrator` plugin](GETTING_STARTED.md#step-1--install-the-orchestrator-plugin).
 
+## Rebrand: `ai-project-orchestrator` → reCode (#86)
+The project was renamed **reCode**. What this means for an existing install:
+- **Repo renamed.** The GitHub repo moved from `robercano/ai-project-orchestrator` to `robercano/reCode`. Old
+  URLs redirect automatically, so a `"source": "github"` marketplace install (see `GETTING_STARTED.md`) keeps
+  working as-is — update the `repo:` value to `robercano/reCode` at your convenience.
+- **Marketplace name/id changed.** `ai-project-orchestrator` → `recode`. If you added the marketplace, update
+  your `extraKnownMarketplaces` alias key to `recode` and your `enabledPlugins` value to
+  `orchestrator@recode`. The alias is consumer-chosen, so this is a rename for consistency, not a hard break —
+  your existing install keeps functioning under the old alias until you change it.
+- **Command namespace unchanged.** The plugin's `name` field stays `orchestrator`, so every `/orchestrator:*`
+  command (`/orchestrator:setup`, `/orchestrator:sync`, `/orchestrator:pr-loop`, etc.) is unaffected — nothing
+  to re-learn.
+- **Sync markers unchanged.** The `@orchestrator-managed vN` version markers `/orchestrator:sync` uses are
+  unaffected, so running it after this rebrand re-stamps managed files with zero churn.
+- **Net action required: none.** The GitHub redirect and the unchanged plugin/command namespace mean an
+  existing downstream install keeps working untouched; renaming the marketplace alias to `recode` is optional
+  tidiness, not a requirement.
+
 ## What to delete
 Remove the copied harness that the plugin now carries — it's generic, not project-specific, and staying on a
 frozen copy means you never get fixes/improvements:
@@ -35,7 +53,7 @@ Before deleting each file, diff it against the plugin's shipped copy (`${CLAUDE_
 once the plugin is enabled, or the sibling clone's `.claude/<same-relpath>` if you're using the local-clone
 install method) rather than assuming they match. For anything that diverges:
 - **It's a generic improvement** (would help any consumer, not just this repo) — upstream it: open a PR
-  against `ai-project-orchestrator` with the fix, then delete your local copy once it's merged and the plugin
+  against `reCode` (formerly `ai-project-orchestrator`) with the fix, then delete your local copy once it's merged and the plugin
   picks it up. No consumer-side sync step is needed for scripts/agents/commands (see "Enabling in a consuming
   project" above) — once the fix lands upstream, everyone with the plugin enabled gets it immediately.
 - **It's genuinely project-specific** (tied to something only your repo has — a different bot account's token
@@ -57,7 +75,7 @@ install method:
 
 ## How to enable the plugin
 Follow [`GETTING_STARTED.md` → Step 1](GETTING_STARTED.md#step-1--install-the-orchestrator-plugin): add the
-`ai-project-orchestrator` marketplace (local clone today; the GitHub-source snippet is the target flow, with
+`recode` marketplace (local clone today; the GitHub-source snippet is the target flow, with
 a documented resolution gap — see that section) and enable the `orchestrator` plugin. Do this **before**
 deleting the copied files above, so you're never without a working `/agents` list or hooks mid-migration.
 

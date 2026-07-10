@@ -52,21 +52,21 @@ its own `.claude/settings.json`:
 ```json
 {
   "extraKnownMarketplaces": {
-    "ai-project-orchestrator": {
+    "recode": {
       "source": {
         "source": "github",
-        "repo": "robercano/ai-project-orchestrator"
+        "repo": "robercano/reCode"
       }
     }
   },
   "enabledPlugins": {
-    "orchestrator@ai-project-orchestrator": true
+    "orchestrator@recode": true
   }
 }
 ```
 
-`extraKnownMarketplaces` registers `robercano/ai-project-orchestrator` (a GitHub repo) as a
-marketplace named `ai-project-orchestrator`; `enabledPlugins` then enables the `orchestrator`
+`extraKnownMarketplaces` registers `robercano/reCode` (a GitHub repo) as a
+marketplace named `recode`; `enabledPlugins` then enables the `orchestrator`
 plugin from it, addressed as `<plugin-name>@<marketplace-name>`.
 
 **Resolved via a repo-root alias:** Claude Code's `"source": "github"` marketplace source resolves

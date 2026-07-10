@@ -1,8 +1,9 @@
-# Multi-Agent Orchestrator Template
+# reCode
 
-A **GitHub template** for running an orchestrated "army" of Claude Code agents on a codebase: a lead
-**orchestrator** scopes a task and delegates to worktree-isolated **implementers**, whose work is gated by
-adversarial **reviewers** — looping until tests, coverage, and review all pass.
+A **GitHub template** (formerly the ai-project-orchestrator template) for running an orchestrated "army" of
+Claude Code agents on a codebase: a lead **orchestrator** scopes a task and delegates to worktree-isolated
+**implementers**, whose work is gated by adversarial **reviewers** — looping until tests, coverage, and
+review all pass.
 
 The design is **two-tier**: a *generic harness* (portable across any stack) plus a thin *project adapter*
 (`.claude/gates.json` + `CLAUDE.md`) that you fill in per project. Onboarding a new repo is a ~20-line
