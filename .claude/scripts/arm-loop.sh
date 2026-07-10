@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @orchestrator-managed arm-loop v4
+# @orchestrator-managed arm-loop v5
 # arm-loop.sh — installs the cron-less PR-loop as systemd (user) units
 # (issue #102). Templated + re-stamped by `/orchestrator:setup`/`sync`; do
 # not hand-edit the copy scaffold.sh wrote into this repo if you want future
@@ -13,7 +13,7 @@
 # then recreate).
 #
 # Usage:
-#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>]
+#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>] [--spawn <mode>]
 #
 #   --gates-file <path>       passed to pr-loop.service as GATES_FILE (e.g.
 #                              .claude/self/gates.json for the self-hosted
@@ -27,12 +27,16 @@
 #                              session (shown in claude.ai/code and the mobile
 #                              Code tab). Default: <repo-slug>-planner. Extra
 #                              on-demand sessions still get <repo-slug>-* names.
+#   --spawn <mode>             remote-control spawn mode: same-dir (default) or
+#                              worktree. Passed explicitly so the server never
+#                              blocks on its interactive first-run question.
 set -euo pipefail
 
 gates_file=""
 permission_mode=""
 capacity="8"
 rc_name=""
+spawn_mode="same-dir"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --gates-file) gates_file="${2:?--gates-file needs a value}"; shift 2 ;;
@@ -42,14 +46,21 @@ while [ "$#" -gt 0 ]; do
     --capacity) capacity="${2:?--capacity needs a value}"; shift 2 ;;
     --rc-name) rc_name="${2:?--rc-name needs a value}"; shift 2 ;;
     --rc-name=*) rc_name="${1#--rc-name=}"; shift ;;
+    --spawn) spawn_mode="${2:?--spawn needs a value}"; shift 2 ;;
+    --spawn=*) spawn_mode="${1#--spawn=}"; shift ;;
     --capacity=*) capacity="${1#--capacity=}"; shift ;;
     -h|--help)
-      sed -n '2,29p' "$0"
+      sed -n '2,32p' "$0"
       exit 0
       ;;
     *) echo "arm-loop.sh: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+case "$spawn_mode" in
+  same-dir|worktree) ;;
+  *) echo "arm-loop.sh: --spawn must be 'same-dir' or 'worktree' (got '$spawn_mode')" >&2; exit 2 ;;
+esac
 
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "arm-loop.sh: 'systemctl' not found — this script only supports systemd (user) on Linux/WSL2." >&2
@@ -127,6 +138,7 @@ sed -e "s#__WORKDIR__#$repo_root#g" \
     -e "s#__CLAUDE_BIN__#$claude_bin#g" \
     -e "s#__RC_NAME__#$rc_name#g" \
     -e "s#__CLAUDE_DIR__#$claude_dir#g" \
+    -e "s#__SPAWN_MODE__#$spawn_mode#g" \
     "$claude_rc_src" > "$claude_rc_dst"
 
 echo "arm-loop.sh: wrote $pr_loop_dst"

@@ -1,4 +1,4 @@
-# @orchestrator-managed claude-rc-service v4
+# @orchestrator-managed claude-rc-service v5
 # systemd (user) unit TEMPLATE (issue #102). Installed into
 # ~/.config/systemd/user/claude-rc-<repo-slug>.service by
 # `.claude/scripts/arm-loop.sh`, which substitutes the __PLACEHOLDER__ tokens
@@ -36,7 +36,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=__WORKDIR__
 ExecStartPre=-/usr/bin/tmux kill-session -t rc-__REPO_SLUG__
-ExecStart=/usr/bin/tmux new -d -s rc-__REPO_SLUG__ -c __WORKDIR__ /bin/bash -c 'export PATH=__CLAUDE_DIR__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec __CLAUDE_BIN__ remote-control --name __RC_NAME__ --remote-control-session-name-prefix __REPO_SLUG__ --capacity __CAPACITY__ --permission-mode __PERMISSION_MODE__'
+ExecStart=/usr/bin/tmux new -d -s rc-__REPO_SLUG__ -c __WORKDIR__ /bin/bash -c 'export PATH=__CLAUDE_DIR__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec __CLAUDE_BIN__ remote-control --spawn __SPAWN_MODE__ --name __RC_NAME__ --remote-control-session-name-prefix __REPO_SLUG__ --capacity __CAPACITY__ --permission-mode __PERMISSION_MODE__'
 ExecStop=-/usr/bin/tmux kill-session -t rc-__REPO_SLUG__
 
 [Install]
