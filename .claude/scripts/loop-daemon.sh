@@ -199,6 +199,15 @@ run_once() {
 
 main() {
   mkdir -p "$state_dir"
+  # Resolve nvm-provisioned binaries ONCE, up front, for the whole daemon —
+  # not only inside run_driver. A systemd (user) service PATH has `gh` but
+  # neither `node` nor `claude`, and the tick's step scripts need node
+  # (merge-ready.sh, loop-census.sh, write_tick_record): without this, ticks
+  # under the service silently skip merges and tick records while polling
+  # still works — a deadlock, since the only path that DID source nvm
+  # (run_driver) is unreachable while an unmergeable PR keeps advance away.
+  ensure_claude_on_path \
+    || log "warning: 'claude' not resolvable at startup (nor via nvm) — node-dependent tick steps and driver spawns will fail until PATH provides it"
   log "starting (LOOP_MODEL=${LOOP_MODEL:-sonnet} GATES_FILE=${GATES_FILE:-<default>} LOOP_DRIVER_TIMEOUT=${LOOP_DRIVER_TIMEOUT:-90m})"
   local iterations=0
   local max_iterations="${LOOP_DAEMON_MAX_ITERATIONS:-0}"
