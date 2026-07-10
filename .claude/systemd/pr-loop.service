@@ -1,0 +1,29 @@
+# @orchestrator-managed pr-loop-service v1
+# systemd (user) unit TEMPLATE (issue #102). Installed into
+# ~/.config/systemd/user/pr-loop-<repo-slug>.service by
+# `.claude/scripts/arm-loop.sh`, which substitutes the __PLACEHOLDER__ tokens
+# below for this checkout (WorkingDirectory, repo slug, optional GATES_FILE
+# env line) and runs `systemctl --user enable --now`.
+#
+# DO NOT hand-edit the INSTALLED copy under ~/.config/systemd/user/ — it will
+# be silently overwritten the next time arm-loop.sh runs. Edit THIS checked-in
+# template instead (then re-run arm-loop.sh), or fork it under a different
+# name if you want a permanently custom copy. Re-run `/orchestrator:sync` to
+# pick up plugin updates to this template before re-arming.
+[Unit]
+Description=Cron-less autonomous PR loop daemon (__REPO_SLUG__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+__GATES_ENV__
+ExecStart=/usr/bin/env bash __WORKDIR__/.claude/scripts/loop-daemon.sh
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
