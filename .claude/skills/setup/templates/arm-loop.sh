@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @orchestrator-managed arm-loop v2
+# @orchestrator-managed arm-loop v3
 # arm-loop.sh — installs the cron-less PR-loop as systemd (user) units
 # (issue #102). Templated + re-stamped by `/orchestrator:setup`/`sync`; do
 # not hand-edit the copy scaffold.sh wrote into this repo if you want future
@@ -13,7 +13,7 @@
 # then recreate).
 #
 # Usage:
-#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N]
+#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>]
 #
 #   --gates-file <path>       passed to pr-loop.service as GATES_FILE (e.g.
 #                              .claude/self/gates.json for the self-hosted
@@ -23,11 +23,16 @@
 #                              .claude/settings.local.json if present, else
 #                              "default".
 #   --capacity N               `claude remote-control --capacity`. Default 8.
+#   --rc-name <name>           display name of the PRE-CREATED remote-control
+#                              session (shown in claude.ai/code and the mobile
+#                              Code tab). Default: <repo-slug>-planner. Extra
+#                              on-demand sessions still get <repo-slug>-* names.
 set -euo pipefail
 
 gates_file=""
 permission_mode=""
 capacity="8"
+rc_name=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --gates-file) gates_file="${2:?--gates-file needs a value}"; shift 2 ;;
@@ -35,9 +40,11 @@ while [ "$#" -gt 0 ]; do
     --permission-mode) permission_mode="${2:?--permission-mode needs a value}"; shift 2 ;;
     --permission-mode=*) permission_mode="${1#--permission-mode=}"; shift ;;
     --capacity) capacity="${2:?--capacity needs a value}"; shift 2 ;;
+    --rc-name) rc_name="${2:?--rc-name needs a value}"; shift 2 ;;
+    --rc-name=*) rc_name="${1#--rc-name=}"; shift ;;
     --capacity=*) capacity="${1#--capacity=}"; shift ;;
     -h|--help)
-      sed -n '2,25p' "$0"
+      sed -n '2,29p' "$0"
       exit 0
       ;;
     *) echo "arm-loop.sh: unknown argument '$1'" >&2; exit 2 ;;
@@ -90,6 +97,8 @@ if [ -z "$claude_bin" ]; then
   exit 1
 fi
 
+rc_name="${rc_name:-$repo_slug-planner}"
+
 units_dir="$HOME/.config/systemd/user"
 mkdir -p "$units_dir"
 
@@ -115,6 +124,7 @@ sed -e "s#__WORKDIR__#$repo_root#g" \
     -e "s#__PERMISSION_MODE__#$permission_mode#g" \
     -e "s#__CAPACITY__#$capacity#g" \
     -e "s#__CLAUDE_BIN__#$claude_bin#g" \
+    -e "s#__RC_NAME__#$rc_name#g" \
     "$claude_rc_src" > "$claude_rc_dst"
 
 echo "arm-loop.sh: wrote $pr_loop_dst"
