@@ -5,5 +5,9 @@
   "description": "Orchestrated multi-agent Claude Code harness — root package.json is a thin alias for the cockpit dashboard (no dependencies, node built-ins only).",
   "scripts": {
     "cockpit": "bash .claude/scripts/cockpit-serve.sh"
-  }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.34.4"
 }
