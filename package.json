@@ -1,0 +1,9 @@
+{
+  "name": "recode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orchestrated multi-agent Claude Code harness — root package.json is a thin alias for the cockpit dashboard (no dependencies, node built-ins only).",
+  "scripts": {
+    "cockpit": "bash .claude/scripts/cockpit-serve.sh"
+  }
+}

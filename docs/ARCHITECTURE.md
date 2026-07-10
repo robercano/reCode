@@ -63,6 +63,10 @@ worker worktrees. Run it, then open `.claude/state/cockpit.html`. No server, no 
 script header for usage (`--fixtures`, `GATES_FILE` override) and `docs/COCKPIT_EVALUATION.md` for the
 design rationale.
 
+For a live, auto-refreshing view, `.claude/scripts/cockpit-serve.sh` wraps the same renderer behind a small
+HTTP server (127.0.0.1 only, node built-ins only). Run it via `pnpm cockpit` (default port 8090), or
+`pnpm cockpit -- <port>` to override the port.
+
 ### Concurrent config-write safety
 This template fans out to **parallel worktree-isolated workers**, and upstream
 [anthropics/claude-code#29217](https://github.com/anthropics/claude-code/issues/29217) reported that
