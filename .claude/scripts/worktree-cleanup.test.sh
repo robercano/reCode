@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # worktree-cleanup.test.sh — offline smoke test for worktree-cleanup.sh
 # (issue #91). Builds a THROWAWAY temp git repo with real `git worktree add`
-# worktrees (no network, no gh, no real PR merge) and exercises the real
-# worktree-cleanup.sh against it, asserting:
+# worktrees (no real network, no gh, no real PR merge — scenario 6 uses a
+# local bare repo as a stand-in "origin", never a real remote) and exercises
+# the real worktree-cleanup.sh against it, asserting:
 #   1. merged + clean + matching-name worktree -> removed + branch deleted
 #   2. dirty worktree -> preserved (never touched)
 #   3. unmerged branch -> preserved (never touched)
 #   4. non-matching path (main worktree, and an arbitrary non-worker path)
 #      -> never touched
+#   5. no worktree at all -> skip, no crash
+#   6. PRODUCTION ordering (issue #91 follow-up): merge landed on the
+#      authoritative remote but local base is still stale -> removed + branch
+#      deleted anyway (via origin ancestry, never a forced delete)
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/worktree-cleanup.test.sh
@@ -157,6 +162,53 @@ check "scenario 4b: branch still present (untouched)" branch_present "feat/issue
 git -C "$repo" branch -q feat/issue-5-x-no-worktree
 out5="$(run_cleanup main feat/issue-5-x-no-worktree)"
 check "scenario 5: emits a skip with reason no-worktree" bash -c 'printf "%s\n" "$1" | grep -qF "\"reason\":\"no-worktree\""' _ "$out5"
+
+# ---------------------------------------------------------------------------
+# Scenario 6 (issue #91 follow-up, PRODUCTION ordering): merge-ready.sh calls
+# worktree-cleanup.sh IMMEDIATELY after `gh pr merge` succeeds, which merges
+# on the REMOTE only — local $base isn't fast-forwarded until a block that
+# runs AFTER cleanup. Reproduce that ordering hermetically: a real bare repo
+# stands in for "origin"; the merge is performed and pushed from a SEPARATE
+# clone, so $repo's own local `main` ref is never touched by it. Cleanup must
+# still detect the merge (via origin/$base ancestry) and remove the worktree
+# + delete the branch — without ever advancing local `main` itself, and
+# without ever needing `-D`/`--force`.
+# ---------------------------------------------------------------------------
+origin_bare="$work/origin.git"
+git init -q --bare -b main "$origin_bare"
+git -C "$repo" remote add origin "$origin_bare"
+git -C "$repo" push -q origin main:main
+
+git -C "$repo" checkout -q -b feat/issue-6-x
+echo "six" > "$repo/file6.txt"
+git -C "$repo" add file6.txt
+git -C "$repo" commit -q -m "feat6"
+git -C "$repo" checkout -q main
+git -C "$repo" push -q origin feat/issue-6-x:feat/issue-6-x
+
+# Perform + push the merge from a THIRD, independent clone (mimics GitHub
+# doing the merge server-side) so local `main` in $repo is never advanced.
+remote_work="$work/remote-work"
+git clone -q "$origin_bare" "$remote_work"
+git -C "$remote_work" config user.email "test@example.com"
+git -C "$remote_work" config user.name "Test"
+git -C "$remote_work" checkout -q main
+git -C "$remote_work" merge -q --no-ff origin/feat/issue-6-x -m "merge feat6"
+git -C "$remote_work" push -q origin main:main
+
+local_main_before="$(git -C "$repo" rev-parse main)"
+
+wt6="$repo/.claude/worktrees/agent-test6"
+git -C "$repo" worktree add -q "$wt6" feat/issue-6-x
+
+out6="$(run_cleanup main feat/issue-6-x)"
+check "scenario 6 (sanity): local main is genuinely stale before cleanup runs" bash -c '[ "$1" = "$(git -C "$2" rev-parse main)" ]' _ "$local_main_before" "$repo"
+check "scenario 6: emits a JSON line reporting the removal despite stale local main" bash -c 'printf "%s\n" "$1" | grep -q "worktree_removed"' _ "$out6"
+check "scenario 6: branch_deleted reports the branch name" bash -c 'printf "%s\n" "$1" | grep -qF "\"branch_deleted\":\"feat/issue-6-x\""' _ "$out6"
+check "scenario 6: worktree is actually gone from git worktree list" bash -c '! git -C "$1" worktree list --porcelain | grep -qF "worktree $2"' _ "$repo" "$wt6"
+check "scenario 6: worktree directory removed from disk" bash -c '[ ! -d "$1" ]' _ "$wt6"
+check "scenario 6: local branch actually deleted" bash -c '! git -C "$1" branch --list feat/issue-6-x | grep -q .' _ "$repo"
+check "scenario 6: local main ref itself was never advanced by cleanup" bash -c '[ "$1" = "$(git -C "$2" rev-parse main)" ]' _ "$local_main_before" "$repo"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
