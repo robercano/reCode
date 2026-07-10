@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @orchestrator-managed arm-loop v1
+# @orchestrator-managed arm-loop v2
 # arm-loop.sh — installs the cron-less PR-loop as systemd (user) units
 # (issue #102). Templated + re-stamped by `/orchestrator:setup`/`sync`; do
 # not hand-edit the copy scaffold.sh wrote into this repo if you want future
@@ -78,6 +78,18 @@ if [ -n "$gates_file" ]; then
   gates_env="Environment=GATES_FILE=$gates_file"
 fi
 
+# Absolute claude path, resolved HERE — this script runs in a real terminal
+# with the user's full environment, while the installed unit runs under
+# systemd's minimal PATH (gh but no nvm-provisioned node/claude). A bare
+# `claude` in ExecStart dies instantly inside the tmux pane and the oneshot
+# unit still reports success (observed 2026-07-10, second casualty of the
+# issue #107 env finding; the loop daemon was the first).
+claude_bin="$(command -v claude || true)"
+if [ -z "$claude_bin" ]; then
+  echo "arm-loop.sh: 'claude' not found on PATH — run this from a real terminal where \`claude\` works." >&2
+  exit 1
+fi
+
 units_dir="$HOME/.config/systemd/user"
 mkdir -p "$units_dir"
 
@@ -102,14 +114,23 @@ sed -e "s#__WORKDIR__#$repo_root#g" \
     -e "s#__REPO_SLUG__#$repo_slug#g" \
     -e "s#__PERMISSION_MODE__#$permission_mode#g" \
     -e "s#__CAPACITY__#$capacity#g" \
+    -e "s#__CLAUDE_BIN__#$claude_bin#g" \
     "$claude_rc_src" > "$claude_rc_dst"
 
 echo "arm-loop.sh: wrote $pr_loop_dst"
 echo "arm-loop.sh: wrote $claude_rc_dst"
 
 systemctl --user daemon-reload
+# pr-loop: enable --now on purpose (NOT restart) — never kill a daemon that
+# may have a driver in flight; a re-arm only rewrites its unit file, and the
+# owner restarts it explicitly when they want the new unit picked up.
 systemctl --user enable --now "pr-loop-$repo_slug.service"
-systemctl --user enable --now "claude-rc-$repo_slug.service"
+# claude-rc: enable + restart on purpose — Type=oneshot + RemainAfterExit
+# stays "active" forever, so `enable --now` would never re-run ExecStart and
+# a re-arm would silently keep serving the OLD unit. Restart is safe here
+# (independent of the loop daemon) and relaunches the tmux with the fresh unit.
+systemctl --user enable "claude-rc-$repo_slug.service"
+systemctl --user restart "claude-rc-$repo_slug.service"
 
 loginctl enable-linger "$USER" || echo "arm-loop.sh: warning — 'loginctl enable-linger $USER' failed; user units will only run while a login session is open." >&2
 
