@@ -1,3 +1,8 @@
+// @orchestrator-managed feature-fanout v2
+// This file is installed and re-stamped by `/orchestrator:setup` (scaffold.sh). It is NOT
+// user-owned: re-running setup will overwrite it whenever the marker version above is older
+// than the version the installed plugin ships. Do not hand-edit if you want future setup runs
+// to keep it in sync — fork it under a different name instead.
 export const meta = {
   name: 'feature-fanout',
   description: 'Scope a task into independent sub-tasks, implement each in an isolated worktree, adversarially review every change through multiple lenses, and loop until all gates pass.',
