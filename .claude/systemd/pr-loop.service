@@ -3,7 +3,7 @@
 # ~/.config/systemd/user/pr-loop-<repo-slug>.service by
 # `.claude/scripts/arm-loop.sh`, which substitutes the __PLACEHOLDER__ tokens
 # below for this checkout (WorkingDirectory, repo slug, optional GATES_FILE
-# env line) and runs `systemctl --user enable --now`.
+# env line, baked runtime PATH) and runs `systemctl --user enable --now`.
 #
 # DO NOT hand-edit the INSTALLED copy under ~/.config/systemd/user/ — it will
 # be silently overwritten the next time arm-loop.sh runs. Edit THIS checked-in
@@ -19,6 +19,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=__WORKDIR__
 __GATES_ENV__
+Environment=PATH=__PATH__
 ExecStart=/usr/bin/env bash __WORKDIR__/.claude/scripts/loop-daemon.sh
 Restart=always
 RestartSec=15

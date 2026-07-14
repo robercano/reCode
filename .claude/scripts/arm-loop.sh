@@ -111,6 +111,26 @@ fi
 rc_name="${rc_name:-$repo_slug-planner}"
 claude_dir="$(dirname "$claude_bin")"
 
+# Same rationale as claude_bin above, plus issue #107: the installed
+# pr-loop.service unit (the loop daemon itself, NOT claude-rc) previously got
+# NO baked PATH at all and ran under systemd's minimal PATH — which has `gh`
+# but neither `node` nor `claude`, silently stalling node-dependent tick steps
+# (loop-census.sh, merge-ready.sh, write_tick_record) until the daemon's own
+# runtime ensure_claude_on_path fallback (loop-daemon.sh) kicked in. Bake the
+# resolved node/claude dirs in here too so the unit starts with a working PATH
+# from the first tick, with the nvm-sourcing fallback staying as a safety net
+# for installs that predate this change or use fnm/volta/system node.
+node_bin="$(command -v node || true)"
+if [ -z "$node_bin" ]; then
+  echo "arm-loop.sh: 'node' not found on PATH — run this from a real terminal where \`node\` works." >&2
+  exit 1
+fi
+node_dir="$(dirname "$node_bin")"
+
+# Compose the baked PATH: node_dir, claude_dir, then the standard system dirs
+# — deduped, since under nvm node_dir and claude_dir are frequently identical.
+baked_path="$(printf '%s\n' "$node_dir" "$claude_dir" "/usr/local/sbin" "/usr/local/bin" "/usr/sbin" "/usr/bin" "/sbin" "/bin" | awk '!seen[$0]++' | paste -sd: -)"
+
 units_dir="$HOME/.config/systemd/user"
 mkdir -p "$units_dir"
 
@@ -129,6 +149,7 @@ claude_rc_dst="$units_dir/claude-rc-$repo_slug.service"
 sed -e "s#__WORKDIR__#$repo_root#g" \
     -e "s#__REPO_SLUG__#$repo_slug#g" \
     -e "s#__GATES_ENV__#$gates_env#g" \
+    -e "s#__PATH__#$baked_path#g" \
     "$pr_loop_src" > "$pr_loop_dst"
 
 sed -e "s#__WORKDIR__#$repo_root#g" \
