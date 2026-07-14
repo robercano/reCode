@@ -706,6 +706,121 @@ server_pid2=""
 IG worktree remove --force "$insp_root/.claude/worktrees/issue-70a" >/dev/null 2>&1 || true
 IG worktree remove --force "$insp_wt_70b" >/dev/null 2>&1 || true
 
+# ---------------------------------------------------------------------------
+# 7. Live-progress task GROUPING (issue #92): workers grouped by normalized
+#    task id (taskGroupKey), newest-issue-first ordering, an issue-linked
+#    group header (taskIssueLink), and a PR badge on the group header
+#    (findPRForIssue + prBadge). Uses an ISOLATED fixtures dir (does not
+#    reuse/mutate the shared "$work/fixtures" from section 2, so none of that
+#    section's exact-row-count/order assertions are perturbed by these extra
+#    task ids).
+#
+#    Fixture shape: four distinct raw task ids across four groups —
+#      "91"         -> group #91 (issue #91 is a KNOWN fixture issue, so its
+#                       header must render a real <a href> link; also has an
+#                       OPEN PR via headRefName feat/issue-91-groups)
+#      "88"         -> group #88 (unknown issue -> plain "#88", no link)
+#      "issue-88-x" -> SAME group #88 as above (taskGroupKey normalization:
+#                       first \d+ run == 88) -- a second worker, different
+#                       raw task id, must nest under the SAME single header
+#      "70"         -> group #70 (unknown issue -> plain "#70"; has a MERGED
+#                       PR via headRefName feat/issue-70-merged-thing, to
+#                       cover the merged-state pill since prBadge's state
+#                       check is driven entirely by the fixture's pr.state)
+#      "50"         -> group #50 (lowest number, no issue/PR match)
+#    Expected group order (numeric groups, descending by issue number):
+#      91, 88, 70, 50.
+# ---------------------------------------------------------------------------
+mkdir -p "$work/fixtures-groups"
+cat > "$work/fixtures-groups/issues.json" <<'EOF'
+[
+  {"number":91,"title":"Live progress task groups","url":"https://example.com/91","labels":[],"body":""}
+]
+EOF
+cat > "$work/fixtures-groups/prs.json" <<'EOF'
+[
+  {"number":300,"title":"PR for 91","url":"https://example.com/pr/300","headRefName":"feat/issue-91-groups","state":"OPEN"},
+  {"number":301,"title":"PR for 70 (merged)","url":"https://example.com/pr/301","headRefName":"feat/issue-70-merged-thing","state":"MERGED"}
+]
+EOF
+cat > "$work/fixtures-groups/events.jsonl" <<'EOF'
+{"ts":"2026-01-01T00:00:00Z","role":"implementer","model":"sonnet","task":"91","phase":"implementing","lens":"","detail":""}
+{"ts":"2026-01-01T00:01:00Z","role":"implementer","model":"sonnet","task":"88","phase":"implementing","lens":"","detail":""}
+{"ts":"2026-01-01T00:02:00Z","role":"reviewer","model":"opus","task":"issue-88-x","phase":"reviewing","lens":"tests","detail":""}
+{"ts":"2026-01-01T00:03:00Z","role":"implementer","model":"sonnet","task":"50","phase":"implementing","lens":"","detail":""}
+{"ts":"2026-01-01T00:04:00Z","role":"implementer","model":"sonnet","task":"70","phase":"implementing","lens":"","detail":""}
+EOF
+
+html_groups="$work/cockpit-groups.html"
+bash "$cockpit" --fixtures "$work/fixtures-groups" "$html_groups" >/dev/null 2>"$work/stderr-groups.log"
+rc_groups=$?
+check "task-grouping fixture run exits 0" [ "$rc_groups" -eq 0 ]
+
+# (1) Multi-group + ordering: exactly 4 numeric groups, newest issue first.
+check "live progress renders one task-group header per distinct group, newest issue number first (91, 88, 70, 50)" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="live">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("live section not found");
+  const section = m[0];
+  const headers = [...section.matchAll(/<tr class="task-group"><td colspan="7"><strong>Task ([\s\S]*?)<\/strong><\/td><\/tr>/g)].map((r) => r[1]);
+  if (headers.length !== 4) throw new Error("expected 4 task-group headers, got " + headers.length + ": " + JSON.stringify(headers));
+  const nums = headers.map((h) => {
+    const mm = h.match(/#(\d+)/);
+    if (!mm) throw new Error("could not find an issue number in header: " + h);
+    return parseInt(mm[1], 10);
+  });
+  const want = [91, 88, 70, 50];
+  if (JSON.stringify(nums) !== JSON.stringify(want)) {
+    throw new Error("expected group order " + JSON.stringify(want) + " (newest issue first), got " + JSON.stringify(nums));
+  }
+' "$html_groups"
+
+# (2) taskIssueLink: task #91 is a known fixture issue -> its group header
+# must render a real <a href="..."> link, not plain "#91" text.
+check "task-group header links to the known fixture issue via taskIssueLink" grep -qF '<a href="https://example.com/91">#91</a>' "$html_groups"
+
+# (3) findPRForIssue + prBadge: task #91's OPEN PR (matched via headRefName
+# feat/issue-91-groups) renders an open-state pill on the group header; task
+# #70's MERGED PR (feat/issue-70-merged-thing) renders a merged-state pill --
+# both driven purely through the fixture's pr.state, since findPRForIssue
+# only fetches --state open PRs live but prBadge's state check is generic.
+check "task-group header renders an OPEN PR badge (findPRForIssue + prBadge)" grep -qF '&middot; PR <a href="https://example.com/pr/300">#300</a> <span class="badge warn">open</span>' "$html_groups"
+check "task-group header renders a MERGED PR badge (findPRForIssue + prBadge)" grep -qF '&middot; PR <a href="https://example.com/pr/301">#301</a> <span class="badge good">merged</span>' "$html_groups"
+
+# (4) taskGroupKey normalization: raw task ids "88" and "issue-88-x" both
+# normalize to group key "88" -> exactly ONE "Task #88" header (already
+# proven by the 4-header count above), with BOTH workers nested under that
+# single header (not scattered into their own groups).
+check "taskGroupKey normalizes \"88\" and \"issue-88-x\" into the SAME single group, both workers nested under it" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="live">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("live section not found");
+  const section = m[0];
+  const idx88 = section.indexOf("Task #88");
+  if (idx88 === -1) throw new Error("could not find the #88 group header");
+  const nextGroupIdx = section.indexOf(String.raw`<tr class="task-group">`, idx88 + 1);
+  const segment = nextGroupIdx === -1 ? section.slice(idx88) : section.slice(idx88, nextGroupIdx);
+  if (!segment.includes("<td>implementer</td><td>88</td>")) throw new Error("implementer/88 row not nested under the #88 group header");
+  if (!segment.includes("<td>reviewer</td><td>issue-88-x</td>")) throw new Error("reviewer/issue-88-x row not nested under the SAME #88 group header (normalization failed)");
+' "$html_groups"
+
+# (5) Self-contained + client-side sort hooks: the live-progress <th>s carry
+# data-sort-key attributes, and the whole document stays self-contained HTML
+# (no external <script src=...> or <link href=...> — see the file header's
+# "self-contained HTML" contract).
+check "live-progress table headers carry data-sort-key attributes for the client-side sort script" bash -c '
+  grep -qF "<th data-sort-key=\"role\">Role</th>" "$1" &&
+  grep -qF "<th data-sort-key=\"task\">Task</th>" "$1" &&
+  grep -qF "<th data-sort-key=\"model\">Model</th>" "$1" &&
+  grep -qF "<th data-sort-key=\"phase\">Phase</th>" "$1" &&
+  grep -qF "<th data-sort-key=\"lens\">Lens</th>" "$1" &&
+  grep -qF "<th data-sort-key=\"updated\">Updated</th>" "$1"
+' _ "$html_groups"
+check "output HTML has no external <script src=...> (self-contained-HTML constraint)" bash -c '! grep -q "<script src=" "$1"' _ "$html_groups"
+check "output HTML has no external <link href=...> (self-contained-HTML constraint)" bash -c '! grep -q "<link href=" "$1"' _ "$html_groups"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "cockpit.test.sh: PASS ($ok checks)"

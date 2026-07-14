@@ -351,7 +351,7 @@ function moduleLabelsOf(issue) {
   return (issue.labels || []).map((l) => l.name).filter((n) => typeof n === "string" && n.startsWith("module:"));
 }
 
-// ---- Live worker progress section (issue #52) -----------------------------
+// ---- Live worker progress section (issue #52, grouped by task in #92) -----
 // Derive the CURRENT state per worker keyed by (role, task): keep the LATEST
 // event (by file order, i.e. append order) per key. No event log, or an
 // empty one, renders a muted "no active workers" placeholder — never a
@@ -366,6 +366,63 @@ function phaseBadge(phase) {
     default: return { cls: "muted" };
   }
 }
+
+// Normalize a task id into a group key (issue #92): "88", "issue-88", and
+// "issue-70-worker-inspector" must all collapse to the SAME group, so pull
+// out the first run of digits found anywhere in the id (covers a bare
+// number, an "issue-N" prefix, or an "N<suffix>" variant like "52b" from a
+// second lens/attempt on the same task). Task ids with no digits at all
+// group under their own raw id, per the instructions' degrade path.
+function taskGroupKey(taskRaw) {
+  const s = taskRaw == null ? "" : String(taskRaw);
+  const m = s.match(/\d+/);
+  if (m) {
+    const num = parseInt(m[0], 10);
+    return { key: String(num), num };
+  }
+  return { key: s || "(unknown)", num: null };
+}
+
+function issueByNumber(n) {
+  return issues.find((i) => i.number === n) || null;
+}
+
+// Link a task group's header to the real GitHub issue when we have it (the
+// issues array is the same open-issues fetch renderIssues() uses); degrade
+// to plain "#N" text (no href) when the issue isn't in that list, mirroring
+// refLink()'s own degrade contract above.
+function taskIssueLink(n) {
+  const issue = issueByNumber(n);
+  return issue ? `<a href="${esc(issue.url || "#")}">#${n}</a>` : `#${n}`;
+}
+
+// Associate a PR with an issue number by the repo's branch-name convention
+// (feat/issue-<N>-..., fix/issue-<N>-..., or a bare issue-<N>-... branch),
+// falling back to a "#N" mention in the PR title. Reuses the SAME `prs`
+// array renderPRs() already fetched (issue #92 asks us not to add a second
+// gh call) — that fetch is `--state open` only, so every match found here IS
+// currently open; `pr.state` is checked defensively in prBadge() below in
+// case a future schema change ever adds it (e.g. a merged-PR fetch), without
+// requiring one now.
+function findPRForIssue(n) {
+  if (n == null || !Number.isFinite(n)) return null;
+  for (const pr of prs) {
+    const branch = String(pr.headRefName || "");
+    const m = branch.match(/issue-(\d+)(?:[-_]|$)/i);
+    if (m && parseInt(m[1], 10) === n) return pr;
+  }
+  const titleRe = new RegExp("#" + n + "\\b");
+  for (const pr of prs) {
+    if (titleRe.test(String(pr.title || ""))) return pr;
+  }
+  return null;
+}
+function prBadge(pr) {
+  const state = pr.state === "MERGED" ? "merged" : "open";
+  const cls = state === "merged" ? "good" : "warn";
+  return `<a href="${esc(pr.url || "#")}">#${pr.number}</a> <span class="badge ${cls}">${esc(state)}</span>`;
+}
+
 function renderLiveProgress() {
   const latest = new Map(); // "role\u0000task" -> event
   for (const ev of events) {
@@ -379,16 +436,65 @@ function renderLiveProgress() {
   if (workers.length === 0) {
     html += `<p class="muted">no active workers</p>`;
   } else {
-    html += `<table class="routing"><thead><tr><th>Role</th><th>Task</th><th>Model</th><th>Phase</th><th>Lens</th><th>Updated</th><th hidden></th></tr></thead><tbody>`;
+    // Group workers by normalized task key (issue #92) so every worker
+    // (orchestrator/implementer/reviewer x lens) working the same task
+    // renders together under one linked header, instead of one flat row per
+    // (role, task) pair.
+    const groups = new Map(); // groupKey -> { num, workers: [] }
     for (const w of workers) {
-      const badge = phaseBadge(w.phase);
-      html += `<tr><td>${esc(w.role)}</td><td>${esc(w.task)}</td><td><code>${esc(w.model || "(none)")}</code></td>`;
-      html += `<td><span class="badge ${badge.cls}">${esc(w.phase || "(unknown)")}</span></td>`;
-      html += `<td>${esc(w.lens || "")}</td><td>${esc(w.ts)}</td>`;
-      // Hidden trailing cell: stable data-role/data-task hook for a FUTURE
-      // worker inspector (issue 3b). Appended AFTER every column the
-      // existing tests exact-match, so it never disturbs them.
-      html += `<td class="wrow-meta" data-role="${esc(w.role)}" data-task="${esc(w.task)}" hidden></td></tr>`;
+      const g = taskGroupKey(w.task);
+      if (!groups.has(g.key)) groups.set(g.key, { num: g.num, workers: [] });
+      groups.get(g.key).workers.push(w);
+    }
+    // "Newest task first": numeric groups sorted by issue number descending
+    // (higher issue number == more recently filed task); unparseable groups
+    // (no leading number) sort after all numeric ones, alphabetically.
+    const groupKeys = [...groups.keys()].sort((a, b) => {
+      const ga = groups.get(a), gb = groups.get(b);
+      if (ga.num != null && gb.num != null) return gb.num - ga.num;
+      if (ga.num != null) return -1;
+      if (gb.num != null) return 1;
+      return a.localeCompare(b);
+    });
+
+    // Column headers carry data-sort-key hooks for the client-side sort
+    // script appended near the end of <body>. The hidden trailing <th>
+    // mirrors the hidden per-row wrow-meta cell below and is left exactly as
+    // it was (no sort hook — it has no visible text to sort by).
+    html += `<table class="routing"><thead><tr>`;
+    html += `<th data-sort-key="role">Role</th><th data-sort-key="task">Task</th>`;
+    html += `<th data-sort-key="model">Model</th><th data-sort-key="phase">Phase</th>`;
+    html += `<th data-sort-key="lens">Lens</th><th data-sort-key="updated">Updated</th><th hidden></th>`;
+    html += `</tr></thead><tbody>`;
+    for (const key of groupKeys) {
+      const g = groups.get(key);
+      let header = g.num != null ? `Task ${taskIssueLink(g.num)}` : `Task ${esc(key)}`;
+      if (g.num != null) {
+        const issue = issueByNumber(g.num);
+        if (issue && issue.title) header += ` <span class="muted">${esc(issue.title)}</span>`;
+        const pr = findPRForIssue(g.num);
+        if (pr) header += ` &middot; PR ${prBadge(pr)}`;
+      }
+      // Group-header row: a full-width <td colspan> so it never collides
+      // with the "<tr><td>" pattern a plain worker row starts with (tests
+      // and the client sort script both rely on being able to tell the two
+      // apart) — it uses <tr class="task-group"> instead of a bare <tr>.
+      html += `<tr class="task-group"><td colspan="7"><strong>${header}</strong></td></tr>`;
+      const rows = g.workers.slice().sort((a, b) => {
+        const ar = String(a.role || ""), br = String(b.role || "");
+        if (ar !== br) return ar.localeCompare(br);
+        return String(a.task || "").localeCompare(String(b.task || ""));
+      });
+      for (const w of rows) {
+        const badge = phaseBadge(w.phase);
+        html += `<tr><td>${esc(w.role)}</td><td>${esc(w.task)}</td><td><code>${esc(w.model || "(none)")}</code></td>`;
+        html += `<td><span class="badge ${badge.cls}">${esc(w.phase || "(unknown)")}</span></td>`;
+        html += `<td>${esc(w.lens || "")}</td><td>${esc(w.ts)}</td>`;
+        // Hidden trailing cell: stable data-role/data-task hook for the
+        // worker inspector (issue #70). Appended AFTER every column the
+        // existing tests exact-match, so it never disturbs them.
+        html += `<td class="wrow-meta" data-role="${esc(w.role)}" data-task="${esc(w.task)}" hidden></td></tr>`;
+      }
     }
     html += `</tbody></table>`;
   }
@@ -640,6 +746,11 @@ const html = `<!doctype html>
   .unavailable { color: var(--bad-fg); font-style: italic; }
   table.routing { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; }
   table.routing th, table.routing td { border: 1px solid var(--border); padding: 0.3rem 0.6rem; text-align: left; font-size: 0.9rem; }
+  table.routing tr.task-group td { background: var(--muted-bg); }
+  table.routing thead th[data-sort-key] { cursor: pointer; user-select: none; }
+  table.routing thead th[data-sort-key]:hover { color: var(--link); }
+  table.routing thead th[data-sort-dir="asc"]::after { content: " \\25B2"; }
+  table.routing thead th[data-sort-dir="desc"]::after { content: " \\25BC"; }
   code { background: var(--code-bg); padding: 0.05rem 0.3rem; border-radius: 3px; }
   a { color: var(--link); }
 </style>
@@ -698,6 +809,70 @@ ${renderWorktrees()}
       });
     });
   } catch (e) { /* inert if the DOM is unavailable */ }
+})();
+// Sortable live-progress columns (issue #92): clicking a Role/Task/Model/
+// Phase/Lens/Updated header toggles asc/desc, sorting rows WITHIN each
+// task-group (the "<tr class=\"task-group\">" header rows themselves never
+// move) so the grouping stays coherent no matter which column is sorted.
+// Pure client-side (compares each row's own <td> textContent, never touches
+// the server-rendered hidden wrow-meta cell), inert if #live's table is
+// absent (e.g. the "no active workers" placeholder, or the gh-unavailable
+// degrade path) -- same try/catch-guarded IIFE convention as the two
+// scripts above, so it is harmless under file:// or any other odd
+// environment, and works identically whether this HTML came from a static
+// cockpit.sh run or cockpit-serve.sh (which injects its OWN separate SSE
+// script after this one, never replacing it).
+(function () {
+  try {
+    var table = document.querySelector("#live table.routing");
+    if (!table) return;
+    var thead = table.querySelector("thead");
+    var tbody = table.querySelector("tbody");
+    if (!thead || !tbody) return;
+    var headers = Array.prototype.slice.call(thead.querySelectorAll("th[data-sort-key]"));
+    if (!headers.length) return;
+
+    function groupRows() {
+      var groups = [];
+      var current = null;
+      Array.prototype.forEach.call(tbody.children, function (tr) {
+        if (tr.classList && tr.classList.contains("task-group")) {
+          current = { header: tr, members: [] };
+          groups.push(current);
+        } else if (current) {
+          current.members.push(tr);
+        } else {
+          groups.push({ header: null, members: [tr] });
+        }
+      });
+      return groups;
+    }
+
+    headers.forEach(function (th, colIndex) {
+      th.addEventListener("click", function () {
+        var dir = th.getAttribute("data-sort-dir") === "asc" ? "desc" : "asc";
+        headers.forEach(function (t) { t.removeAttribute("data-sort-dir"); });
+        th.setAttribute("data-sort-dir", dir);
+
+        var groups = groupRows();
+        groups.forEach(function (g) {
+          g.members.sort(function (a, b) {
+            var av = (a.children[colIndex] && a.children[colIndex].textContent || "").trim();
+            var bv = (b.children[colIndex] && b.children[colIndex].textContent || "").trim();
+            var cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: "base" });
+            return dir === "asc" ? cmp : -cmp;
+          });
+        });
+
+        var frag = document.createDocumentFragment();
+        groups.forEach(function (g) {
+          if (g.header) frag.appendChild(g.header);
+          g.members.forEach(function (tr) { frag.appendChild(tr); });
+        });
+        tbody.appendChild(frag);
+      });
+    });
+  } catch (e) { /* inert if the DOM/table is unavailable */ }
 })();
 </script>
 </body>
