@@ -223,11 +223,27 @@ bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>
 ```
 **in a real terminal outside Claude Code.** It's idempotent (safe to re-run any time). Self-hosting: add
 `--gates-file .claude/self/gates.json`. WSL2-only extra: optionally make the loop survive a Windows reboot
-by relaunching WSL2 at Windows logon — from an **elevated Windows** terminal (substituting `<distro>` from
-`wsl -l`, run on the Windows side):
+**unattended** — i.e. WSL2 boots at system startup, before anyone logs in, not just at logon. From an
+**elevated Windows PowerShell** (Run as Administrator — required by `-RunLevel Highest`), substituting
+`<distro>` from `wsl -l` and `<user>` for your Linux username:
+```powershell
+$action    = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d <distro> -u <user> -- true"
+$trigger   = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType S4U -RunLevel Highest
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+Register-ScheduledTask -TaskName "Start WSL <distro>" -Action $action -Trigger $trigger `
+  -Principal $principal -Settings $settings `
+  -Description "Boots WSL2 <distro> unattended at system startup so pr-loop/planner autostart"
 ```
-schtasks /create /tn "WSL pr-loop autostart" /tr "wsl.exe -d <distro> --exec true" /sc onlogon
-```
+`-LogonType S4U` runs the task whether or not anyone is logged on, without storing a Windows password — it
+needs the "Log on as a batch job" right, which admin accounts have by default (grant it via `secpol.msc` for
+a non-admin account). WSL2 also idles its VM down after inactivity, which would stop the daemon even though
+the task fired — add `vmIdleTimeout=-1` under `[wsl2]` in `%UserProfile%\.wslconfig`, then run `wsl --shutdown`
+once from Windows so it takes effect. Opening a WSL terminal afterward attaches to this same already-running
+instance rather than starting a second one — WSL2 only ever runs one instance per distro, so there's no
+duplicate-daemon risk.
+
 Skipping this is safe: GitHub is the loop's only source of truth, so anything that happened while WSL2 was
 stopped is simply picked up by the first tick after the next manual WSL2 start.
 
