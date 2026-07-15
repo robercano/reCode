@@ -92,6 +92,15 @@ check "scenario 2: prompt-file line points at a real file" bash -c '[ -n "$1" ] 
 check "scenario 2: prompt file mentions issue #42" bash -c 'grep -q "issue #42" "$1"' _ "$pf2"
 check "scenario 2: prompt file says ADVANCE, not feedback" bash -c 'grep -q "ADVANCE step" "$1"' _ "$pf2"
 
+# --- one-shot contract clauses (hotfix d37e951, guarded against regression by
+# issue #111): every driver prompt (advance AND feedback, both baked from the
+# shared $common string) must carry all three clauses that stop a driver from
+# quietly backgrounding its own orchestrator and ending its turn early, which
+# is exactly the incident that wedged issues #91/#92.
+check "scenario 2: prompt file mandates FOREGROUND-only spawn (run_in_background: false)" bash -c 'grep -qi "FOREGROUND" "$1" && grep -q "run_in_background: false" "$1"' _ "$pf2"
+check "scenario 2: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf2"
+check "scenario 2: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf2"
+
 # ---------------------------------------------------------------------------
 # 3. action=feedback pr=N -> same contract, feedback wording, LOOP_MODEL honored.
 # ---------------------------------------------------------------------------
@@ -104,6 +113,12 @@ check "scenario 3: LOOP_MODEL is honored (model=opus)" bash -c 'printf "%s\n" "$
 pf3="$(printf '%s\n' "$out3" | sed -n 's/^loop-event: prompt-file=//p')"
 check "scenario 3: prompt file mentions PR #7" bash -c 'grep -q "PR #7" "$1"' _ "$pf3"
 check "scenario 3: prompt file says ADDRESS FEEDBACK, and Do NOT merge" bash -c 'grep -q "ADDRESS FEEDBACK" "$1" && grep -q "Do NOT merge" "$1"' _ "$pf3"
+
+# Same one-shot contract clauses, on the FEEDBACK prompt this time (also baked
+# from the shared $common string — verdict wording differs, the contract does not).
+check "scenario 3: prompt file mandates FOREGROUND-only spawn (run_in_background: false)" bash -c 'grep -qi "FOREGROUND" "$1" && grep -q "run_in_background: false" "$1"' _ "$pf3"
+check "scenario 3: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf3"
+check "scenario 3: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3"
 
 # ---------------------------------------------------------------------------
 # 4. Garbage verdict line -> non-zero exit, action=none fallback line, no

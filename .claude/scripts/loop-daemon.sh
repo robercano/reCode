@@ -21,12 +21,29 @@
 # so a driver's own bash children can never be orphaned by a bare SIGTERM.
 #
 # RUN LEDGER: one line per driver appended to .claude/state/loop-runs.log:
-#   pid=<pgid> session=<session_id> verdict=<advance issue=N|feedback pr=N> ts=<ISO8601> [result=exit|timeout rc=N]
+#   pid=<pgid> session=<session_id> verdict=<advance issue=N|feedback pr=N> ts=<ISO8601> [result=exit|timeout|phantom rc=N] [pr=N] [debris=empty|publishable|half-done [action=deleted|resumable]] [verify=skipped]
 # session_id is parsed out of the driver's own --output-format json stdout,
 # so a hung/dead driver can be inspected later with
 # `claude --resume <session_id> --fork-session` (safe while it's still
 # running; transcripts are append-only JSONL). .claude/state/ is gitignored —
 # this ledger is never committed.
+#
+# POST-EXIT VERIFICATION + DEBRIS CLASSIFIER (issue #111): two incident
+# classes wedged the loop before this fix — (1) a driver spawned its
+# orchestrator in the BACKGROUND and ended its own headless turn early,
+# leaving a half-born local `feat/issue-N-*` branch with no commits/push/PR
+# while the ledger recorded a phantom `result=exit rc=0` and census read the
+# local branch as in_flight forever, silently starving that issue; (2) a
+# driver killed mid-flight AFTER committing gates-green work but BEFORE
+# pushing — a naive "delete any debris branch" fix would have DESTROYED that
+# finished work (recovered manually as PR #117 for issue #107). The fix:
+# after every `advance issue=N` driver exits (skipping timeouts/spawn-errors,
+# which have no work product to check yet), verify_and_classify_post_exit
+# queries GitHub for an open PR on that issue's branch, corrects
+# `result=exit rc=0` to `result=phantom rc=0` when none exists, and calls
+# classify_debris (pure git, no network) to tell an `empty` branch (safe to
+# delete — case 1 above) apart from `publishable`/`half-done` (real work,
+# NEVER deleted — case 2 above). Only the `empty`+no-PR case is destructive.
 #
 # Env:
 #   LOOP_MODEL                   model for the driver (default sonnet; read by loop-event.sh)
@@ -35,6 +52,9 @@
 #   LOOP_DRIVER_TIMEOUT          wall-clock cap per driver (default 90m)
 #   LOOP_DAEMON_SLEEP_FAST/WATCH/IDLE/FALLBACK   override the adaptive-sleep seconds (test hook)
 #   LOOP_DAEMON_MAX_ITERATIONS   bound the forever loop; 0 = unbounded (test/debug hook)
+#   CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS   forced to 0 for the driver spawn (issue #111 pt 4)
+#                                 unless the caller already set it — fail-fast on a
+#                                 backgrounded driver instead of a silent half-completion
 #
 # Sourcing this file (rather than executing it) has ZERO side effects — every
 # function below only runs when called, and `main` only runs when this file
@@ -108,6 +128,182 @@ extract_session_id() {
     | sed -E 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'
 }
 
+# --- map a local branch name -> its worktree's absolute path, if any --------
+# Same idea as worktree-cleanup.sh's own worktree_for_branch, but deliberately
+# pure bash/git — NOT node — parsing `git worktree list --porcelain`'s
+# blank-line-separated records. This mirrors extract_session_id's own
+# grep/sed-not-node rule above: a daemon/service environment that needed
+# ensure_claude_on_path's nvm fallback to find `claude` may still not have
+# `node` resolvable, and this runs unconditionally on every advance driver
+# exit (unlike worktree-cleanup.sh, which only runs after a successful gh
+# merge where node was already required). Prints nothing (not an error) when
+# the branch has no worktree.
+worktree_for_branch() {
+  local want="$1" path="" branch="" line
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) path="${line#worktree }" ;;
+      "branch refs/heads/"*) branch="${line#branch refs/heads/}" ;;
+      "")
+        if [ -n "$path" ] && [ "$branch" = "$want" ]; then
+          printf '%s' "$path"
+          return 0
+        fi
+        path="" branch=""
+        ;;
+    esac
+  done < <(git -C "$root" worktree list --porcelain 2>/dev/null; printf '\n')
+}
+
+# --- debris classifier (issue #111 pt 2) -------------------------------------
+# $1=branch $2=worktree_dir (may be empty/nonexistent). PURE SHELL, NETWORK
+# FREE — only `git` against the local repo. Echoes exactly one of:
+#   absent       branch doesn't exist at all in the relevant repo (nothing to
+#                classify)
+#   empty        no commits ahead of main AND worktree clean/absent — safe to
+#                delete (the #91/#92 half-born-branch case)
+#   publishable  commits ahead of main AND worktree clean — real work, a PR
+#                should exist or be opened for it, NEVER delete
+#   half-done    commits ahead but the worktree is dirty (uncommitted work),
+#                OR ahead=0 with a dirty worktree — resumable, NEVER delete
+#
+# Repo context: when $2 is a real directory it's used as the git context for
+# BOTH the branch-existence/ahead-count check and the dirty check (a linked
+# worktree shares refs/objects with its parent repo, so this works whether
+# $2 is a genuine `git worktree add` checkout or a standalone repo — the
+# latter is what loop-daemon.test.sh uses to unit-test this function in full
+# isolation from the real project's own git state). Falls back to the
+# daemon's own $root only when no worktree dir was given/found.
+#
+# NOTE (documented assumption): the issue asked for a per-branch events.jsonl
+# gates/review signal to distinguish "publishable" more precisely. This repo's
+# events.jsonl (log-event.sh) is a single GLOBAL, size-capped, rotating log —
+# there is no per-branch event trail to inspect. So "publishable" here is
+# "commits ahead of main + clean worktree", full stop; a finer-grained
+# gates/review-verified signal is left for a follow-up if it's ever needed.
+classify_debris() {
+  local branch="$1" wt="${2:-}"
+  local repo="$root"
+  [ -n "$wt" ] && [ -d "$wt" ] && repo="$wt"
+
+  if ! git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    echo "absent"
+    return 0
+  fi
+
+  local ahead
+  ahead="$(git -C "$repo" rev-list --count "main..$branch" 2>/dev/null || echo 0)"
+  [ -n "$ahead" ] || ahead=0
+
+  local dirty=0
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] && dirty=1
+  fi
+
+  if [ "$ahead" -eq 0 ] && [ "$dirty" -eq 0 ]; then
+    echo "empty"
+  elif [ "$ahead" -gt 0 ] && [ "$dirty" -eq 0 ]; then
+    echo "publishable"
+  else
+    echo "half-done"
+  fi
+}
+
+# --- post-exit verification + ledger honesty (issue #111 pt 1) --------------
+# $1=verdict $2=rc $3=extra (the "result=... rc=N" string run_driver already
+# built). Echoes the (possibly augmented/replaced) extra string the ONE
+# ledger line should carry instead — never appends a second ledger line.
+#
+# Only applies to `advance issue=N` verdicts with a non-timeout/non-spawn-error
+# rc (124/137/127 pass $3 straight through unchanged: a killed/never-spawned
+# driver has no work product to verify yet). All GitHub access goes through
+# bot-gh.sh; a failed/offline/empty query degrades to appending `verify=skipped`
+# — it NEVER falsely declares `result=phantom`, and NEVER deletes anything, on
+# a network hiccup. classify_debris (pure git) still runs regardless of
+# network reachability.
+verify_and_classify_post_exit() {
+  local verdict="$1" rc="$2" extra="$3"
+
+  case "$verdict" in
+    "advance issue="*) : ;;
+    *) printf '%s' "$extra"; return 0 ;;
+  esac
+  case "$rc" in
+    124|137|127) printf '%s' "$extra"; return 0 ;;
+  esac
+  local n="${verdict#advance issue=}"
+  case "$n" in
+    *[!0-9]*|'') printf '%s' "$extra"; return 0 ;;
+  esac
+
+  # Local branch for this issue, if any — there may be none (e.g. the driver
+  # never even reached `git checkout -b`). `git branch --list` prefixes the
+  # CURRENTLY CHECKED OUT branch with "* " and any branch checked out in a
+  # DIFFERENT linked worktree with "+ " (this is exactly that case — the
+  # driver's own worktree has it checked out) — strip both markers, same as
+  # worktree-cleanup.sh's own `git branch --merged` parsing does.
+  local branch
+  branch="$(git -C "$root" branch --list "feat/issue-$n-*" 2>/dev/null | sed 's/^[*+ ]*//' | head -1)"
+
+  # Query GitHub for an OPEN PR whose head branch matches feat/issue-N-* —
+  # this works whether or not a LOCAL branch still exists (the driver may
+  # have pushed + opened a PR from a worktree already cleaned up elsewhere).
+  local gh_out gh_rc pr_num=""
+  gh_out="$(bash "$script_dir/bot-gh.sh" pr list --state open --json number,headRefName \
+    --jq ".[] | select(.headRefName | test(\"^feat/issue-$n-\")) | .number" 2>/dev/null)"
+  gh_rc=$?
+
+  if [ "$gh_rc" -ne 0 ]; then
+    # offline/failure: degrade gracefully — never falsely declare phantom,
+    # never delete on a network hiccup.
+    printf '%s verify=skipped' "$extra"
+    return 0
+  fi
+  pr_num="$(printf '%s\n' "$gh_out" | head -1)"
+
+  local out="$extra"
+  if [ -n "$pr_num" ]; then
+    out="$out pr=$pr_num"
+  elif [ "$rc" -eq 0 ]; then
+    # rc=0 with NO open PR: the naive "result=exit rc=0" would be a phantom
+    # success (issue #111 pt 1) — the driver ended cleanly without its work
+    # product ever landing on GitHub. Correct the record, don't just append.
+    out="$(printf '%s' "$out" | sed -E 's/result=exit/result=phantom/')"
+  fi
+
+  if [ -n "$branch" ]; then
+    local wt state
+    wt="$(worktree_for_branch "$branch")"
+    state="$(classify_debris "$branch" "$wt")"
+    out="$out debris=$state"
+
+    case "$state" in
+      empty)
+        # The ONLY destructive path (case A) — provably no commits, no dirty
+        # worktree, no open PR. Case B/C (publishable/half-done) are NEVER
+        # touched here (deferred publish / resumable, respectively).
+        if [ -z "$pr_num" ]; then
+          if [ -n "$wt" ]; then
+            git -C "$root" worktree remove --force "$wt" 2>/dev/null || true
+          fi
+          if git -C "$root" branch -D "$branch" >/dev/null 2>&1; then
+            out="$out action=deleted"
+            log "post-exit debris cleanup: deleted empty local branch/worktree for issue #$n ($branch)"
+          fi
+        fi
+        ;;
+      half-done)
+        out="$out resumable"
+        ;;
+      *)
+        : # publishable/absent: recorded via debris=$state above, nothing else to do
+        ;;
+    esac
+  fi
+
+  printf '%s' "$out"
+}
+
 # --- spawn ONE contained driver, block until it exits/times out, ledger it ---
 # $1=verdict (e.g. "advance issue=42"), $2=model, $3=prompt-file (plain text).
 # Returns the driver's exit code (124/137 on timeout).
@@ -131,6 +327,14 @@ run_driver() {
   local out_file; out_file="$(mktemp "$state_dir/.loop-driver-out.XXXXXX.json")"
 
   log "spawning driver ($verdict, model=$model, timeout=$timeout_dur)"
+  # Fail-fast spawn (issue #111 pt 4): a driver session that backgrounds its
+  # own orchestrator/agents can otherwise end its headless turn "cleanly"
+  # while that background work is still mid-flight — the half-born-branch
+  # incident this whole file's post-exit verification exists to catch.
+  # Forcing this ceiling to 0 makes a backgrounded spawn die loudly (instead
+  # of half-completing) so the failure is immediate and visible, not a
+  # phantom success discovered later. Still overridable by the caller's env.
+  export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
   # setsid: own session, so the whole tree (claude + any bash children it
   # spawns) shares ONE fresh process group independent of this daemon's own —
   # timeout's --kill-after below then has a single group to aim at. Backstop
@@ -151,6 +355,20 @@ run_driver() {
   case "$rc" in
     124|137) extra="result=timeout rc=$rc" ;;
     *)       extra="result=exit rc=$rc" ;;
+  esac
+
+  # Post-exit verification + debris classification (issue #111 pts 1-2) —
+  # ONLY for advance verdicts with a non-timeout/non-spawn-error rc; may
+  # replace `result=exit` with `result=phantom` and/or append pr=/debris=
+  # fields onto the SAME extra string, so exactly one ledger line still
+  # covers this whole run.
+  case "$verdict" in
+    "advance issue="*)
+      case "$rc" in
+        124|137|127) : ;;
+        *) extra="$(verify_and_classify_post_exit "$verdict" "$rc" "$extra")" ;;
+      esac
+      ;;
   esac
 
   append_ledger "$pgid" "$session_id" "$verdict" "$ts" "$extra"
