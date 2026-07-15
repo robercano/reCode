@@ -22,6 +22,22 @@ esac
 # Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
 # shellcheck source=resolve-roots.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
+
+# On `setup`, link the main checkout's gitignored .env into the worktree (same
+# pattern as prepare-pr.sh for test-pr worktrees): .env is never checked out,
+# so gates and app code that read it fail in a fresh worktree for lack of
+# credentials rather than real defects. Resolved from the CALLER's cwd, not
+# $root — in the plugin-cache layout $root is the main checkout, while the
+# implementer invoking this script stands inside its worktree. Best-effort and
+# skip-if-present (a worktree-local .env wins); runs before the adapter checks
+# below so unconfigured repos still get it.
+if [ "$phase" = setup ]; then
+  wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  main="$(cd "${wt:-.}" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)"
+  if [ -n "$wt" ] && [ -n "$main" ] && [ "$main" != "$wt" ] && [ -f "$main/.env" ] && [ ! -e "$wt/.env" ]; then
+    ln -s "$main/.env" "$wt/.env" && echo "▶ linked $wt/.env → $main/.env"
+  fi
+fi
 # Which adapter to read. Defaults to the project adapter; set GATES_FILE to run a
 # different one (e.g. GATES_FILE=.claude/self/gates.json). Relative paths resolve
 # from the repo root.
