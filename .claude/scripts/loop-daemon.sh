@@ -206,8 +206,12 @@ main() {
   # under the service silently skip merges and tick records while polling
   # still works — a deadlock, since the only path that DID source nvm
   # (run_driver) is unreachable while an unmergeable PR keeps advance away.
-  ensure_claude_on_path \
-    || log "warning: 'claude' not resolvable at startup (nor via nvm) — node-dependent tick steps and driver spawns will fail until PATH provides it"
+  if ! ensure_claude_on_path; then
+    log "warning: 'claude' not resolvable at startup (nor via nvm) — node-dependent tick steps and driver spawns will fail until PATH provides it"
+    # append_ledger is pure bash (no node needed) — record the env-error even
+    # though write_tick_record itself can't run without node (issue #107).
+    append_ledger "unknown" "" "startup" "$(date -u +%FT%TZ)" "result=env-error"
+  fi
   log "starting (LOOP_MODEL=${LOOP_MODEL:-sonnet} GATES_FILE=${GATES_FILE:-<default>} LOOP_DRIVER_TIMEOUT=${LOOP_DRIVER_TIMEOUT:-90m})"
   local iterations=0
   local max_iterations="${LOOP_DAEMON_MAX_ITERATIONS:-0}"
