@@ -139,8 +139,29 @@ if [ "$has_assignee" -eq 0 ] && [ -n "$owner" ]; then
   if [ "$status" -ne 0 ]; then exit "$status"; fi
   pr_number="${pr_url##*/}"
   if [ -n "$repo_full" ] && [ -n "$pr_number" ]; then
-    if ! GH_TOKEN="$GH_BOT_TOKEN" gh api -X POST "repos/$repo_full/issues/$pr_number/assignees" -f "assignees[]=$owner" >/dev/null 2>&1; then
+    # Send the payload as an explicit JSON --input body, NEVER as
+    # `-f "assignees[]=..."`: gh only grew the bracket array syntax in later
+    # 2.x releases — on older gh (e.g. Ubuntu 22.04's packaged 2.4.0) it
+    # sends a literal "assignees[]" STRING field, which the API silently
+    # ignores while still returning 200. Exit code 0, nobody assigned, no
+    # warning — this exact silent no-op shipped for weeks. Same lesson for
+    # verification: don't trust the exit code, check the response actually
+    # names the owner (the closing quote in the grep keeps '<owner>-bot'
+    # style logins from matching as a prefix).
+    resp="$(printf '{"assignees":["%s"]}' "$owner" \
+      | GH_TOKEN="$GH_BOT_TOKEN" gh api -X POST "repos/$repo_full/issues/$pr_number/assignees" --input - 2>/dev/null)" || resp=""
+    if ! printf '%s' "$resp" | grep -q "\"login\":\"$owner\""; then
       echo "bot-gh.sh: warning — created $pr_url but could not assign it to '$owner' (bot token may lack read:org); PR left unassigned." >&2
+    fi
+    # Also request a formal review from the owner: assignment alone does not
+    # put the PR in the owner's GitHub review queue or fire the
+    # review-requested notification. The author is always the bot here (the
+    # whole point of bot-gh.sh), so GitHub's no-self-review-request rule
+    # cannot trip on the owner. Soft-fail like the assignment.
+    resp="$(printf '{"reviewers":["%s"]}' "$owner" \
+      | GH_TOKEN="$GH_BOT_TOKEN" gh api -X POST "repos/$repo_full/pulls/$pr_number/requested_reviewers" --input - 2>/dev/null)" || resp=""
+    if ! printf '%s' "$resp" | grep -q "\"login\":\"$owner\""; then
+      echo "bot-gh.sh: warning — created $pr_url but could not request a review from '$owner'; request it by hand so the owner is notified." >&2
     fi
   fi
   exit 0
