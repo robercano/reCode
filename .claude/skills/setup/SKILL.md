@@ -165,9 +165,17 @@ Two ways to fire the loop; ask the user which one (`AskUserQuestion`), presentin
    scaffolded at `.claude/systemd/pr-loop.service` and `.claude/systemd/claude-rc.service` — do not hand-edit
    the installed copies under `~/.config/systemd/user/`; edit the checked-in templates and re-run
    `arm-loop.sh` instead.
-4. **WSL2 only — offer Windows-logon autostart.** Ask whether they want WSL2 to relaunch automatically when
-   Windows logs in (so the daemon survives a Windows reboot without a manual `wsl` open):
-   - **Yes** → print the exact command to run in an **elevated Windows terminal** (not WSL):
+4. **WSL2 only — offer Windows autostart.** Ask whether they want WSL2 to relaunch automatically after a
+   Windows reboot (so the daemon comes back without a manual `wsl` open), offering two tiers
+   (`AskUserQuestion`):
+   - **Unattended (recommended)** — WSL2 boots at **system startup, before anyone logs on**. Point them at
+     the `Register-ScheduledTask` PowerShell block in `docs/USAGE.md` → "Linux vs WSL2" (AtStartup trigger +
+     S4U principal; must be run from an **elevated** Windows PowerShell, never from inside WSL). Two
+     required companions, also documented there:
+     - `vmIdleTimeout=-1` under `[wsl2]` in `%UserProfile%\.wslconfig` (then one `wsl --shutdown` from
+       Windows) — without it WSL2 idles the VM back down and stops the daemon even though the task fired;
+     - `loginctl enable-linger` (arm-loop.sh already ran this in step 3).
+   - **Logon-only (simpler)** — print the exact command to run in an **elevated Windows terminal** (not WSL):
      ```
      schtasks /create /tn "WSL pr-loop autostart" /tr "wsl.exe -d <distro> --exec true" /sc onlogon
      ```
@@ -176,6 +184,9 @@ Two ways to fire the loop; ask the user which one (`AskUserQuestion`), presentin
    - **No** → tell them this is safe to skip: GitHub is the loop's only source of truth, so any events that
      land while WSL2 is stopped are simply picked up by the first tick after the next manual WSL2 start —
      nothing is dropped, it's just delayed.
+   - Either way, state the caveat: autostart protects the **queue**, not a **driver in flight** — a reboot,
+     sleep, or `wsl --shutdown` mid-driver kills that driver and leaves `in_flight` debris (see
+     `docs/USAGE.md` → failure contract, "Daemon killed mid-driver"; #119 tracks the fix).
 5. Report the units' names and how to inspect them (`systemctl --user status pr-loop-<repo>.service`,
    `journalctl --user -u pr-loop-<repo>.service -f`, `tail -f .claude/state/loop-runs.log`,
    `tmux attach -t rc-<repo>`).

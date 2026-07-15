@@ -160,7 +160,16 @@ which have no interactive tty to prompt at all.
   --model <model> -p "<verdict-obeying prompt>" --output-format json`. `setsid` gives the driver (and any
   bash children it spawns) its own process group, independent of the daemon's; on timeout the whole group
   is targeted, not just the immediate child, so a driver's own children can never be orphaned by a bare
-  `SIGTERM`. The daemon itself never runs two drivers concurrently (it's a single-threaded loop), and
+  `SIGTERM`. **However, a process group is NOT a cgroup**: the driver still lives inside the daemon
+  *service's* cgroup, and systemd's default `KillMode=control-group` kills everything in it whenever the
+  unit stops — so `systemctl --user restart pr-loop-<repo>`, a daemon crash (`Restart=always` bounce), a
+  host reboot/sleep, or `wsl --shutdown` all kill an in-flight driver mid-run, with **no ledger line**
+  (the ledger write is the daemon's last act *after* the driver exits) and the driver's branch/worktree
+  left as debris (see the failure contract below). Before restarting the daemon or the machine, check
+  nothing is in flight: the last `.claude/state/loop-runs.log` spawn has a matching `result=` completion,
+  and `.claude/state/worker-tools.jsonl` has gone quiet. Issue #119 (planned) decouples driver lifetime
+  from the daemon's (one transient systemd unit per driver + startup re-attach) and retires this caveat.
+  The daemon itself never runs two drivers concurrently (it's a single-threaded loop), and
   `loop-tick.sh`'s own spawn lock additionally guards against a second overlapping tick anywhere else
   (e.g. the legacy cron armed at the same time) double-firing the same ADVANCE.
 - **`claude-rc-<repo>.service`** → `claude remote-control` inside a detached tmux session (`rc-<repo>`), for
@@ -247,6 +256,13 @@ duplicate-daemon risk.
 Skipping this is safe: GitHub is the loop's only source of truth, so anything that happened while WSL2 was
 stopped is simply picked up by the first tick after the next manual WSL2 start.
 
+**WSL2 caveat — going down is safe for the QUEUE, not for a driver in flight.** Autostart + linger bring
+the *daemon* back after a reboot, but a Windows reboot, sleep/hibernate, or `wsl --shutdown` that lands
+while a driver is mid-run kills that driver with no ledger line, leaving `in_flight` debris (see the
+failure contract's "Daemon killed mid-driver" row — this exact pattern killed five of six drivers on
+2026-07-14/15). Until #119 lands, prefer rebooting/shutting down when `tail -1
+.claude/state/loop-runs.log` shows the last spawn completed (`result=` present).
+
 Inspect what's armed:
 ```bash
 systemctl --user status pr-loop-<repo>.service
@@ -263,7 +279,8 @@ tmux attach -t rc-<repo>
 | Driver runs past `LOOP_DRIVER_TIMEOUT` (default 90m) | ledger `result=timeout rc=124\|137`; `timeout --kill-after=30s` plus an explicit process-group kill | Yes — same as above | none, unless it left a half-finished branch behind — inspect and fix forward |
 | `claude` CLI not found on `PATH` (nor via the `nvm` fallback) | ledger `result=spawn-error rc=127`, logged before any spawn attempt | Partially — the pre-branch spawn lock's 15-minute TTL clears and lets a later tick retry, but every retry hits the same missing-`PATH` wall | fix `PATH`/`nvm` in the daemon's environment (e.g. the systemd unit's `Environment=`), then `systemctl --user restart pr-loop-<repo>.service` |
 | `loop-tick.sh` / `loop-event.sh` itself exits non-zero (broken tick) | daemon logs "not spawning a driver on a broken tick", sleeps the fallback cadence, retries | Yes — retried automatically every tick | investigate only if it persists across many ticks |
-| **Driver pushed `feat/issue-N-*` but died before opening the PR** | census reports `N` as `in_flight`; `loop-tick.sh`'s advance check refuses (`# advance refused: issue=N is in_flight`, logged every single tick) and emits `action=none` | **No** — unlike the pre-branch spawn lock, `in_flight` has no TTL/self-heal; it refuses forever until the branch or a PR's state changes | **delete the abandoned branch** (frees the issue back to `advance_ready`), **or** open the PR by hand for that branch (moves it into the normal review/merge or feedback flow) |
+| **Driver created `feat/issue-N-*` but died before opening the PR** | census reports `N` as `in_flight`; `loop-tick.sh`'s advance check refuses (`# advance refused: issue=N is in_flight`, logged every single tick) and emits `action=none` | **No** — unlike the pre-branch spawn lock, `in_flight` has no TTL/self-heal; it refuses forever until the branch or a PR's state changes | **Classify first, never blind-delete** (`git log main..<branch>` + worktree status): **empty** (no commits, clean) → delete the branch/worktree, freeing the issue back to `advance_ready`; **publishable** (commits ahead, clean, reviews/gates were green) → re-run the test gate, push, open the PR by hand via `bot-gh.sh` (proven: #107 → PR #117); **half-done or dirty worktree** → never delete — `wip:`-commit to preserve, then finish via a normal orchestrator pass on the existing branch. Issues #111 (classify + mechanical paths) and #98 (resume half-done work) automate this. |
+| **Daemon killed mid-driver** (service restart, daemon crash, host reboot/sleep, `wsl --shutdown`) | ledger shows a spawn with **no `result=` completion line**; `events.jsonl`/`worker-tools.jsonl` activity for the task stops abruptly | **No** — the driver dies with the daemon's cgroup (see the `KillMode` caveat above); the restarted daemon just ticks on, and any branch the driver created wedges as `in_flight` per the row above | avoid restarting the daemon/host while a driver is in flight; recover debris per the row above; #119 (transient unit per driver) removes the restart-collateral case |
 | `claude-rc-<repo>.service`'s inner `claude remote-control` process crashes | **not detected by systemd** — the unit is `Type=oneshot`/`RemainAfterExit=yes`; systemd only observes `tmux new -d`'s own (successful) exit, never the health of the process running *inside* that tmux session | No | `tmux attach -t rc-<repo>` to check, then `systemctl --user restart claude-rc-<repo>.service` |
 
 **Never run the daemon and the legacy `/pr-loop` cron against the same repo at the same time** —
