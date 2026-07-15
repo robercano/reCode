@@ -45,16 +45,50 @@
 # delete — case 1 above) apart from `publishable`/`half-done` (real work,
 # NEVER deleted — case 2 above). Only the `empty`+no-PR case is destructive.
 #
+# DRIVER LIFETIME DECOUPLED FROM THE DAEMON (issue #119): the DRIVER
+# CONTAINMENT setup above still leaves a driver living inside the DAEMON's
+# own cgroup — `setsid` gives it an independent process *group*, but a
+# process group is not a cgroup, and systemd's default `KillMode=control-group`
+# kills the whole cgroup (driver included) whenever the daemon unit stops, be
+# it a `systemctl --user restart`, a `Restart=always` crash-bounce, a host
+# reboot/sleep, or `wsl --shutdown`. Evidence 2026-07-14/15: five of six
+# drivers died ledger-less this way. The fix: when `systemd-run` is on PATH,
+# `run_driver` spawns each driver as its OWN transient `--user` unit
+# (`pr-loop-driver-issue<N>`/`pr-loop-driver-pr<N>`, derived from the verdict)
+# via `systemd-run --user --wait --collect --unit=... -p RuntimeMaxSec=<LOOP_DRIVER_TIMEOUT>`.
+# The driver's real parent becomes the user manager — it lives in ITS OWN
+# scope, independent of the daemon's cgroup — so a daemon restart/crash kills
+# only the daemon's own `systemd-run --wait` waiter (a disposable client that
+# blocks and relays the exit code), never the driver itself. `RuntimeMaxSec`
+# (a systemd time-span, e.g. `90m`) replaces the `timeout` wrapper as the hard
+# wall-clock ceiling, enforced by the user manager instead of the daemon, so
+# an orphaned driver still has a real ceiling even if the daemon never comes
+# back. When `systemd-run` is NOT on PATH (legacy-cron / non-systemd
+# environments), `run_driver` falls back to the exact `setsid timeout
+# --kill-after=30s ...` spawn documented above — unchanged. Both paths feed
+# the SAME rc into the SAME ledger/verify code below; only the spawn+wait
+# step branches. `main()` also re-attaches to any `pr-loop-driver-*` unit
+# still active at startup (left running by a now-dead daemon) instead of
+# ticking — see reattach_orphaned_drivers() — and `loop-census.sh` refuses to
+# ADVANCE an issue whose driver unit is currently active. Ops helper:
+# `.claude/scripts/loop-halt.sh` stops one/all/everything by hand.
+#
 # Env:
 #   LOOP_MODEL                   model for the driver (default sonnet; read by loop-event.sh)
 #   GATES_FILE                   adapter override, passed straight through the environment
 #                                 (self-hosting: .claude/self/gates.json)
-#   LOOP_DRIVER_TIMEOUT          wall-clock cap per driver (default 90m)
+#   LOOP_DRIVER_TIMEOUT          wall-clock cap per driver (default 90m); becomes
+#                                 systemd-run's `-p RuntimeMaxSec=` when systemd-run
+#                                 is on PATH, else `timeout`'s duration (issue #119)
 #   LOOP_DAEMON_SLEEP_FAST/WATCH/IDLE/FALLBACK   override the adaptive-sleep seconds (test hook)
 #   LOOP_DAEMON_MAX_ITERATIONS   bound the forever loop; 0 = unbounded (test/debug hook)
+#   LOOP_REATTACH_POLL_SECONDS   poll interval while re-attaching to an orphaned
+#                                 driver unit at startup (default 5; issue #119 pt 3)
 #   CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS   forced to 0 for the driver spawn (issue #111 pt 4)
 #                                 unless the caller already set it — fail-fast on a
-#                                 backgrounded driver instead of a silent half-completion
+#                                 backgrounded driver instead of a silent half-completion.
+#                                 Passed into the transient unit's own environment via
+#                                 `--setenv` when spawned through systemd-run (issue #119).
 #
 # Sourcing this file (rather than executing it) has ZERO side effects — every
 # function below only runs when called, and `main` only runs when this file
@@ -304,6 +338,105 @@ verify_and_classify_post_exit() {
   printf '%s' "$out"
 }
 
+# --- transient systemd unit naming (issue #119 pt 1) -------------------------
+# $1=verdict -> "pr-loop-driver-issue<N>" for "advance issue=N", or
+# "pr-loop-driver-pr<N>" for "feedback pr=N". Used both to SPAWN the unit
+# (run_driver) and, in reverse (verdict_from_unit_name below), to recover the
+# verdict from a unit already running when this daemon process starts up
+# (reattach_orphaned_drivers) — the two must stay exact inverses of each other.
+driver_unit_name() {
+  case "$1" in
+    "advance issue="*)  printf 'pr-loop-driver-issue%s' "${1#advance issue=}" ;;
+    "feedback pr="*)    printf 'pr-loop-driver-pr%s' "${1#feedback pr=}" ;;
+    *)                  printf 'pr-loop-driver-unknown' ;;
+  esac
+}
+
+# --- reverse of driver_unit_name: unit name -> verdict (issue #119 pt 3) ----
+# Prints nothing (not an error) for a unit name that doesn't match the
+# expected naming convention — reattach_orphaned_drivers skips those rather
+# than guessing.
+verdict_from_unit_name() {
+  local unit="${1%.service}"
+  case "$unit" in
+    pr-loop-driver-issue*) printf 'advance issue=%s' "${unit#pr-loop-driver-issue}" ;;
+    pr-loop-driver-pr*)    printf 'feedback pr=%s' "${unit#pr-loop-driver-pr}" ;;
+    *)                     : ;;
+  esac
+}
+
+# --- list currently active/activating pr-loop-driver-* units ---------------
+# No-op (prints nothing, never fails) when systemd/`systemctl --user` isn't
+# usable here — every caller of this treats an empty result as "nothing to
+# re-attach to", which is exactly correct in a non-systemd environment.
+list_active_driver_units() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl --user list-units --no-legend --plain --state=active,activating \
+    'pr-loop-driver-*' 2>/dev/null | awk '{print $1}' | sed 's/\.service$//'
+}
+
+# --- block until a (re-attached) driver unit finishes, print its exit code --
+# $1=unit. Polls `systemctl --user is-active` every LOOP_REATTACH_POLL_SECONDS
+# (default 5) while the unit is still active/activating/deactivating, then
+# reads back ExecMainCode/ExecMainStatus. Best-effort: a unit garbage-collected
+# out from under us (--collect) before this can read it back prints "0" rather
+# than guessing — the ledger's own verify_and_classify_post_exit (GitHub +
+# pure-git) is what actually tells success apart from a phantom regardless.
+wait_for_driver_unit() {
+  local unit="$1" state
+  while :; do
+    state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+    case "$state" in
+      active|activating|deactivating) sleep "${LOOP_REATTACH_POLL_SECONDS:-5}" ;;
+      *) break ;;
+    esac
+  done
+  local code status
+  code="$(systemctl --user show -p ExecMainCode --value "$unit" 2>/dev/null || true)"
+  status="$(systemctl --user show -p ExecMainStatus --value "$unit" 2>/dev/null || true)"
+  case "$status" in ''|*[!0-9]*) status=0 ;; esac
+  if [ "$code" = "killed" ]; then
+    printf '124'
+  else
+    printf '%s' "$status"
+  fi
+}
+
+# --- startup re-attach (issue #119 pt 3) ------------------------------------
+# Called ONCE from main(), before the first run_once: a driver left running by
+# a NOW-DEAD daemon process (the whole point of #119 — its lifetime is no
+# longer tied to the daemon's) must never be double-spawned, and must never be
+# silently forgotten either (a naive tick would just see no local branch yet
+# and re-advance the same issue). Instead: find every still-active
+# `pr-loop-driver-*` unit, WAIT for each to finish (blocking, like the
+# daemon's own `systemd-run --wait` would have), then run the exact same
+# post-exit verify + ledger path a fresh run_driver exit would have. No-op
+# when systemd/`systemctl --user` is unavailable.
+reattach_orphaned_drivers() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  local unit
+  while IFS= read -r unit; do
+    [ -n "$unit" ] || continue
+    local verdict; verdict="$(verdict_from_unit_name "$unit")"
+    if [ -z "$verdict" ]; then
+      log "startup re-attach: active unit '$unit' doesn't match the pr-loop-driver-<issueN|prN> naming — leaving it to systemd, not re-attaching"
+      continue
+    fi
+    log "startup re-attach: found active driver unit '$unit' from a previous daemon ($verdict) — waiting instead of spawning a new one"
+    local rc; rc="$(wait_for_driver_unit "$unit")"
+    local ts; ts="$(date -u +%FT%TZ)"
+    local extra="result=exit rc=$rc"
+    case "$rc" in
+      124|137) extra="result=timeout rc=$rc" ;;
+    esac
+    case "$verdict" in
+      "advance issue="*) extra="$(verify_and_classify_post_exit "$verdict" "$rc" "$extra")" ;;
+    esac
+    append_ledger "unknown" "" "$verdict" "$ts" "$extra reattached=true"
+    log "startup re-attach finished ($verdict): $extra reattached=true"
+  done < <(list_active_driver_units)
+}
+
 # --- spawn ONE contained driver, block until it exits/times out, ledger it ---
 # $1=verdict (e.g. "advance issue=42"), $2=model, $3=prompt-file (plain text).
 # Returns the driver's exit code (124/137 on timeout).
@@ -335,19 +468,53 @@ run_driver() {
   # of half-completing) so the failure is immediate and visible, not a
   # phantom success discovered later. Still overridable by the caller's env.
   export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
-  # setsid: own session, so the whole tree (claude + any bash children it
-  # spawns) shares ONE fresh process group independent of this daemon's own —
-  # timeout's --kill-after below then has a single group to aim at. Backstop
-  # explicit group kill after `wait` covers anything that outlives timeout's
-  # own signal delivery (claude-code#29096: a bare SIGTERM to just the
-  # immediate child has been observed to orphan bash children).
-  setsid timeout --kill-after=30s "$timeout_dur" \
-    claude --model "$model" -p "$prompt" --output-format json \
-    >"$out_file" 2>"$out_file.stderr" &
-  local pgid=$!
-  wait "$pgid"
-  local rc=$?
-  kill -TERM -- "-$pgid" 2>/dev/null || true
+
+  local pgid rc
+  if command -v systemd-run >/dev/null 2>&1; then
+    # Transient systemd unit per driver (issue #119 pt 1): the daemon's own
+    # `systemd-run --wait` invocation below is a DISPOSABLE waiter — it
+    # blocks and relays the unit's exit code, exactly like `wait` on a
+    # backgrounded job, but the driver's actual parent is the `--user`
+    # manager, not this daemon process. A daemon restart/crash kills only
+    # this waiter; the driver keeps running in its own scope, unaffected.
+    # --collect unloads the unit right after it stops (no manual
+    # `systemctl --user reset-failed` bookkeeping). RuntimeMaxSec is the hard
+    # wall-clock ceiling, enforced by the user manager — it replaces `timeout`
+    # and, unlike `timeout`, survives even if the daemon itself never comes
+    # back. --setenv threads PATH and the fail-fast bg-wait ceiling into the
+    # unit's own environment: transient units do NOT inherit the caller's
+    # shell environment the way a plain backgrounded child would.
+    local unit; unit="$(driver_unit_name "$verdict")"
+    log "spawning driver via transient systemd unit ($unit, RuntimeMaxSec=$timeout_dur)"
+    systemd-run --user --wait --collect --quiet \
+      --unit="$unit" \
+      -p "RuntimeMaxSec=$timeout_dur" \
+      --setenv="CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" \
+      --setenv="PATH=$PATH" \
+      -- bash -c 'claude --model "$1" -p "$2" --output-format json >"$3" 2>"$3.stderr"' _ \
+        "$model" "$prompt" "$out_file" &
+    pgid=$!
+    wait "$pgid"
+    rc=$?
+  else
+    # Fallback (legacy-cron / non-systemd environments): setsid gives the
+    # whole tree (claude + any bash children it spawns) its OWN process
+    # group, independent of this daemon's own — timeout's --kill-after below
+    # then has a single group to aim at. Backstop explicit group kill after
+    # `wait` covers anything that outlives timeout's own signal delivery
+    # (claude-code#29096: a bare SIGTERM to just the immediate child has been
+    # observed to orphan bash children). NOTE: a process group is NOT a
+    # cgroup — this path still dies WITH the daemon's own service cgroup on a
+    # restart/crash/reboot; that's exactly the gap the systemd-run branch
+    # above closes when it's available.
+    setsid timeout --kill-after=30s "$timeout_dur" \
+      claude --model "$model" -p "$prompt" --output-format json \
+      >"$out_file" 2>"$out_file.stderr" &
+    pgid=$!
+    wait "$pgid"
+    rc=$?
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+  fi
 
   local session_id; session_id="$(extract_session_id "$out_file")"
 
@@ -431,6 +598,12 @@ main() {
     append_ledger "unknown" "" "startup" "$(date -u +%FT%TZ)" "result=env-error"
   fi
   log "starting (LOOP_MODEL=${LOOP_MODEL:-sonnet} GATES_FILE=${GATES_FILE:-<default>} LOOP_DRIVER_TIMEOUT=${LOOP_DRIVER_TIMEOUT:-90m})"
+  # Startup re-attach (issue #119 pt 3): BEFORE the first run_once, catch any
+  # driver a previous (now-dead) daemon process left running as a transient
+  # systemd unit — never double-spawn it, never let a fresh tick's census
+  # silently forget it either. No-op when systemd/`systemctl --user` isn't
+  # usable here.
+  reattach_orphaned_drivers
   local iterations=0
   local max_iterations="${LOOP_DAEMON_MAX_ITERATIONS:-0}"
   while :; do
