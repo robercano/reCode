@@ -16,6 +16,23 @@ resolve_roots_src="$script_dir/resolve-roots.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/loop-halt-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+# --- curated PATH (post-review finding #4) -----------------------------------
+# Scenario 2 needs systemctl to be genuinely ABSENT so it deterministically
+# hits the "systemd unavailable" degrade branch — a plain `PATH=/usr/bin:/bin`
+# still resolves the real host's own systemctl on essentially every Linux/CI
+# host, including this sandbox, which made scenario 2's assertion a no-op
+# everywhere it actually needed to run. Build a curated bin/ that symlinks in
+# ONLY the standard utilities loop-halt.sh + resolve-roots.sh actually need
+# from the real /usr/bin:/bin, deliberately EXCLUDING systemctl/systemd-run —
+# mirrors loop-daemon.test.sh's own curated_bin technique exactly.
+curated_bin="$work/curated-bin"
+mkdir -p "$curated_bin"
+for tool in bash sh cat sed awk grep head tail tr wc mkdir mktemp rm date printf \
+  kill git sleep basename dirname cut sort uniq env true false; do
+  real="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$real" ] && ln -sf "$real" "$curated_bin/$tool"
+done
+
 fail=0
 ok=0
 check() {
@@ -73,22 +90,16 @@ check "scenario 1: no systemctl call was made for -h" [ ! -f "$dir1/systemctl.ca
 
 # ---------------------------------------------------------------------------
 # 2. No systemctl on PATH at all: degrades cleanly, exit 0, explanatory log.
+# Uses $curated_bin (not a bare /usr/bin:/bin) so this DETERMINISTICALLY hits
+# the no-systemctl branch regardless of host — essentially every Linux/CI
+# host (including this sandbox) has a real systemctl on /usr/bin:/bin, which
+# previously made this assertion a silent no-op everywhere it mattered.
 # ---------------------------------------------------------------------------
 dir2="$(new_fixture scenario2)"
-out2="$( ( cd "$dir2" && PATH="/usr/bin:/bin" bash .claude/scripts/loop-halt.sh issue1 2>&1 ) )"
+out2="$( ( cd "$dir2" && PATH="$curated_bin" bash .claude/scripts/loop-halt.sh issue1 2>&1 ) )"
 rc2=$?
-# Real host may or may not have a systemctl on /usr/bin:/bin — this scenario
-# only makes a strong assertion when it genuinely doesn't; skip gracefully
-# otherwise rather than false-failing on a host where systemctl happens to
-# live in /usr/bin (the systemd-available path is covered by scenarios 3-6
-# below via an explicit stub regardless of the host).
-if ! command -v systemctl >/dev/null 2>&1; then
-  check "scenario 2 (no systemctl anywhere): exit 0" [ "$rc2" -eq 0 ]
-  check "scenario 2: explains systemd is unavailable" bash -c 'printf "%s" "$1" | grep -qi "systemctl not found"' _ "$out2"
-else
-  echo "ok - scenario 2 (host has a real systemctl on PATH — degrade-cleanly path exercised via the stubbed scenarios instead)"
-  ok=$((ok + 1))
-fi
+check "scenario 2 (no systemctl anywhere): exit 0" [ "$rc2" -eq 0 ]
+check "scenario 2: explains systemd is unavailable" bash -c 'printf "%s" "$1" | grep -qi "systemctl not found"' _ "$out2"
 
 # ---------------------------------------------------------------------------
 # 3. loop-halt.sh issue106 -> stops pr-loop-driver-issue106.

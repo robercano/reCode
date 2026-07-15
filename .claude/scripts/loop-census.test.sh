@@ -42,6 +42,21 @@ resolve_roots_src="$script_dir/resolve-roots.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/loop-census-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+# --- curated PATH (post-review finding #5) -----------------------------------
+# The driver_unit_active guard scenario (b) below needs systemctl to be
+# genuinely ABSENT so it deterministically hits the no-op/fallback branch,
+# regardless of what the real host has on /usr/bin:/bin (essentially every
+# Linux/CI host, including this sandbox) — mirrors loop-daemon.test.sh's own
+# curated_bin technique, with `node` added since loop-census.sh shells out to
+# it directly for its adapter-derived facts.
+curated_bin="$work/curated-bin"
+mkdir -p "$curated_bin"
+for tool in bash sh cat sed awk grep head tail tr wc mkdir mktemp rm date printf \
+  kill git sleep basename dirname cut sort uniq env true false node; do
+  real="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$real" ] && ln -sf "$real" "$curated_bin/$tool"
+done
+
 fail=0
 ok=0
 check() {
@@ -163,6 +178,89 @@ check "issue 100 (local branch, already has an open PR, exact-match control) is 
 check "exactly one in_flight line total (only issue 42 qualifies)" bash -c '[ "$(printf "%s\n" "$1" | grep -c "^in_flight=")" -eq 1 ]' _ "$out"
 check "planned_issues=4 counted" bash -c 'printf "%s\n" "$1" | grep -qx "planned_issues=4"' _ "$out"
 check "issue=42 branch line shows the origin-prefixed remote-tracking name" bash -c 'printf "%s\n" "$1" | grep -q "^issue=42 branch=origin/feat/issue-42-y"' _ "$out"
+
+# ---------------------------------------------------------------------------
+# driver_unit_active guard (issue #119 post-review finding #5): loop-census.sh
+# must never report advance_ready for an issue whose transient driver unit
+# (pr-loop-driver-issue<N>, spawned by loop-daemon.sh's run_driver) is
+# currently active — the driver may not have reached `git checkout -b` yet, so
+# it has no branch for the in_flight check above to catch, and a second tick
+# would otherwise double-spawn an orchestrator for the same issue.
+#
+# build_guard_fixture: like fixture1 above but with two planned issues (5, 6),
+# NEITHER with a branch nor an open PR — with the guard disabled,
+# advance_ready would always report "5" (lowest-numbered), which is exactly
+# what lets scenario (a) below prove the guard actually skips it in favor of
+# issue 6.
+# ---------------------------------------------------------------------------
+build_guard_fixture() {
+  local name="$1"
+  local dir="$work/$name"
+  local scripts="$dir/.claude/scripts"
+  mkdir -p "$scripts"
+  cp "$census_src" "$scripts/loop-census.sh"
+  cp "$resolve_roots_src" "$scripts/resolve-roots.sh"
+  cat > "$dir/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+  cat > "$scripts/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs at all
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    printf '5\tplanned,module:test\tIssue five\n'
+    printf '6\tplanned,module:test\tIssue six\n'
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$scripts"/*.sh
+  git -C "$dir" init -q -b main
+  git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+  printf '%s\n' "$dir"
+}
+
+# (a) issue 5's driver unit is active (systemctl stub answers "active") ->
+#     excluded from advance_ready, which falls through to issue 6 instead.
+dirA="$(build_guard_fixture guardA)"
+mkdir -p "$dirA/bin"
+cat > "$dirA/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"is-active pr-loop-driver-issue5"*) echo "active"; exit 0 ;;
+  *"is-active"*) echo "inactive"; exit 3 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$dirA/bin/systemctl"
+outA="$(env -u GATES_FILE PATH="$dirA/bin:$PATH" bash "$dirA/.claude/scripts/loop-census.sh" "acme/repo")"
+check "driver_unit_active guard (a): issue 5's active driver unit excludes it from advance_ready" bash -c '
+  ! printf "%s\n" "$1" | grep -qx "advance_ready=5"' _ "$outA"
+check "driver_unit_active guard (a): advance_ready falls through to issue 6 instead" bash -c '
+  printf "%s\n" "$1" | grep -qx "advance_ready=6"' _ "$outA"
+
+# (b) systemctl unavailable entirely (curated PATH, no stub) -> the guard
+#     cleanly no-ops (command -v systemctl fails, driver_unit_active always
+#     reports "not active"), so advance_ready falls back to prior behavior:
+#     issue 5 (lowest-numbered, no branch, no open PRs).
+dirB="$(build_guard_fixture guardB)"
+outB="$(env -u GATES_FILE PATH="$curated_bin" bash "$dirB/.claude/scripts/loop-census.sh" "acme/repo")"
+check "driver_unit_active guard (b): systemctl unavailable — guard no-ops, advance_ready falls back to issue 5" bash -c '
+  printf "%s\n" "$1" | grep -qx "advance_ready=5"' _ "$outB"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

@@ -73,6 +73,35 @@
 # ADVANCE an issue whose driver unit is currently active. Ops helper:
 # `.claude/scripts/loop-halt.sh` stops one/all/everything by hand.
 #
+# POST-REVIEW HARDENING (issue #119, second pass) — three gaps in the above:
+#   (1) rc NORMALIZATION: `systemd-run --wait` relays `143` (128+SIGTERM) for
+#       a unit killed by hitting its `RuntimeMaxSec` ceiling — NOT GNU
+#       timeout's `124`/`137`. Left unnormalized, the `case "$rc" in 124|137)`
+#       classification below never matches on the systemd path, so a real
+#       timeout got ledgered as a plain `result=exit rc=143` AND wrongly
+#       routed into `verify_and_classify_post_exit` (which deliberately skips
+#       124/137/127 — a killed driver has no work product to verify yet).
+#       `run_driver` now queries the unit's own `Result` property right after
+#       `wait` returns and normalizes rc to 124 when it reads `timeout`, so
+#       both spawn paths converge on the identical downstream classification.
+#   (2) SPAWN/CONNECT FAILURE: branch selection was presence-based
+#       (`command -v systemd-run`), not reachability-based — on a systemd host
+#       where the `--user` bus is unreachable (classic cron with no
+#       XDG_RUNTIME_DIR/session, or the user manager not running/lingering),
+#       `systemd-run --user --wait` fails to connect with no fallback, and the
+#       driver never spawns at all. `run_driver` now has the wrapped command
+#       touch a start-marker file as its very first action; if that marker
+#       never appears after `wait` returns, the driver never actually started
+#       under the unit (a spawn/connect failure, not a genuine driver exit),
+#       and `run_driver` falls through to the exact setsid+timeout fallback so
+#       the driver still actually runs, exactly once.
+#   (3) UNIT NAME COLLISION: a deterministic unit name can collide with a
+#       lingering `failed` unit from a previous run (invisible to
+#       `--state=active` reattach/census checks). `run_driver` now runs
+#       `systemctl --user reset-failed <unit>` (best-effort, ignored on
+#       failure) immediately before every spawn — the #2 fallback above still
+#       catches this failure mode even if a stale unit somehow survives that.
+#
 # Env:
 #   LOOP_MODEL                   model for the driver (default sonnet; read by loop-event.sh)
 #   GATES_FILE                   adapter override, passed straight through the environment
@@ -477,25 +506,79 @@ run_driver() {
     # backgrounded job, but the driver's actual parent is the `--user`
     # manager, not this daemon process. A daemon restart/crash kills only
     # this waiter; the driver keeps running in its own scope, unaffected.
-    # --collect unloads the unit right after it stops (no manual
-    # `systemctl --user reset-failed` bookkeeping). RuntimeMaxSec is the hard
-    # wall-clock ceiling, enforced by the user manager — it replaces `timeout`
-    # and, unlike `timeout`, survives even if the daemon itself never comes
-    # back. --setenv threads PATH and the fail-fast bg-wait ceiling into the
-    # unit's own environment: transient units do NOT inherit the caller's
-    # shell environment the way a plain backgrounded child would.
+    # --collect unloads the unit right after it stops. RuntimeMaxSec is the
+    # hard wall-clock ceiling, enforced by the user manager — it replaces
+    # `timeout` and, unlike `timeout`, survives even if the daemon itself
+    # never comes back. --setenv threads PATH and the fail-fast bg-wait
+    # ceiling into the unit's own environment: transient units do NOT inherit
+    # the caller's shell environment the way a plain backgrounded child would.
     local unit; unit="$(driver_unit_name "$verdict")"
+    # Post-review finding #3: clear any lingering `failed` state under this
+    # exact deterministic unit name (e.g. a stale unit left behind by a prior
+    # driver for the same issue/PR) BEFORE spawning — a spawn into a name
+    # still occupied by a `failed` unit can otherwise hard-fail with no
+    # fallback. Best-effort; a normal --collect run never leaves one behind.
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+    fi
     log "spawning driver via transient systemd unit ($unit, RuntimeMaxSec=$timeout_dur)"
+    # Post-review finding #2: a plain temp file the WRAPPED command touches as
+    # its very first action, before claude itself runs. Its presence after
+    # `wait` returns below is how run_driver tells "the driver process
+    # genuinely started under this unit" apart from "systemd-run itself never
+    # got to spawn it at all" — e.g. no reachable `--user` bus (classic cron
+    # with no XDG_RUNTIME_DIR/session, or the user manager not
+    # running/lingering). Both failure modes otherwise look identical: some
+    # nonzero rc, no driver output, no other signal to tell them apart.
+    local start_marker; start_marker="$(mktemp -u "$state_dir/.driver-started.XXXXXX")"
     systemd-run --user --wait --collect --quiet \
       --unit="$unit" \
       -p "RuntimeMaxSec=$timeout_dur" \
       --setenv="CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" \
       --setenv="PATH=$PATH" \
-      -- bash -c 'claude --model "$1" -p "$2" --output-format json >"$3" 2>"$3.stderr"' _ \
-        "$model" "$prompt" "$out_file" &
+      -- bash -c 'touch "$4"; claude --model "$1" -p "$2" --output-format json >"$3" 2>"$3.stderr"' _ \
+        "$model" "$prompt" "$out_file" "$start_marker" &
     pgid=$!
     wait "$pgid"
     rc=$?
+
+    if [ ! -f "$start_marker" ]; then
+      # Post-review finding #2 (continued): the driver never actually started
+      # under the unit — degrade EXACTLY like the "no systemd-run on PATH"
+      # branch below: fall through to setsid+timeout so the driver still
+      # actually runs, exactly once, instead of silently ledgering a phantom
+      # spawn/connect-error rc.
+      log "systemd-run failed to spawn the driver unit '$unit' (rc=$rc, no start-marker seen) — falling back to setsid+timeout"
+      setsid timeout --kill-after=30s "$timeout_dur" \
+        claude --model "$model" -p "$prompt" --output-format json \
+        >"$out_file" 2>"$out_file.stderr" &
+      pgid=$!
+      wait "$pgid"
+      rc=$?
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+    else
+      rm -f "$start_marker"
+      # Post-review finding #1: `systemd-run --wait` relays `143`
+      # (128+SIGTERM) for a unit killed by hitting its RuntimeMaxSec ceiling —
+      # NOT GNU timeout's `124`/`137`. Left unnormalized, the rc
+      # classification below (`case 124|137`) never matches on this path: a
+      # real timeout gets ledgered as a plain `result=exit rc=143` AND
+      # wrongly routed into verify_and_classify_post_exit (which deliberately
+      # skips 124/137/127 — there's no work product to verify yet on a killed
+      # driver). Query the unit's own Result property (best-effort — a
+      # --collect unit can already be garbage-collected by the time we ask,
+      # same caveat wait_for_driver_unit documents above) to detect it and
+      # normalize rc so BOTH spawn paths converge on the identical downstream
+      # classification.
+      if [ "$rc" -ne 0 ] && command -v systemctl >/dev/null 2>&1; then
+        local systemd_result
+        systemd_result="$(systemctl --user show -p Result --value "$unit" 2>/dev/null || true)"
+        if [ "$systemd_result" = "timeout" ]; then
+          log "systemd RuntimeMaxSec ceiling hit for $unit (rc=$rc) — normalizing to rc=124 for ledger/verify classification"
+          rc=124
+        fi
+      fi
+    fi
   else
     # Fallback (legacy-cron / non-systemd environments): setsid gives the
     # whole tree (claude + any bash children it spawns) its OWN process

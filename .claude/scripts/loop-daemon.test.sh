@@ -39,7 +39,7 @@ trap 'rm -rf "$work"' EXIT
 curated_bin="$work/curated-bin"
 mkdir -p "$curated_bin"
 for tool in bash sh cat sed awk grep head tail tr wc mkdir mktemp rm date printf \
-  kill git sleep basename dirname cut sort uniq env true false; do
+  kill git sleep basename dirname cut sort uniq env true false touch; do
   real="$(command -v "$tool" 2>/dev/null || true)"
   [ -n "$real" ] && ln -sf "$real" "$curated_bin/$tool"
 done
@@ -706,6 +706,110 @@ check "scenario 13: systemctl was polled (list-units + is-active + show)" bash -
 check "scenario 13: exactly one ledger line (the re-attach line only)" [ "$(wc -l < "$ledger13" 2>/dev/null || echo 0)" -eq 1 ]
 check "scenario 13: ledger records the reattached verdict, rc=0, pr=301, reattached=true" bash -c '
   grep -Eq "^pid=unknown session=unknown verdict=advance issue=300 ts=[0-9T:Z-]+ result=exit rc=0 pr=301 reattached=true$" "$1"' _ "$ledger13"
+
+# ---------------------------------------------------------------------------
+# 14. rc normalization (issue #119 post-review finding #1): a systemd-enforced
+#     RuntimeMaxSec timeout relays rc=143 (128+SIGTERM) from `systemd-run
+#     --wait`, NOT GNU timeout's 124/137. A fake systemd-run stub simulates
+#     this (it genuinely runs the wrapped command — the start-marker gets
+#     touched, claude actually runs — but always reports rc=143 regardless of
+#     the wrapped command's real exit code), and a fake systemctl stub answers
+#     the unit's own `Result` property as "timeout". Assert: the ledger
+#     records the NORMALIZED result=timeout rc=124 (not rc=143), and
+#     verify_and_classify_post_exit was SKIPPED (no pr=/debris= fields) —
+#     exactly like the fallback path's genuine 124/137 case, converging both
+#     spawn paths on the identical downstream classification.
+# ---------------------------------------------------------------------------
+prompt14_dir="$work/scenario14-support"
+mkdir -p "$prompt14_dir"
+printf 'Run the ADVANCE step for issue #400.\n' > "$prompt14_dir/prompt.txt"
+dir14="$(new_fixture scenario14 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=400'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt14_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir14" systemd-run '#!/usr/bin/env bash
+echo "systemd-run-args:$*" >> "'"$dir14"'/systemd-run.args"
+args=("$@")
+i=0
+for a in "${args[@]}"; do
+  [ "$a" = "--" ] && break
+  i=$((i + 1))
+done
+"${args[@]:$((i + 1))}" >/dev/null 2>&1
+exit 143'
+fake_bin "$dir14" systemctl '#!/usr/bin/env bash
+echo "systemctl-args:$*" >> "'"$dir14"'/systemctl.calls"
+case "$*" in
+  *"reset-failed"*) exit 0 ;;
+  *"-p Result"*) echo "timeout"; exit 0 ;;
+  *) exit 0 ;;
+esac'
+fake_bin "$dir14" claude '#!/usr/bin/env bash
+echo "claude-ran args=$*" >> "'"$dir14"'/claude.marker"
+echo "{\"session_id\":\"sess-400\",\"result\":\"ok\"}"
+exit 0'
+# bot-gh.sh deliberately NOT stubbed — verify_and_classify_post_exit must
+# never even reach it for a (normalized) timeout rc.
+run_daemon_once "$dir14" >/dev/null 2>&1
+ledger14="$dir14/.claude/state/loop-runs.log"
+check "scenario 14 (rc normalization): claude stub still ran (real work happened before the kill)" [ -f "$dir14/claude.marker" ]
+check "scenario 14: systemctl Result property was queried" bash -c 'grep -qF -- "-p Result" "$1"' _ "$dir14/systemctl.calls"
+check "scenario 14: ledger normalizes rc=143 -> result=timeout rc=124" bash -c '
+  grep -Eq "verdict=advance issue=400 ts=[0-9T:Z-]+ result=timeout rc=124$" "$1"' _ "$ledger14"
+check "scenario 14: verify_and_classify_post_exit was skipped (no pr=/debris= fields)" bash -c '
+  ! grep -Eq "pr=|debris=" "$1"' _ "$ledger14"
+
+# ---------------------------------------------------------------------------
+# 15. Spawn/connect failure fallback (issue #119 post-review finding #2): a
+#     fake systemd-run stub simulates a --user bus connect failure — it
+#     records its invocation but NEVER execs the wrapped command at all (no
+#     start-marker ever appears), exiting 1 exactly like a real connect
+#     failure would (e.g. classic cron with no XDG_RUNTIME_DIR/session, or the
+#     user manager not running/lingering). Assert: run_driver detects the
+#     missing start-marker and falls through to the setsid+timeout fallback,
+#     so the driver still actually runs exactly once (setsid/timeout/claude
+#     stubs all invoked), and the ledger records a genuine result — NOT a
+#     spawn-error or a phantom.
+# ---------------------------------------------------------------------------
+prompt15_dir="$work/scenario15-support"
+mkdir -p "$prompt15_dir"
+printf 'Run the ADVANCE step for issue #500.\n' > "$prompt15_dir/prompt.txt"
+dir15="$(new_fixture scenario15 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=500'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt15_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir15" systemd-run '#!/usr/bin/env bash
+echo "systemd-run-args:$*" >> "'"$dir15"'/systemd-run.args"
+echo "Failed to connect to bus: no such file or directory" >&2
+exit 1'
+fake_bin "$dir15" setsid '#!/usr/bin/env bash
+echo "setsid-ran" >> "'"$dir15"'/setsid.marker"
+exec "$@"'
+fake_bin "$dir15" timeout '#!/usr/bin/env bash
+echo "timeout-ran args=$*" >> "'"$dir15"'/timeout.marker"
+shift; shift
+exec "$@"'
+fake_bin "$dir15" claude '#!/usr/bin/env bash
+echo "claude-ran args=$*" >> "'"$dir15"'/claude.marker"
+echo "{\"session_id\":\"sess-500\",\"result\":\"ok\"}"
+exit 0'
+fake_bot_gh "$dir15" '#!/usr/bin/env bash
+echo "501"
+exit 0'
+run_daemon_once "$dir15" >/dev/null 2>&1
+check "scenario 15 (spawn-failure fallback): systemd-run stub was invoked (attempted first)" [ -f "$dir15/systemd-run.args" ]
+check "scenario 15: fallback setsid stub ran after the connect failure" [ -f "$dir15/setsid.marker" ]
+check "scenario 15: fallback timeout stub ran after the connect failure" [ -f "$dir15/timeout.marker" ]
+check "scenario 15: fallback claude stub actually ran the driver" [ -f "$dir15/claude.marker" ]
+check "scenario 15: claude ran exactly once (no double-spawn)" bash -c '[ "$(wc -l < "$1")" -eq 1 ]' _ "$dir15/claude.marker"
+ledger15="$dir15/.claude/state/loop-runs.log"
+check "scenario 15: ledger records a genuine result via the fallback (NOT spawn-error/phantom)" bash -c '
+  grep -Eq "verdict=advance issue=500 ts=[0-9T:Z-]+ result=exit rc=0 pr=501" "$1"' _ "$ledger15"
+check "scenario 15: ledger never records result=spawn-error" bash -c '! grep -q "spawn-error" "$1"' _ "$ledger15"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
