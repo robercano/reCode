@@ -75,6 +75,66 @@ check "ledger line: empty session_id prints 'unknown'" [ "$line2" = "pid=999 ses
 line3="$(ledger_line 111 sess-x 'advance issue=1' '2026-07-09T02:00:00Z' 'result=timeout rc=124')"
 check "ledger line: timeout result recorded verbatim" [ "$line3" = "pid=111 session=sess-x verdict=advance issue=1 ts=2026-07-09T02:00:00Z result=timeout rc=124" ]
 
+# --- classify_debris (issue #111 pt 2): pure git, fully isolated fixture ----
+# classify_debris uses $2 (worktree_dir) AS the git repo context whenever it's
+# a real directory, so these checks build their own throwaway repo + worktrees
+# (under $work, cleaned up by the top-level trap) and never touch the REAL
+# project's own git state (the sourced $root is the real repo root, but is
+# never reached here because $2 is always given).
+cd_repo="$work/classify-repo"
+mkdir -p "$cd_repo"
+git -C "$cd_repo" init -q -b main
+git -C "$cd_repo" config user.email test@example.com
+git -C "$cd_repo" config user.name test
+git -C "$cd_repo" commit -q --allow-empty -m init
+
+# empty: branch off main, zero extra commits, worktree clean.
+git -C "$cd_repo" branch feat/issue-1-a main
+cd_wt_empty="$work/classify-wt-empty"
+git -C "$cd_repo" worktree add -q "$cd_wt_empty" feat/issue-1-a
+s_empty="$(classify_debris feat/issue-1-a "$cd_wt_empty")"
+check "classify_debris: no commits ahead + clean worktree -> empty" [ "$s_empty" = "empty" ]
+
+# publishable: one commit ahead of main, worktree clean.
+cd_wt_pub="$work/classify-wt-pub"
+git -C "$cd_repo" worktree add -q -b feat/issue-2-a "$cd_wt_pub" main
+( cd "$cd_wt_pub" && echo hi > f.txt && git add f.txt && git -c user.email=test@example.com -c user.name=test commit -q -m work )
+s_pub="$(classify_debris feat/issue-2-a "$cd_wt_pub")"
+check "classify_debris: commits ahead + clean worktree -> publishable" [ "$s_pub" = "publishable" ]
+
+# half-done: one commit ahead of main, worktree DIRTY (uncommitted changes).
+cd_wt_half="$work/classify-wt-half"
+git -C "$cd_repo" worktree add -q -b feat/issue-3-a "$cd_wt_half" main
+( cd "$cd_wt_half" && echo hi > f.txt && git add f.txt && git -c user.email=test@example.com -c user.name=test commit -q -m work && echo more >> f.txt )
+s_half="$(classify_debris feat/issue-3-a "$cd_wt_half")"
+check "classify_debris: commits ahead + dirty worktree -> half-done" [ "$s_half" = "half-done" ]
+
+# half-done (variant): zero commits ahead but worktree DIRTY (uncommitted-only
+# work — never even committed) still counts as resumable, not empty.
+cd_wt_dirty0="$work/classify-wt-dirty0"
+git -C "$cd_repo" branch feat/issue-4-a main
+git -C "$cd_repo" worktree add -q "$cd_wt_dirty0" feat/issue-4-a
+echo untracked > "$cd_wt_dirty0/untracked.txt"
+s_dirty0="$(classify_debris feat/issue-4-a "$cd_wt_dirty0")"
+check "classify_debris: no commits ahead but dirty worktree -> half-done (not empty)" [ "$s_dirty0" = "half-done" ]
+
+# absent: branch simply doesn't exist in that repo.
+s_absent="$(classify_debris feat/issue-999-nope "$cd_wt_empty")"
+check "classify_debris: nonexistent branch -> absent" [ "$s_absent" = "absent" ]
+
+# --- verify_and_classify_post_exit: pure pass-through cases (no bot-gh.sh call) ---
+# These never reach the bot-gh.sh query at all (guarded before it), so they're
+# safe pure-unit checks even though the sourced $script_dir/$root point at the
+# REAL project — no network, no git mutation.
+vp_feedback="$(verify_and_classify_post_exit 'feedback pr=9' 0 'result=exit rc=0')"
+check "verify_and_classify_post_exit: non-advance verdict passes extra through unchanged" [ "$vp_feedback" = "result=exit rc=0" ]
+
+vp_timeout="$(verify_and_classify_post_exit 'advance issue=5' 124 'result=timeout rc=124')"
+check "verify_and_classify_post_exit: timeout rc=124 passes extra through unchanged" [ "$vp_timeout" = "result=timeout rc=124" ]
+
+vp_spawnerr="$(verify_and_classify_post_exit 'advance issue=5' 127 'result=spawn-error rc=127')"
+check "verify_and_classify_post_exit: spawn-error rc=127 passes extra through unchanged" [ "$vp_spawnerr" = "result=spawn-error rc=127" ]
+
 # =============================================================================
 # (B) Integration checks: real subprocess, fake loop-event.sh + fake claude.
 # =============================================================================
@@ -95,6 +155,16 @@ fake_bin() {
   local dir="$1" name="$2" body="$3"
   printf '%s\n' "$body" > "$dir/bin/$name"
   chmod +x "$dir/bin/$name"
+}
+
+fake_bot_gh() {
+  # $1=fixture root $2=script body -> installs a fake .claude/scripts/bot-gh.sh,
+  # since verify_and_classify_post_exit always calls "$script_dir/bot-gh.sh" as
+  # an explicit path (mirroring every OTHER script in this repo's bot-gh.sh
+  # policy), never a bare `bot-gh.sh` resolved off PATH like fake_bin's targets.
+  local dir="$1" body="$2"
+  printf '%s\n' "$body" > "$dir/.claude/scripts/bot-gh.sh"
+  chmod +x "$dir/.claude/scripts/bot-gh.sh"
 }
 
 run_daemon_once() {
@@ -174,17 +244,29 @@ shift # duration (e.g. 90m)
 exec "$@"'
 fake_bin "$dir3" claude '#!/usr/bin/env bash
 echo "claude-ran args=$*" >> "'"$dir3"'/claude.marker"
+echo "$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" > "'"$dir3"'/claude.bg-ceiling-env"
 echo "{\"session_id\":\"sess-fixture-55\",\"result\":\"ok\"}"
+exit 0'
+# Post-exit verification (issue #111) now queries bot-gh.sh for an open PR on
+# every advance verdict that exits without timing out. Stub it as an already-
+# open PR #77, so this scenario's ledger keeps recording a genuine success
+# (result=exit, not phantom) — the phantom/offline/classifier paths get their
+# own dedicated scenarios below.
+fake_bot_gh "$dir3" '#!/usr/bin/env bash
+echo "bot-gh-ran args=$*" >> "'"$dir3"'/bot-gh.marker"
+echo "77"
 exit 0'
 run_daemon_once "$dir3" >/dev/null 2>&1
 check "scenario 3 (advance): setsid stub was invoked" [ -f "$dir3/setsid.marker" ]
 check "scenario 3: timeout stub was invoked" [ -f "$dir3/timeout.marker" ]
 check "scenario 3: claude stub was invoked" [ -f "$dir3/claude.marker" ]
 check "scenario 3: claude stub received the prompt text" bash -c 'grep -qF "issue #55" "$1"' _ "$dir3/claude.marker"
+check "scenario 3: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 was exported to the driver (issue #111 pt 4 fail-fast spawn)" bash -c '
+  [ "$(cat "$1" 2>/dev/null)" = "0" ]' _ "$dir3/claude.bg-ceiling-env"
 ledger3="$dir3/.claude/state/loop-runs.log"
 check "scenario 3: exactly one ledger line was appended" [ "$(wc -l < "$ledger3" 2>/dev/null || echo 0)" -eq 1 ]
-check "scenario 3: ledger line has pid=/session=/verdict=/ts=/result= fields" bash -c '
-  grep -Eq "^pid=[0-9]+ session=sess-fixture-55 verdict=advance issue=55 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"
+check "scenario 3: ledger line has pid=/session=/verdict=/ts=/result=/pr= fields (post-exit verify found PR #77)" bash -c '
+  grep -Eq "^pid=[0-9]+ session=sess-fixture-55 verdict=advance issue=55 ts=[0-9T:Z-]+ result=exit rc=0 pr=77$" "$1"
 ' _ "$ledger3"
 check "scenario 3: prompt file was cleaned up after the driver ran" [ ! -f "$prompt3_dir/prompt.txt" ]
 
@@ -280,6 +362,179 @@ exit 0" >/dev/null
 run_daemon_once_stripped_path "$dir6" "$fake_nvm_dir" >/dev/null 2>&1
 check "scenario 6 (startup PATH resolution): node+claude resolved in child before run_once" [ -f "$dir6/node-resolved.marker" ]
 check "scenario 6: no node-missing marker was left (node/claude never resolved)" [ ! -f "$dir6/node-missing.marker" ]
+
+# ---------------------------------------------------------------------------
+# git_fixture: like new_fixture, but ALSO git-inits the fixture root itself as
+# a real repo with an initial commit on `main` — the repo context
+# verify_and_classify_post_exit's `git -C "$root" ...` calls operate on for
+# scenarios 7-10 below (issue #111 pts 1-2: post-exit verification + the
+# debris classifier need a real branch/worktree to classify, not just a
+# scripted loop-event.sh).
+# ---------------------------------------------------------------------------
+git_fixture() {
+  local name="$1" body="$2"
+  local dir; dir="$(new_fixture "$name" "$body")"
+  git -C "$dir" init -q -b main
+  git -C "$dir" config user.email test@example.com
+  git -C "$dir" config user.name test
+  git -C "$dir" commit -q --allow-empty -m init
+  printf '%s\n' "$dir"
+}
+
+# ---------------------------------------------------------------------------
+# 7. Phantom + debris (no deletion): advance issue=77, claude exits 0, fake
+#    bot-gh.sh reports NO open PR. issue #77's branch is in the `half-done`
+#    state (a commit ahead of main, worktree dirty) — real, unpushed work.
+#    Assert the ledger corrects result=exit -> result=phantom (issue #111 pt
+#    1's ledger-honesty fix) AND records debris=half-done resumable, and
+#    (Case B/C safety) NEITHER the branch NOR its worktree get touched.
+# ---------------------------------------------------------------------------
+prompt7_dir="$work/scenario7-support"
+mkdir -p "$prompt7_dir"
+printf 'Run the ADVANCE step for issue #77.\n' > "$prompt7_dir/prompt.txt"
+dir7="$(git_fixture scenario7 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=77'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt7_dir/prompt.txt'
+exit 0")"
+wt7="$work/scenario7-wt"
+git -C "$dir7" worktree add -q -b feat/issue-77-broken "$wt7" main
+( cd "$wt7" && echo hi > f.txt && git add f.txt && git -c user.email=test@example.com -c user.name=test commit -q -m work && echo dirty >> f.txt )
+fake_bin "$dir7" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir7" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir7" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-77\",\"result\":\"ok\"}"
+exit 0'
+fake_bot_gh "$dir7" '#!/usr/bin/env bash
+# No open PR for this issue — empty stdout, rc=0 (a genuine "queried fine, found nothing").
+exit 0'
+run_daemon_once "$dir7" >/dev/null 2>&1
+ledger7="$dir7/.claude/state/loop-runs.log"
+check "scenario 7 (phantom+half-done): ledger corrects result=exit -> result=phantom rc=0" bash -c '
+  grep -q "result=phantom rc=0" "$1"' _ "$ledger7"
+check "scenario 7: ledger records debris=half-done resumable" bash -c '
+  grep -q "debris=half-done resumable" "$1"' _ "$ledger7"
+check "scenario 7: ledger never claims action=deleted for half-done debris" bash -c '! grep -q "action=deleted" "$1"' _ "$ledger7"
+check "scenario 7 (Case B/C safety): the branch was NOT deleted" bash -c '
+  git -C "$1" rev-parse --verify --quiet refs/heads/feat/issue-77-broken >/dev/null 2>&1' _ "$dir7"
+check "scenario 7: the worktree was NOT removed" [ -d "$wt7" ]
+
+# ---------------------------------------------------------------------------
+# 8. Case A (the ONLY destructive path): advance issue=88, claude exits 0, no
+#    open PR, and issue #88's branch is provably `empty` (no commits ahead of
+#    main, clean worktree) — the #91/#92 half-born-branch incident this whole
+#    feature exists to clean up safely. Assert the branch + worktree ARE
+#    deleted and the ledger records result=phantom ... debris=empty action=deleted.
+# ---------------------------------------------------------------------------
+prompt8_dir="$work/scenario8-support"
+mkdir -p "$prompt8_dir"
+printf 'Run the ADVANCE step for issue #88.\n' > "$prompt8_dir/prompt.txt"
+dir8="$(git_fixture scenario8 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=88'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt8_dir/prompt.txt'
+exit 0")"
+wt8="$work/scenario8-wt"
+git -C "$dir8" branch feat/issue-88-empty main
+git -C "$dir8" worktree add -q "$wt8" feat/issue-88-empty
+fake_bin "$dir8" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir8" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir8" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-88\",\"result\":\"ok\"}"
+exit 0'
+fake_bot_gh "$dir8" '#!/usr/bin/env bash
+exit 0'
+run_daemon_once "$dir8" >/dev/null 2>&1
+ledger8="$dir8/.claude/state/loop-runs.log"
+check "scenario 8 (Case A): ledger records result=phantom rc=0 debris=empty action=deleted" bash -c '
+  grep -q "result=phantom rc=0.*debris=empty.*action=deleted" "$1"' _ "$ledger8"
+check "scenario 8: the empty local branch WAS deleted" bash -c '
+  ! git -C "$1" rev-parse --verify --quiet refs/heads/feat/issue-88-empty >/dev/null 2>&1' _ "$dir8"
+check "scenario 8: the worktree WAS removed" [ ! -d "$wt8" ]
+
+# ---------------------------------------------------------------------------
+# 9. Case C safety, with an open PR (not phantom): advance issue=99, claude
+#    exits 0, bot-gh.sh reports an OPEN PR #42, but issue #99's branch is
+#    `half-done` (unpushed local changes on top of the pushed commit — e.g. a
+#    driver that opened the PR but was killed before pushing a final fixup).
+#    Assert NOTHING gets deleted, the PR is still recorded (not phantom), and
+#    the ledger records debris=half-done resumable.
+# ---------------------------------------------------------------------------
+prompt9_dir="$work/scenario9-support"
+mkdir -p "$prompt9_dir"
+printf 'Run the ADVANCE step for issue #99.\n' > "$prompt9_dir/prompt.txt"
+dir9="$(git_fixture scenario9 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=99'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt9_dir/prompt.txt'
+exit 0")"
+wt9="$work/scenario9-wt"
+git -C "$dir9" worktree add -q -b feat/issue-99-mid "$wt9" main
+( cd "$wt9" && echo hi > f.txt && git add f.txt && git -c user.email=test@example.com -c user.name=test commit -q -m work && echo dirty >> f.txt )
+fake_bin "$dir9" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir9" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir9" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-99\",\"result\":\"ok\"}"
+exit 0'
+fake_bot_gh "$dir9" '#!/usr/bin/env bash
+echo "42"
+exit 0'
+run_daemon_once "$dir9" >/dev/null 2>&1
+ledger9="$dir9/.claude/state/loop-runs.log"
+check "scenario 9 (Case C safety, open PR): ledger records result=exit (NOT phantom), pr=42, debris=half-done resumable" bash -c '
+  grep -Eq "result=exit rc=0 pr=42 debris=half-done resumable" "$1"' _ "$ledger9"
+check "scenario 9: nothing was deleted — branch still exists" bash -c '
+  git -C "$1" rev-parse --verify --quiet refs/heads/feat/issue-99-mid >/dev/null 2>&1' _ "$dir9"
+check "scenario 9: nothing was deleted — worktree still exists" [ -d "$wt9" ]
+
+# ---------------------------------------------------------------------------
+# 10. Graceful degrade: bot-gh.sh is offline/missing entirely (no stub
+#     installed) for an otherwise textbook-empty issue #100 branch. Assert
+#     verify_and_classify_post_exit NEVER falsely declares phantom and NEVER
+#     deletes anything on a network hiccup — it just records verify=skipped.
+# ---------------------------------------------------------------------------
+prompt10_dir="$work/scenario10-support"
+mkdir -p "$prompt10_dir"
+printf 'Run the ADVANCE step for issue #100.\n' > "$prompt10_dir/prompt.txt"
+dir10="$(git_fixture scenario10 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=100'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt10_dir/prompt.txt'
+exit 0")"
+wt10="$work/scenario10-wt"
+git -C "$dir10" branch feat/issue-100-empty main
+git -C "$dir10" worktree add -q "$wt10" feat/issue-100-empty
+fake_bin "$dir10" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir10" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir10" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-100\",\"result\":\"ok\"}"
+exit 0'
+# Deliberately NO bot-gh.sh stub installed at all in this fixture.
+run_daemon_once "$dir10" >/dev/null 2>&1
+ledger10="$dir10/.claude/state/loop-runs.log"
+check "scenario 10 (offline bot-gh.sh): ledger records verify=skipped, NOT phantom" bash -c '
+  grep -q "verify=skipped" "$1" && ! grep -q "phantom" "$1"' _ "$ledger10"
+check "scenario 10: no debris/action fields were recorded (verify never even ran)" bash -c '
+  ! grep -Eq "debris=|action=deleted" "$1"' _ "$ledger10"
+check "scenario 10: nothing was deleted on the offline path — branch still exists" bash -c '
+  git -C "$1" rev-parse --verify --quiet refs/heads/feat/issue-100-empty >/dev/null 2>&1' _ "$dir10"
+check "scenario 10: nothing was deleted on the offline path — worktree still exists" [ -d "$wt10" ]
 
 echo ""
 if [ "$fail" -eq 0 ]; then
