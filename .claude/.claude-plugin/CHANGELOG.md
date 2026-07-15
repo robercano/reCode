@@ -4,6 +4,43 @@ All notable changes to the `orchestrator` plugin are documented in this file. Fo
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions track `plugin.json` /
 `marketplace.json`.
 
+## [0.2.1] - 2026-07-15
+
+Everything shipped since 0.2.0. Headline: the driver now enforces a one-shot contract (no turn
+ends before a PR exists, with post-exit verification and debris cleanup), worker worktrees and
+branches auto-clean themselves after merge, and the cockpit groups live progress by task.
+
+### Added
+- **Cockpit live-progress grouping by task** (issue #92, PRs #101/#94): groups worker progress by
+  task with issue/PR links and sortable columns.
+- **Worker worktree + branch auto-cleanup after merge** (PRs #112/#91): once a worker's PR merges,
+  its worktree and branch are cleaned up automatically.
+
+### Changed
+- **`arm-loop.sh` → v5** (`fd81eeb`): explicit `--spawn` flag, defaulting to `same-dir`; fixes
+  remote-control blocking on its interactive first-run question inside a detached tmux pane.
+  `claude-rc.service` → v5 in lockstep, consuming the new `--spawn` mode.
+
+### Fixed
+- **Driver one-shot contract** (commit `d37e951`, PRs #111/#118): driver orchestration is
+  foreground-only — the driver's turn does not end before a PR exists — with post-exit
+  verification and a debris classifier that cleans up stray branches/worktrees on failure.
+- **Merged-ness check before worktree cleanup** (`933f202`): auto-cleanup now checks
+  origin-ancestry before deleting a worker's worktree/branch, closing a gap where a locally-merged
+  but not-yet-pushed branch could be deleted prematurely.
+- **Daemon hardening + docs** (issues #106/#107, PRs #117/#119): daemon test scenarios 1/2 made
+  deterministic under claude-less CI; resolved node/claude `PATH` baked into `pr-loop.service`;
+  new WSL2 unattended-autostart docs and driver-death / classify-then-recover unwedge docs.
+
+### Notes for downstream installs
+- Run `/orchestrator:sync` after upgrading to 0.2.1 to pick up the managed-template bumps above —
+  in particular `arm-loop.sh` v5 and `claude-rc.service` v5. Sync reconciles each file
+  independently by its own `@orchestrator-managed <name> vN` marker — it does not key off this
+  plugin version number, so a same-version reinstall is always a no-op and a behind-version
+  install restamps cleanly as long as the local file has no hand-edits.
+- After syncing, re-arm the loop (`arm-loop.sh`) and restart `claude-rc` so the v5 templates take
+  effect.
+
 ## [0.2.0] - 2026-07-10
 
 Everything shipped since 0.1.4. Headline: a cron-less loop daemon replaces the cron-based
