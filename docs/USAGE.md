@@ -156,22 +156,38 @@ which have no interactive tty to prompt at all.
   computed once, in shell, never re-derived by a model). On `action=none` the daemon sleeps and loops —
   **no model/driver process is ever touched**, so a quiet repo costs nothing beyond the tick's own `gh`
   calls. On an actionable verdict (`action=advance issue=N` / `action=feedback pr=N`) it spawns exactly
-  **one** contained driver: `setsid timeout --kill-after=30s <LOOP_DRIVER_TIMEOUT, default 90m> claude
-  --model <model> -p "<verdict-obeying prompt>" --output-format json`. `setsid` gives the driver (and any
-  bash children it spawns) its own process group, independent of the daemon's; on timeout the whole group
-  is targeted, not just the immediate child, so a driver's own children can never be orphaned by a bare
-  `SIGTERM`. **However, a process group is NOT a cgroup**: the driver still lives inside the daemon
-  *service's* cgroup, and systemd's default `KillMode=control-group` kills everything in it whenever the
-  unit stops — so `systemctl --user restart pr-loop-<repo>`, a daemon crash (`Restart=always` bounce), a
-  host reboot/sleep, or `wsl --shutdown` all kill an in-flight driver mid-run, with **no ledger line**
-  (the ledger write is the daemon's last act *after* the driver exits) and the driver's branch/worktree
-  left as debris (see the failure contract below). Before restarting the daemon or the machine, check
-  nothing is in flight: the last `.claude/state/loop-runs.log` spawn has a matching `result=` completion,
-  and `.claude/state/worker-tools.jsonl` has gone quiet. Issue #119 (planned) decouples driver lifetime
-  from the daemon's (one transient systemd unit per driver + startup re-attach) and retires this caveat.
-  The daemon itself never runs two drivers concurrently (it's a single-threaded loop), and
-  `loop-tick.sh`'s own spawn lock additionally guards against a second overlapping tick anywhere else
-  (e.g. the legacy cron armed at the same time) double-firing the same ADVANCE.
+  **one** contained driver, as a **transient `systemd --user` unit, decoupled from the daemon's own
+  lifetime** (issue #119): `systemd-run --user --wait --collect --unit="pr-loop-driver-issue<N>"
+  -p RuntimeMaxSec=<LOOP_DRIVER_TIMEOUT, default 90m> -- bash -c 'claude --model <model> -p "<prompt>"
+  --output-format json > <out-file> 2> <err-file>'` (unit is `pr-loop-driver-pr<N>` for a `feedback`
+  verdict). `--wait` makes the daemon's own invocation a **disposable waiter**: it blocks and relays the
+  unit's exit code exactly like a backgrounded `wait` would, but the driver's REAL parent is the user
+  manager, which lives in its own scope outside the daemon's cgroup — so `systemctl --user restart
+  pr-loop-<repo>`, a daemon crash (`Restart=always` bounce), or the daemon dying for any other reason kills
+  only that disposable waiter, **never the driver itself**. `RuntimeMaxSec` (a systemd time-span — `90m`
+  works as-is) replaces `timeout` as the hard wall-clock ceiling, now enforced by the user manager instead
+  of the daemon, so an orphaned driver still has a real ceiling even if the daemon never restarts.
+  **Restart is now driver-safe** — a host reboot/sleep or `wsl --shutdown` still kills the driver along with
+  everything else (nothing can prevent that), but a plain daemon bounce no longer does. `run_driver`'s
+  ledger + issue #111's post-exit verification are unchanged; only the spawn+wait step branches. **Fallback**
+  (legacy-cron / non-systemd environments, detected via `command -v systemd-run`): the exact `setsid timeout
+  --kill-after=30s <LOOP_DRIVER_TIMEOUT> claude ...` spawn from before #119, unchanged — `setsid` gives the
+  driver (and any bash children it spawns) its own process group, independent of the daemon's; on timeout
+  the whole group is targeted, not just the immediate child, so a driver's own children can never be
+  orphaned by a bare `SIGTERM`. That fallback path still has the pre-#119 caveat: a process group is not a
+  cgroup, so it dies WITH the daemon's own service cgroup on a restart/crash/reboot. **Startup re-attach**:
+  before the first tick, `main()` checks `systemctl --user list-units 'pr-loop-driver-*'` (no-op when
+  systemd is unavailable) — if a driver unit from a previous, now-dead daemon process is still active, the
+  daemon WAITS for it instead of ticking (no duplicate spawn, no premature debris classification), then runs
+  the same post-exit verification + ledger write a fresh spawn would have. `loop-census.sh`'s ADVANCE check
+  additionally never picks an issue whose driver unit is currently active, even before that driver has
+  reached `git checkout -b` (so it has no branch yet for the `in_flight` check to catch). **Ops helper**:
+  `.claude/scripts/loop-halt.sh` stops one driver (`loop-halt.sh issue106` / `loop-halt.sh pr42`), all
+  drivers (`loop-halt.sh --drivers`), or the daemon + all drivers together (`loop-halt.sh --all`) — see the
+  failure contract below for when you'd want each. The daemon itself never runs two drivers concurrently
+  (it's a single-threaded loop), and `loop-tick.sh`'s own spawn lock additionally guards against a second
+  overlapping tick anywhere else (e.g. the legacy cron armed at the same time) double-firing the same
+  ADVANCE.
 - **`claude-rc-<repo>.service`** → `claude remote-control` inside a detached tmux session (`rc-<repo>`), for
   spawning **new planning sessions remotely** — from claude.ai or the Claude Code mobile app — decoupled
   from the loop's own ticking. `arm-loop.sh --capacity N --permission-mode <mode>` controls its
@@ -191,13 +207,16 @@ there's something actionable *now*). `loop-daemon.sh`'s `cadence_to_sleep_second
 Override any of the four via `LOOP_DAEMON_SLEEP_FAST` / `_WATCH` / `_IDLE` / `_FALLBACK` (seconds, test/debug
 hooks).
 
-**Ledger.** Every driver spawn — successful, timed out, or refused-to-spawn — appends one line to
-`.claude/state/loop-runs.log` (gitignored, never committed):
+**Ledger.** Every driver spawn — successful, timed out, refused-to-spawn, or re-attached at startup —
+appends one line to `.claude/state/loop-runs.log` (gitignored, never committed):
 ```
-pid=<pgid> session=<session_id|unknown> verdict=<advance issue=N|feedback pr=N> ts=<ISO8601> [result=exit|timeout|spawn-error rc=N]
+pid=<pgid|unknown> session=<session_id|unknown> verdict=<advance issue=N|feedback pr=N> ts=<ISO8601> [result=exit|timeout|spawn-error rc=N] [pr=N] [debris=... [action=deleted]] [reattached=true]
 ```
 `session_id` is parsed out of the driver's own `--output-format json` stdout, which is what makes a
-hung or already-finished driver resumable later.
+hung or already-finished driver resumable later. A `reattached=true` line (issue #119) means the daemon
+found this driver already running as a systemd unit at startup — left behind by a previous, now-dead
+daemon process — waited for it instead of spawning a new one, and ledgered its real outcome; `pid=unknown`
+on that line because the daemon that actually spawned it is gone.
 
 **Supervision.** Three read-only windows into a driver, cheapest first:
 1. `tail -f .claude/state/loop-runs.log` — the ledger line above, one per spawn.
@@ -209,12 +228,18 @@ hung or already-finished driver resumable later.
    reads the append-only transcript and branches a new one.
 
 **Intervention is kill-and-let-it-re-advance, never steer.** A driver is a headless `claude -p` process with
-no attach point — there is no "type into it and redirect it" option. To stop one: find its `pid=` (a
-process **group** id) in the ledger and `kill -TERM -- -<pgid>` (the same target `timeout --kill-after`
-would eventually use anyway). Do **not** try to nudge a running driver's behavior. Instead, let
-`loop-tick.sh`'s own pre-branch spawn lock (`.claude/state/loop-advance.lock`, 15-minute TTL) self-heal so a
-later tick can re-advance the same issue cleanly, or fix forward with a normal orchestrator pass once
-whatever state the killed driver left behind (a branch, a PR) is visible to a fresh tick.
+no attach point — there is no "type into it and redirect it" option. To stop one: **`bash
+.claude/scripts/loop-halt.sh issue<N>`** (or `pr<N>` for a feedback driver) — `systemctl --user stop
+pr-loop-driver-issue<N>` under the hood (issue #119). This is now the right tool on the systemd path: the
+ledger's `pid=` is the daemon's own disposable `systemd-run --wait` waiter, not the driver, so killing that
+pid does nothing to the actual driver. `loop-halt.sh --drivers` stops every active driver at once;
+`loop-halt.sh --all` also stops the daemon unit. On the legacy fallback path (no `systemd-run` on `PATH`),
+`pid=` is still a real process **group** id and `kill -TERM -- -<pgid>` (the same target `timeout
+--kill-after` would eventually use anyway) still works, same as before #119. Do **not** try to nudge a
+running driver's behavior either way. Instead, let `loop-tick.sh`'s own pre-branch spawn lock
+(`.claude/state/loop-advance.lock`, 15-minute TTL) self-heal so a later tick can re-advance the same issue
+cleanly, or fix forward with a normal orchestrator pass once whatever state the killed driver left behind (a
+branch, a PR) is visible to a fresh tick.
 
 **Remote planning sessions.** `claude-rc-<repo>.service` keeps a `claude remote-control` process alive in a
 detached tmux session, independent of the loop daemon's own ticking, so you can spawn a **new** planning
@@ -256,31 +281,47 @@ duplicate-daemon risk.
 Skipping this is safe: GitHub is the loop's only source of truth, so anything that happened while WSL2 was
 stopped is simply picked up by the first tick after the next manual WSL2 start.
 
-**WSL2 caveat — going down is safe for the QUEUE, not for a driver in flight.** Autostart + linger bring
-the *daemon* back after a reboot, but a Windows reboot, sleep/hibernate, or `wsl --shutdown` that lands
-while a driver is mid-run kills that driver with no ledger line, leaving `in_flight` debris (see the
-failure contract's "Daemon killed mid-driver" row — this exact pattern killed five of six drivers on
-2026-07-14/15). Until #119 lands, prefer rebooting/shutting down when `tail -1
-.claude/state/loop-runs.log` shows the last spawn completed (`result=` present).
+**WSL2 caveat — going down is safe for the QUEUE and for a plain daemon restart, not for a HOST-level
+shutdown while a driver is mid-run.** Issue #119 made a `systemctl --user restart pr-loop-<repo>` (or a
+daemon crash) driver-safe: the transient driver unit lives under the `--user` manager, outside the daemon's
+own cgroup, so bouncing the daemon no longer kills it (this is what actually killed five of six drivers on
+2026-07-14/15, and is now fixed). What #119 can NOT fix: a Windows reboot, sleep/hibernate, or `wsl
+--shutdown` tears down the WHOLE WSL2 VM — user manager included — so a driver mid-run at that moment still
+dies, now with **no ledger line** the same way a hard `kill -9` on any process would. Check
+`systemctl --user list-units 'pr-loop-driver-*'` (or `tail -1 .claude/state/loop-runs.log` for the last
+spawn's completion) before a host-level reboot/shutdown; `bash .claude/scripts/loop-halt.sh --drivers` stops
+any in-flight drivers cleanly first if you'd rather not wait.
 
 Inspect what's armed:
 ```bash
 systemctl --user status pr-loop-<repo>.service
 journalctl --user -u pr-loop-<repo>.service -f
+systemctl --user list-units 'pr-loop-driver-*'   # active driver units (issue #119)
 tail -f .claude/state/loop-runs.log
 tmux attach -t rc-<repo>
 ```
+
+Stop things by hand (issue #119 — see `.claude/scripts/loop-halt.sh`):
+```bash
+bash .claude/scripts/loop-halt.sh issue106     # stop one driver: systemctl --user stop pr-loop-driver-issue106
+bash .claude/scripts/loop-halt.sh pr42         # stop one driver: systemctl --user stop pr-loop-driver-pr42
+bash .claude/scripts/loop-halt.sh --drivers    # stop ALL driver units: systemctl --user stop 'pr-loop-driver-*'
+bash .claude/scripts/loop-halt.sh --all        # stop the daemon unit AND all driver units
+```
+Degrades cleanly (logs and exits 0) when `systemctl --user` is unavailable — the legacy fallback path's
+drivers are plain daemon children, already covered by stopping the daemon itself.
 
 **Failure contract.**
 
 | Failure | Detected as | Self-heals? | Manual fix |
 |---|---|---|---|
 | Driver exits non-zero (gate failure, crash mid-run, …) | ledger `result=exit rc=N` | Yes — the next tick's fresh census decides the next action from scratch | none |
-| Driver runs past `LOOP_DRIVER_TIMEOUT` (default 90m) | ledger `result=timeout rc=124\|137`; `timeout --kill-after=30s` plus an explicit process-group kill | Yes — same as above | none, unless it left a half-finished branch behind — inspect and fix forward |
+| Driver runs past `LOOP_DRIVER_TIMEOUT` (default 90m) | ledger `result=timeout rc=124\|137`; `RuntimeMaxSec` (systemd path) or `timeout --kill-after=30s` plus an explicit process-group kill (fallback path) | Yes — same as above | none, unless it left a half-finished branch behind — inspect and fix forward |
 | `claude` CLI not found on `PATH` (nor via the `nvm` fallback) | ledger `result=spawn-error rc=127`, logged before any spawn attempt | Partially — the pre-branch spawn lock's 15-minute TTL clears and lets a later tick retry, but every retry hits the same missing-`PATH` wall | fix `PATH`/`nvm` in the daemon's environment (e.g. the systemd unit's `Environment=`), then `systemctl --user restart pr-loop-<repo>.service` |
 | `loop-tick.sh` / `loop-event.sh` itself exits non-zero (broken tick) | daemon logs "not spawning a driver on a broken tick", sleeps the fallback cadence, retries | Yes — retried automatically every tick | investigate only if it persists across many ticks |
 | **Driver created `feat/issue-N-*` but died before opening the PR** | census reports `N` as `in_flight`; `loop-tick.sh`'s advance check refuses (`# advance refused: issue=N is in_flight`, logged every single tick) and emits `action=none` | **No** — unlike the pre-branch spawn lock, `in_flight` has no TTL/self-heal; it refuses forever until the branch or a PR's state changes | **Classify first, never blind-delete** (`git log main..<branch>` + worktree status): **empty** (no commits, clean) → delete the branch/worktree, freeing the issue back to `advance_ready`; **publishable** (commits ahead, clean, reviews/gates were green) → re-run the test gate, push, open the PR by hand via `bot-gh.sh` (proven: #107 → PR #117); **half-done or dirty worktree** → never delete — `wip:`-commit to preserve, then finish via a normal orchestrator pass on the existing branch. Issues #111 (classify + mechanical paths) and #98 (resume half-done work) automate this. |
-| **Daemon killed mid-driver** (service restart, daemon crash, host reboot/sleep, `wsl --shutdown`) | ledger shows a spawn with **no `result=` completion line**; `events.jsonl`/`worker-tools.jsonl` activity for the task stops abruptly | **No** — the driver dies with the daemon's cgroup (see the `KillMode` caveat above); the restarted daemon just ticks on, and any branch the driver created wedges as `in_flight` per the row above | avoid restarting the daemon/host while a driver is in flight; recover debris per the row above; #119 (transient unit per driver) removes the restart-collateral case |
+| **Daemon killed mid-driver** (service restart, daemon crash) — **fixed by issue #119** | ledger shows a `reattached=true` line once the daemon restarts and re-attaches, with the driver's real outcome (not a missing/phantom line) | **Yes** — the transient driver unit outlives the daemon's own cgroup; `main()`'s startup re-attach waits for it and runs the same post-exit verify + ledger write a fresh spawn would have | none — this is now self-healing. On the legacy fallback path (no `systemd-run` on `PATH`) the pre-#119 behavior still applies: **no** `result=` completion line, driver dies with the daemon's cgroup; recover debris via the row above |
+| **Host-level kill while a driver is in flight** (reboot, sleep/hibernate, `wsl --shutdown`) — the one case #119 can't fix, since it tears down the `--user` manager too | ledger shows a spawn with **no `result=` completion line**; `events.jsonl`/`worker-tools.jsonl` activity for the task stops abruptly | **No** — there is no process left anywhere to re-attach to; the restarted daemon just ticks on, and any branch the driver created wedges as `in_flight` per the row above | check `systemctl --user list-units 'pr-loop-driver-*'` (or the ledger's last spawn) before a host-level reboot/shutdown, or `loop-halt.sh --drivers` first; recover debris per the `in_flight` row above |
 | `claude-rc-<repo>.service`'s inner `claude remote-control` process crashes | **not detected by systemd** — the unit is `Type=oneshot`/`RemainAfterExit=yes`; systemd only observes `tmux new -d`'s own (successful) exit, never the health of the process running *inside* that tmux session | No | `tmux attach -t rc-<repo>` to check, then `systemctl --user restart claude-rc-<repo>.service` |
 
 **Never run the daemon and the legacy `/pr-loop` cron against the same repo at the same time** —

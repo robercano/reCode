@@ -25,6 +25,25 @@ resolve_roots_src="$script_dir/resolve-roots.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/loop-daemon-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+# --- curated PATH for the sandboxed daemon subprocess (issue #119) ----------
+# Every "no systemd-run stub installed" scenario below relies on `command -v
+# systemd-run` genuinely failing to exercise the FALLBACK (setsid+timeout)
+# spawn path — but the real host this test runs on may well have a genuine
+# (if non-functional, no user bus) systemd-run/systemctl sitting in /usr/bin,
+# which a plain `PATH=".../bin:/usr/bin:/bin"` would still resolve. Build a
+# curated bin/ that symlinks in ONLY the standard utilities loop-daemon.sh +
+# resolve-roots.sh actually need from the real /usr/bin:/bin, deliberately
+# EXCLUDING systemd-run/systemctl — a scenario that wants the systemd path
+# stubs one of those itself into its OWN fixture bin/ (which sits earlier on
+# PATH and so shadows this curated dir).
+curated_bin="$work/curated-bin"
+mkdir -p "$curated_bin"
+for tool in bash sh cat sed awk grep head tail tr wc mkdir mktemp rm date printf \
+  kill git sleep basename dirname cut sort uniq env true false touch; do
+  real="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$real" ] && ln -sf "$real" "$curated_bin/$tool"
+done
+
 fail=0
 ok=0
 check() {
@@ -172,7 +191,18 @@ run_daemon_once() {
   # points inside the fixture (nothing there) so ensure_claude_on_path's nvm
   # fallback can never resolve the HOST's ~/.nvm — otherwise scenarios without
   # a claude stub pass on a dev box with nvm but fail on CI runners without it.
-  ( cd "$1" && PATH="$1/bin:/usr/bin:/bin" NVM_DIR="$1/no-such-nvm" LOOP_DAEMON_MAX_ITERATIONS=1 LOOP_DAEMON_SLEEP_FAST=0 LOOP_DAEMON_SLEEP_WATCH=0 LOOP_DAEMON_SLEEP_IDLE=0 LOOP_DAEMON_SLEEP_FALLBACK=0 bash .claude/scripts/loop-daemon.sh )
+  # PATH uses $curated_bin (not a bare /usr/bin:/bin) so a scenario with no
+  # systemd-run/systemctl stub of its own genuinely sees them as ABSENT
+  # (issue #119's fallback contract), regardless of what the real host has.
+  ( cd "$1" && PATH="$1/bin:$curated_bin" NVM_DIR="$1/no-such-nvm" LOOP_DAEMON_MAX_ITERATIONS=1 LOOP_DAEMON_SLEEP_FAST=0 LOOP_DAEMON_SLEEP_WATCH=0 LOOP_DAEMON_SLEEP_IDLE=0 LOOP_DAEMON_SLEEP_FALLBACK=0 bash .claude/scripts/loop-daemon.sh )
+}
+
+run_daemon_once_env() {
+  # $1=fixture root; remaining args are NAME=VALUE pairs exported IN ADDITION
+  # to run_daemon_once's baseline env (used by the systemd-path scenarios to
+  # set LOOP_DRIVER_TIMEOUT and exercise RuntimeMaxSec passthrough).
+  local dir="$1"; shift
+  ( cd "$dir" && env "$@" PATH="$dir/bin:$curated_bin" NVM_DIR="$dir/no-such-nvm" LOOP_DAEMON_MAX_ITERATIONS=1 LOOP_DAEMON_SLEEP_FAST=0 LOOP_DAEMON_SLEEP_WATCH=0 LOOP_DAEMON_SLEEP_IDLE=0 LOOP_DAEMON_SLEEP_FALLBACK=0 bash .claude/scripts/loop-daemon.sh )
 }
 
 run_daemon_once_stripped_path() {
@@ -535,6 +565,251 @@ check "scenario 10: no debris/action fields were recorded (verify never even ran
 check "scenario 10: nothing was deleted on the offline path — branch still exists" bash -c '
   git -C "$1" rev-parse --verify --quiet refs/heads/feat/issue-100-empty >/dev/null 2>&1' _ "$dir10"
 check "scenario 10: nothing was deleted on the offline path — worktree still exists" [ -d "$wt10" ]
+
+# ---------------------------------------------------------------------------
+# fake_systemd_run: a generic stub that records its full invocation (so a
+# scenario can assert on --unit=/RuntimeMaxSec=/--setenv= verbatim) and then
+# execs whatever follows the "--" marker, mirroring what real `systemd-run
+# --wait` does: block synchronously and relay the wrapped command's own exit
+# code as its own (issue #119 pts 1/2: transient-unit spawn + fallback).
+# ---------------------------------------------------------------------------
+fake_systemd_run() {
+  local dir="$1"
+  fake_bin "$dir" systemd-run '#!/usr/bin/env bash
+echo "systemd-run-args:$*" >> "'"$dir"'/systemd-run.args"
+args=("$@")
+i=0
+for a in "${args[@]}"; do
+  [ "$a" = "--" ] && break
+  i=$((i + 1))
+done
+exec "${args[@]:$((i + 1))}"'
+}
+
+# ---------------------------------------------------------------------------
+# 11. Transient systemd unit path (issue #119 pt 1): advance issue=200, a
+#     systemd-run stub IS installed (so `command -v systemd-run` succeeds).
+#     Assert: unit naming derived from the verdict (pr-loop-driver-issue200),
+#     RuntimeMaxSec threaded from LOOP_DRIVER_TIMEOUT, the fail-fast bg-wait
+#     ceiling passed via --setenv, exit-code propagation into the ledger, and
+#     that setsid/timeout (the fallback path) were NEVER invoked.
+# ---------------------------------------------------------------------------
+prompt11_dir="$work/scenario11-support"
+mkdir -p "$prompt11_dir"
+printf 'Run the ADVANCE step for issue #200.\n' > "$prompt11_dir/prompt.txt"
+dir11="$(new_fixture scenario11 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=200'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt11_dir/prompt.txt'
+exit 0")"
+fake_systemd_run "$dir11"
+fake_bin "$dir11" claude '#!/usr/bin/env bash
+echo "claude-ran args=$*" >> "'"$dir11"'/claude.marker"
+echo "{\"session_id\":\"sess-200\",\"result\":\"ok\"}"
+exit 0'
+fake_bot_gh "$dir11" '#!/usr/bin/env bash
+echo "205"
+exit 0'
+run_daemon_once_env "$dir11" LOOP_DRIVER_TIMEOUT=45m >/dev/null 2>&1
+check "scenario 11 (systemd-run path): stub was invoked" [ -f "$dir11/systemd-run.args" ]
+check "scenario 11: unit name derived from the verdict (pr-loop-driver-issue200)" bash -c '
+  grep -qF -- "--unit=pr-loop-driver-issue200" "$1"' _ "$dir11/systemd-run.args"
+check "scenario 11: RuntimeMaxSec threaded from LOOP_DRIVER_TIMEOUT=45m" bash -c '
+  grep -qF -- "RuntimeMaxSec=45m" "$1"' _ "$dir11/systemd-run.args"
+check "scenario 11: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS passed via --setenv (issue #111 pt 4 preserved)" bash -c '
+  grep -qF -- "--setenv=CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0" "$1"' _ "$dir11/systemd-run.args"
+check "scenario 11: claude stub was invoked (under the transient unit)" [ -f "$dir11/claude.marker" ]
+check "scenario 11: claude stub received the prompt text" bash -c 'grep -qF "issue #200" "$1"' _ "$dir11/claude.marker"
+check "scenario 11: setsid (fallback path) was NOT invoked" [ ! -f "$dir11/setsid.marker" ]
+check "scenario 11: timeout (fallback path) was NOT invoked" [ ! -f "$dir11/timeout.marker" ]
+ledger11="$dir11/.claude/state/loop-runs.log"
+check "scenario 11: ledger records rc=0 propagated + pr=205 (post-exit verify)" bash -c '
+  grep -Eq "verdict=advance issue=200 ts=[0-9T:Z-]+ result=exit rc=0 pr=205" "$1"' _ "$ledger11"
+
+# ---------------------------------------------------------------------------
+# 12. Transient systemd unit path, feedback verdict: unit naming derived as
+#     pr-loop-driver-pr<N> (not pr-loop-driver-issue<N>), and exit-code
+#     propagation still lands in the ledger for a non-advance verdict too.
+# ---------------------------------------------------------------------------
+prompt12_dir="$work/scenario12-support"
+mkdir -p "$prompt12_dir"
+printf 'Run the ADDRESS FEEDBACK step for PR #201.\n' > "$prompt12_dir/prompt.txt"
+dir12="$(new_fixture scenario12 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=feedback pr=201'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt12_dir/prompt.txt'
+exit 0")"
+fake_systemd_run "$dir12"
+fake_bin "$dir12" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-201\",\"result\":\"ok\"}"
+exit 0'
+run_daemon_once "$dir12" >/dev/null 2>&1
+check "scenario 12: unit name derived from a feedback verdict (pr-loop-driver-pr201)" bash -c '
+  grep -qF -- "--unit=pr-loop-driver-pr201" "$1"' _ "$dir12/systemd-run.args"
+ledger12="$dir12/.claude/state/loop-runs.log"
+check "scenario 12: ledger records the feedback verdict with rc=0 propagated" bash -c '
+  grep -Eq "verdict=feedback pr=201 ts=[0-9T:Z-]+ result=exit rc=0" "$1"' _ "$ledger12"
+
+# ---------------------------------------------------------------------------
+# 13. Startup re-attach (issue #119 pt 3): a driver unit for issue #300 is
+#     ALREADY active (left running by a previous, now-dead daemon) when this
+#     daemon process starts. A fake `systemctl` stub answers list-units with
+#     that one active unit, then is-active as already finished, then show
+#     with ExecMainCode=exited/ExecMainStatus=0. Assert: NO new driver is
+#     spawned (no systemd-run/setsid/timeout/claude invocation at all), the
+#     re-attach waits and runs the SAME post-exit verify + ledger path a
+#     fresh spawn would have (pr=301 found via the fake bot-gh.sh), and the
+#     ledger is tagged reattached=true.
+# ---------------------------------------------------------------------------
+dir13="$(new_fixture scenario13 "#!/usr/bin/env bash
+echo 'cadence=IDLE cron=*/15 * * * *'
+echo 'loop-event: action=none'
+exit 0")"
+fake_bin "$dir13" systemctl '#!/usr/bin/env bash
+echo "systemctl-args:$*" >> "'"$dir13"'/systemctl.calls"
+case "$*" in
+  *list-units*)
+    echo "pr-loop-driver-issue300.service loaded active running Driver for issue 300"
+    exit 0
+    ;;
+  *is-active*)
+    echo "failed"
+    exit 1
+    ;;
+  *"-p ExecMainCode"*)
+    echo "exited"
+    exit 0
+    ;;
+  *"-p ExecMainStatus"*)
+    echo "0"
+    exit 0
+    ;;
+esac
+exit 0'
+# Present but never expected to run — its mere presence lets main()'s startup
+# ensure_claude_on_path succeed so the ONLY ledger line is the re-attach one.
+fake_bin "$dir13" claude '#!/usr/bin/env bash
+echo "claude-should-not-run" >> "'"$dir13"'/claude.should-not-run"
+exit 0'
+fake_bot_gh "$dir13" '#!/usr/bin/env bash
+echo "301"
+exit 0'
+run_daemon_once "$dir13" >/dev/null 2>&1
+ledger13="$dir13/.claude/state/loop-runs.log"
+check "scenario 13 (startup re-attach): claude was NEVER invoked (no duplicate spawn)" [ ! -f "$dir13/claude.should-not-run" ]
+check "scenario 13: no systemd-run/setsid/timeout marker (no fresh spawn attempted)" bash -c '
+  [ ! -f "$1/systemd-run.args" ] && [ ! -f "$1/setsid.marker" ] && [ ! -f "$1/timeout.marker" ]' _ "$dir13"
+check "scenario 13: systemctl was polled (list-units + is-active + show)" bash -c '
+  grep -q "list-units" "$1" && grep -q "is-active" "$1" && grep -q "show" "$1"' _ "$dir13/systemctl.calls"
+check "scenario 13: exactly one ledger line (the re-attach line only)" [ "$(wc -l < "$ledger13" 2>/dev/null || echo 0)" -eq 1 ]
+check "scenario 13: ledger records the reattached verdict, rc=0, pr=301, reattached=true" bash -c '
+  grep -Eq "^pid=unknown session=unknown verdict=advance issue=300 ts=[0-9T:Z-]+ result=exit rc=0 pr=301 reattached=true$" "$1"' _ "$ledger13"
+
+# ---------------------------------------------------------------------------
+# 14. rc normalization (issue #119 post-review finding #1): a systemd-enforced
+#     RuntimeMaxSec timeout relays rc=143 (128+SIGTERM) from `systemd-run
+#     --wait`, NOT GNU timeout's 124/137. A fake systemd-run stub simulates
+#     this (it genuinely runs the wrapped command — the start-marker gets
+#     touched, claude actually runs — but always reports rc=143 regardless of
+#     the wrapped command's real exit code), and a fake systemctl stub answers
+#     the unit's own `Result` property as "timeout". Assert: the ledger
+#     records the NORMALIZED result=timeout rc=124 (not rc=143), and
+#     verify_and_classify_post_exit was SKIPPED (no pr=/debris= fields) —
+#     exactly like the fallback path's genuine 124/137 case, converging both
+#     spawn paths on the identical downstream classification.
+# ---------------------------------------------------------------------------
+prompt14_dir="$work/scenario14-support"
+mkdir -p "$prompt14_dir"
+printf 'Run the ADVANCE step for issue #400.\n' > "$prompt14_dir/prompt.txt"
+dir14="$(new_fixture scenario14 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=400'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt14_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir14" systemd-run '#!/usr/bin/env bash
+echo "systemd-run-args:$*" >> "'"$dir14"'/systemd-run.args"
+args=("$@")
+i=0
+for a in "${args[@]}"; do
+  [ "$a" = "--" ] && break
+  i=$((i + 1))
+done
+"${args[@]:$((i + 1))}" >/dev/null 2>&1
+exit 143'
+fake_bin "$dir14" systemctl '#!/usr/bin/env bash
+echo "systemctl-args:$*" >> "'"$dir14"'/systemctl.calls"
+case "$*" in
+  *"reset-failed"*) exit 0 ;;
+  *"-p Result"*) echo "timeout"; exit 0 ;;
+  *) exit 0 ;;
+esac'
+fake_bin "$dir14" claude '#!/usr/bin/env bash
+echo "claude-ran args=$*" >> "'"$dir14"'/claude.marker"
+echo "{\"session_id\":\"sess-400\",\"result\":\"ok\"}"
+exit 0'
+# bot-gh.sh deliberately NOT stubbed — verify_and_classify_post_exit must
+# never even reach it for a (normalized) timeout rc.
+run_daemon_once "$dir14" >/dev/null 2>&1
+ledger14="$dir14/.claude/state/loop-runs.log"
+check "scenario 14 (rc normalization): claude stub still ran (real work happened before the kill)" [ -f "$dir14/claude.marker" ]
+check "scenario 14: systemctl Result property was queried" bash -c 'grep -qF -- "-p Result" "$1"' _ "$dir14/systemctl.calls"
+check "scenario 14: ledger normalizes rc=143 -> result=timeout rc=124" bash -c '
+  grep -Eq "verdict=advance issue=400 ts=[0-9T:Z-]+ result=timeout rc=124$" "$1"' _ "$ledger14"
+check "scenario 14: verify_and_classify_post_exit was skipped (no pr=/debris= fields)" bash -c '
+  ! grep -Eq "pr=|debris=" "$1"' _ "$ledger14"
+
+# ---------------------------------------------------------------------------
+# 15. Spawn/connect failure fallback (issue #119 post-review finding #2): a
+#     fake systemd-run stub simulates a --user bus connect failure — it
+#     records its invocation but NEVER execs the wrapped command at all (no
+#     start-marker ever appears), exiting 1 exactly like a real connect
+#     failure would (e.g. classic cron with no XDG_RUNTIME_DIR/session, or the
+#     user manager not running/lingering). Assert: run_driver detects the
+#     missing start-marker and falls through to the setsid+timeout fallback,
+#     so the driver still actually runs exactly once (setsid/timeout/claude
+#     stubs all invoked), and the ledger records a genuine result — NOT a
+#     spawn-error or a phantom.
+# ---------------------------------------------------------------------------
+prompt15_dir="$work/scenario15-support"
+mkdir -p "$prompt15_dir"
+printf 'Run the ADVANCE step for issue #500.\n' > "$prompt15_dir/prompt.txt"
+dir15="$(new_fixture scenario15 "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=advance issue=500'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt15_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir15" systemd-run '#!/usr/bin/env bash
+echo "systemd-run-args:$*" >> "'"$dir15"'/systemd-run.args"
+echo "Failed to connect to bus: no such file or directory" >&2
+exit 1'
+fake_bin "$dir15" setsid '#!/usr/bin/env bash
+echo "setsid-ran" >> "'"$dir15"'/setsid.marker"
+exec "$@"'
+fake_bin "$dir15" timeout '#!/usr/bin/env bash
+echo "timeout-ran args=$*" >> "'"$dir15"'/timeout.marker"
+shift; shift
+exec "$@"'
+fake_bin "$dir15" claude '#!/usr/bin/env bash
+echo "claude-ran args=$*" >> "'"$dir15"'/claude.marker"
+echo "{\"session_id\":\"sess-500\",\"result\":\"ok\"}"
+exit 0'
+fake_bot_gh "$dir15" '#!/usr/bin/env bash
+echo "501"
+exit 0'
+run_daemon_once "$dir15" >/dev/null 2>&1
+check "scenario 15 (spawn-failure fallback): systemd-run stub was invoked (attempted first)" [ -f "$dir15/systemd-run.args" ]
+check "scenario 15: fallback setsid stub ran after the connect failure" [ -f "$dir15/setsid.marker" ]
+check "scenario 15: fallback timeout stub ran after the connect failure" [ -f "$dir15/timeout.marker" ]
+check "scenario 15: fallback claude stub actually ran the driver" [ -f "$dir15/claude.marker" ]
+check "scenario 15: claude ran exactly once (no double-spawn)" bash -c '[ "$(wc -l < "$1")" -eq 1 ]' _ "$dir15/claude.marker"
+ledger15="$dir15/.claude/state/loop-runs.log"
+check "scenario 15: ledger records a genuine result via the fallback (NOT spawn-error/phantom)" bash -c '
+  grep -Eq "verdict=advance issue=500 ts=[0-9T:Z-]+ result=exit rc=0 pr=501" "$1"' _ "$ledger15"
+check "scenario 15: ledger never records result=spawn-error" bash -c '! grep -q "spawn-error" "$1"' _ "$ledger15"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

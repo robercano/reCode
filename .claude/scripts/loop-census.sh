@@ -47,6 +47,18 @@ case "$gates_rel" in /*) gates="$gates_rel" ;; *) gates="$root/$gates_rel" ;; es
 base=$(node -e 'const g=require(process.argv[1]); console.log((g.merge&&g.merge.baseBranch)||"main")' "$gates")
 module_labels=$(node -e 'const g=require(process.argv[1]); console.log(g.modules.map(m=>"module:"+m.name).join("\n"))' "$gates")
 
+# --- driver-unit guard (issue #119): never advance an issue whose transient
+# driver unit (pr-loop-driver-issue<N>, spawned by loop-daemon.sh's run_driver)
+# is currently active — e.g. the driver hasn't reached `git checkout -b` yet,
+# so it has no branch for the in_flight check below to catch. No-op (always
+# "not active") when systemd/`systemctl --user` is unavailable.
+driver_unit_active() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  local st
+  st="$(systemctl --user is-active "pr-loop-driver-issue$1" 2>/dev/null || true)"
+  case "$st" in active|activating) return 0 ;; *) return 1 ;; esac
+}
+
 open_prs=$(gh pr list -R "$repo" --state open --base "$base" --json number --jq 'length')
 echo "open_prs=$open_prs"
 
@@ -81,7 +93,8 @@ while IFS=$'\t' read -r num labels title; do
   branch=$(git -C "$root" branch -a --list "*feat/issue-$num-*" | head -1 | sed 's/^[* ]*//;s|^remotes/||') || true
   [ -n "$branch" ] || branch="none"
   detail+="issue=$num branch=$branch title=$title"$'\n'
-  if [ "$advance_ready" = "none" ] && [ "$branch" = "none" ] && [ "$open_prs" -eq 0 ]; then
+  if [ "$advance_ready" = "none" ] && [ "$branch" = "none" ] && [ "$open_prs" -eq 0 ] \
+    && ! driver_unit_active "$num"; then
     advance_ready="$num"
   fi
   # in_flight: a branch exists for this issue but no open PR carries it yet
