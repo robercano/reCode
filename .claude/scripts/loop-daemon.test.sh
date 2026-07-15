@@ -98,8 +98,11 @@ fake_bin() {
 }
 
 run_daemon_once() {
-  # $1=fixture root; runs loop-daemon.sh for exactly one iteration.
-  ( cd "$1" && PATH="$1/bin:/usr/bin:/bin" LOOP_DAEMON_MAX_ITERATIONS=1 LOOP_DAEMON_SLEEP_FAST=0 LOOP_DAEMON_SLEEP_WATCH=0 LOOP_DAEMON_SLEEP_IDLE=0 LOOP_DAEMON_SLEEP_FALLBACK=0 bash .claude/scripts/loop-daemon.sh )
+  # $1=fixture root; runs loop-daemon.sh for exactly one iteration. NVM_DIR
+  # points inside the fixture (nothing there) so ensure_claude_on_path's nvm
+  # fallback can never resolve the HOST's ~/.nvm — otherwise scenarios without
+  # a claude stub pass on a dev box with nvm but fail on CI runners without it.
+  ( cd "$1" && PATH="$1/bin:/usr/bin:/bin" NVM_DIR="$1/no-such-nvm" LOOP_DAEMON_MAX_ITERATIONS=1 LOOP_DAEMON_SLEEP_FAST=0 LOOP_DAEMON_SLEEP_WATCH=0 LOOP_DAEMON_SLEEP_IDLE=0 LOOP_DAEMON_SLEEP_FALLBACK=0 bash .claude/scripts/loop-daemon.sh )
 }
 
 run_daemon_once_stripped_path() {
@@ -112,30 +115,37 @@ run_daemon_once_stripped_path() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. action=none: fake loop-event.sh reports nothing actionable. Assert the
-#    ledger file is never created/written and no marker any stub would leave
-#    behind exists — i.e. ZERO drivers spawned. Note there is deliberately NO
-#    'claude' stub installed for this scenario either: if loop-daemon.sh ever
-#    tried to spawn one on action=none, the whole run would blow up with
-#    "command not found" instead of quietly passing.
+# 1. action=none: fake loop-event.sh reports nothing actionable. Assert no
+#    DRIVER ledger line is written — i.e. ZERO drivers spawned. Note there is
+#    deliberately NO 'claude' stub installed for this scenario: if
+#    loop-daemon.sh ever tried to spawn one on action=none, the whole run
+#    would blow up with "command not found" instead of quietly passing. With
+#    claude unresolvable, main()'s startup check (issue #107) writes exactly
+#    one 'verdict=startup result=env-error' line — the ONLY line allowed here.
 # ---------------------------------------------------------------------------
 dir1="$(new_fixture scenario1 '#!/usr/bin/env bash
 echo "cadence=IDLE cron=*/15 * * * *"
 echo "loop-event: action=none"
 exit 0')"
 run_daemon_once "$dir1" >/dev/null 2>&1
-check "scenario 1 (action=none): no ledger file was created" [ ! -f "$dir1/.claude/state/loop-runs.log" ]
+ledger1="$dir1/.claude/state/loop-runs.log"
+check "scenario 1 (action=none): startup env-error is the ONLY ledger line" bash -c '
+  [ "$(wc -l < "$1" 2>/dev/null || echo 0)" -eq 1 ] && grep -q "verdict=startup .*result=env-error" "$1"' _ "$ledger1"
+check "scenario 1: no driver ledger line was written" bash -c '! grep -q "verdict=advance" "$1"' _ "$ledger1"
 
 # ---------------------------------------------------------------------------
 # 2. Broken tick (loop-event.sh exits non-zero): must not spawn a driver
-#    either, same as action=none.
+#    either, same as action=none (same startup env-error caveat as scenario 1).
 # ---------------------------------------------------------------------------
 dir2="$(new_fixture scenario2 '#!/usr/bin/env bash
 echo "cadence=WATCH cron=*/5 * * * *"
 echo "some diagnostic on a broken tick" >&2
 exit 1')"
 run_daemon_once "$dir2" >/dev/null 2>&1
-check "scenario 2 (broken tick): no ledger file was created" [ ! -f "$dir2/.claude/state/loop-runs.log" ]
+ledger2="$dir2/.claude/state/loop-runs.log"
+check "scenario 2 (broken tick): startup env-error is the ONLY ledger line" bash -c '
+  [ "$(wc -l < "$1" 2>/dev/null || echo 0)" -eq 1 ] && grep -q "verdict=startup .*result=env-error" "$1"' _ "$ledger2"
+check "scenario 2: no driver ledger line was written" bash -c '! grep -q "verdict=advance" "$1"' _ "$ledger2"
 
 # ---------------------------------------------------------------------------
 # 3. action=advance issue=N: fake claude/setsid/timeout stubs record they ran
