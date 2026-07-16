@@ -405,7 +405,13 @@ fi
 # issue_number persists ACROSS the reset so a re-breach on a later day
 # refreshes the same tracking issue instead of filing a duplicate.
 daily_file="$state_dir/loop-daily-ceiling.json"
-today="$(date -u +%Y-%m-%d)"
+# CLAUDE_TODAY (mirrors cockpit.sh's COCKPIT_NOW override pattern): lets tests
+# pin "today" instead of relying on `date -u` at the exact instant this script
+# runs -- without it there's a narrow UTC-midnight race between a test writing
+# daily-ceiling fixture state and this script reading it moments later, where
+# the two could disagree on the calendar date. Unset/empty in production (and
+# in every real invocation) -> falls back to the real UTC date, unchanged.
+today="${CLAUDE_TODAY:-$(date -u +%Y-%m-%d)}"
 daily_read="$(node -e '
   const fs = require("fs");
   let j = {};

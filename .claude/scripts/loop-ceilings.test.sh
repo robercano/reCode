@@ -162,7 +162,8 @@ out2="$(run_tick "$dir2")"
 check "scenario 2 (past expiry): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out2"
 check "scenario 2: diagnostic cites the expiry" bash -c 'printf "%s\n" "$1" | grep -q "loop disarmed (stop-after expired"' _ "$out2"
 check "scenario 2: exactly one gh call was made (the one-time notify)" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 1 ]' _ "$dir2"
-check "scenario 2: the notify call was 'issue create'" bash -c 'gh_calls "$1" | grep -q "^issue create"' _ "$dir2"
+check "scenario 2: the notify call is the FULL expected 'issue create' with --label backlog (not just any create)" bash -c 'gh_calls "$1" | grep -qF -- "issue create --title Loop disarmed: stop-after expired --label backlog --body "' _ "$dir2"
+check "scenario 2: --label planned is NEVER emitted by the ceiling notify path (self-loop regression guard)" bash -c '! gh_calls "$1" | grep -q -- "--label planned"' _ "$dir2"
 check "scenario 2: notified_expired is now persisted true" bash -c '
   node -e "const j=require(process.argv[1]); if(j.notified_expired!==true) process.exit(1); if(j.notice_issue!==777) process.exit(1);" "$1/../state/loop-arming.json"
 ' _ "$dir2"
@@ -258,7 +259,7 @@ CLAUDE_TODAY="$today" node -e '
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(dir + "/loop-daily-ceiling.json", JSON.stringify({ date: process.env.CLAUDE_TODAY, count: 10, halted: false, issue_number: null }));
 ' "$dir7"
-out7="$(run_tick "$dir7")"
+out7="$(CLAUDE_TODAY="$today" run_tick "$dir7")"
 check "scenario 7 (count 10 < ceiling 50): advance proceeds" bash -c '[ "$(verdict_of "$1")" = "action=advance issue=42" ]' _ "$out7"
 check "scenario 7: daily count incremented from 10 to 11" env CLAUDE_TODAY="$today" node -e '
   const fs = require("fs");
@@ -278,16 +279,18 @@ CLAUDE_TODAY="$today" node -e '
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(dir + "/loop-daily-ceiling.json", JSON.stringify({ date: process.env.CLAUDE_TODAY, count: 50, halted: false, issue_number: null }));
 ' "$dir8"
-out8="$(run_tick "$dir8")"
+out8="$(CLAUDE_TODAY="$today" run_tick "$dir8")"
 check "scenario 8 (count 50 >= ceiling 50): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out8"
 check "scenario 8: diagnostic cites the daily ceiling" bash -c 'printf "%s\n" "$1" | grep -q "daily action ceiling reached"' _ "$out8"
 check "scenario 8: exactly one gh call (the tracking-issue file)" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 1 ]' _ "$dir8"
+check "scenario 8: the notify call is the FULL expected 'issue create' with --label backlog (not just any create)" bash -c 'gh_calls "$1" | grep -qF -- "issue create --title Loop budget exceeded: daily action ceiling --label backlog --body "' _ "$dir8"
+check "scenario 8: --label planned is NEVER emitted by the ceiling notify path (self-loop regression guard)" bash -c '! gh_calls "$1" | grep -q -- "--label planned"' _ "$dir8"
 check "scenario 8: halted persisted true with the filed issue number recorded" node -e '
   const fs = require("fs");
   const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   if (j.halted !== true || j.issue_number !== 777) throw new Error("got " + JSON.stringify(j));
 ' "$dir8/../state/loop-daily-ceiling.json"
-out8b="$(run_tick "$dir8")"
+out8b="$(CLAUDE_TODAY="$today" run_tick "$dir8")"
 check "scenario 8b (still halted, second same-day tick): verdict is still action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out8b"
 check "scenario 8b: no additional gh call (halted guard held) -- still exactly 1" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 1 ]' _ "$dir8"
 
@@ -302,7 +305,7 @@ node -e '
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(dir + "/loop-daily-ceiling.json", JSON.stringify({ date: "2020-01-01", count: 999, halted: true, issue_number: 555 }));
 ' "$dir9"
-out9="$(run_tick "$dir9")"
+out9="$(CLAUDE_TODAY="$today" run_tick "$dir9")"
 check "scenario 9 (stale date from a prior day): advance proceeds -- counter reset" bash -c '[ "$(verdict_of "$1")" = "action=advance issue=42" ]' _ "$out9"
 check "scenario 9: today's count is now 1 (fresh day), issue_number 555 preserved for future refresh" env CLAUDE_TODAY="$today" node -e '
   const fs = require("fs");
@@ -310,6 +313,80 @@ check "scenario 9: today's count is now 1 (fresh day), issue_number 555 preserve
   if (j.count !== 1 || j.date !== process.env.CLAUDE_TODAY || j.issue_number !== 555) throw new Error("got " + JSON.stringify(j));
 ' "$dir9/../state/loop-daily-ceiling.json"
 check "scenario 9: no gh calls (a normal dispatch never itself calls gh)" bash -c '[ -z "$(gh_calls "$1")" ]' _ "$dir9"
+
+# ---------------------------------------------------------------------------
+# 10. budget_notify_issue() reuse/refresh path (loop-tick.sh:313-318), which
+#     had ZERO coverage before this scenario: a SECOND breach after an issue
+#     is already on file must NOT file a duplicate -- it must `gh issue view`
+#     the tracked issue and either comment on it (still OPEN) or file a fresh
+#     one (CLOSED). Drives three ticks against the SAME fixture, manually
+#     resetting `halted` back to false between them to simulate independent
+#     breach events without grinding through 50 real ticks per UTC day
+#     (halted is what suppresses gh calls WITHIN a single breach -- see
+#     scenario 8 -- so clearing it directly is how this isolates the reuse
+#     branch on demand). The fake bot-gh.sh's `issue view` reply is
+#     configurable via FAKE_ISSUE_STATE (see new_fixture above). CLAUDE_TODAY
+#     pins "today" across every tick so none of this depends on wall-clock
+#     date (loop-tick.sh's CLAUDE_TODAY override was added alongside this
+#     coverage -- see loop-tick.sh:408).
+# ---------------------------------------------------------------------------
+dir10="$(new_fixture scenario10 "$CENSUS_READY_42" "" 1)"
+CLAUDE_TODAY="$today" node -e '
+  const fs = require("fs");
+  const dir = process.argv[1] + "/../state";
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(dir + "/loop-daily-ceiling.json", JSON.stringify({ date: process.env.CLAUDE_TODAY, count: 50, halted: false, issue_number: null }));
+' "$dir10"
+
+# --- 10a: first breach files a fresh tracking issue (no existing to reuse) --
+out10a="$(CLAUDE_TODAY="$today" run_tick "$dir10")"
+check "scenario 10a (first breach, no existing issue): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out10a"
+check "scenario 10a: exactly one gh call, a full 'issue create' with --label backlog" bash -c '
+  [ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 1 ] &&
+  gh_calls "$1" | grep -qF -- "issue create --title Loop budget exceeded: daily action ceiling --label backlog --body "
+' _ "$dir10"
+check "scenario 10a: issue_number 777 now tracked" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (j.issue_number !== 777) throw new Error("got " + JSON.stringify(j));
+' "$dir10/../state/loop-daily-ceiling.json"
+
+# --- 10b: SECOND breach, tracked issue still OPEN -> comment, no duplicate --
+CLAUDE_TODAY="$today" node -e '
+  const fs = require("fs");
+  const file = process.argv[1] + "/../state/loop-daily-ceiling.json";
+  const j = JSON.parse(fs.readFileSync(file, "utf8"));
+  j.halted = false; // simulate a fresh breach event; tracking issue preserved
+  fs.writeFileSync(file, JSON.stringify(j));
+' "$dir10"
+out10b="$(CLAUDE_TODAY="$today" FAKE_ISSUE_STATE=OPEN run_tick "$dir10")"
+check "scenario 10b (second breach, tracked issue OPEN): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out10b"
+check "scenario 10b: no duplicate 'issue create' (still exactly 1 total) -- instead 'issue view' then 'issue comment 777'" bash -c '
+  [ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 3 ] &&
+  [ "$(gh_calls "$1" | grep -c "^issue create")" -eq 1 ] &&
+  gh_calls "$1" | grep -qF -- "issue view 777 --json state --jq .state" &&
+  gh_calls "$1" | grep -qF -- "issue comment 777 --body "
+' _ "$dir10"
+check "scenario 10b: issue_number still 777 (reused, not replaced)" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (j.issue_number !== 777) throw new Error("got " + JSON.stringify(j));
+' "$dir10/../state/loop-daily-ceiling.json"
+
+# --- 10c: THIRD breach, tracked issue now CLOSED -> a fresh issue is filed --
+CLAUDE_TODAY="$today" node -e '
+  const fs = require("fs");
+  const file = process.argv[1] + "/../state/loop-daily-ceiling.json";
+  const j = JSON.parse(fs.readFileSync(file, "utf8"));
+  j.halted = false;
+  fs.writeFileSync(file, JSON.stringify(j));
+' "$dir10"
+out10c="$(CLAUDE_TODAY="$today" FAKE_ISSUE_STATE=CLOSED run_tick "$dir10")"
+check "scenario 10c (third breach, tracked issue CLOSED): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out10c"
+check "scenario 10c: a SECOND 'issue create' fires (closed tracked issue is not reused); comment count still 1" bash -c '
+  [ "$(gh_calls "$1" | grep -c "^issue create")" -eq 2 ] &&
+  [ "$(gh_calls "$1" | grep -c "^issue comment")" -eq 1 ]
+' _ "$dir10"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
