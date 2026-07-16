@@ -1,25 +1,28 @@
-# @orchestrator-managed claude-rc-service v5
-# systemd (user) unit TEMPLATE (issue #102). Installed into
-# ~/.config/systemd/user/claude-rc-<repo-slug>.service by
+# @orchestrator-managed claude-rc-service v6
+# systemd (user) unit TEMPLATE (issue #102; supervision fix issue #124).
+# Installed into ~/.config/systemd/user/claude-rc-<repo-slug>.service by
 # `.claude/scripts/arm-loop.sh`, which substitutes the __PLACEHOLDER__ tokens
-# below and runs `systemctl --user enable --now`.
+# below and runs `systemctl --user enable` + `restart`.
 #
-# `claude remote-control` has no documented headless mode, so this unit runs
+# `claude remote-control` has no documented headless mode and renders a
+# QR/status view that very likely needs a real TTY, so this unit still runs
 # it inside a DETACHED tmux session (`tmux new -d -s rc-<repo-slug>`): tmux
-# gives systemd a stable child to track AND gives a human a local attach point
-# (`tmux attach -t rc-<repo-slug>`) to see the QR/status or restart it by hand.
+# gives a human a local attach point (`tmux attach -t rc-<repo-slug>`) to see
+# the QR/status or restart it by hand, without gambling on TTY-independence.
 #
-# Type=oneshot + RemainAfterExit=yes (not Type=forking): `tmux new -d` talks
-# to the tmux SERVER over a socket and exits immediately once the detached
-# session exists — if a tmux server is already running, ExecStart's own PID
-# has no parent/child relationship to the long-lived process at all, so
-# systemd cannot reliably track it as a "forked" child. This is the standard
-# pattern for supervising a tmux/screen-managed daemon from systemd. Caveat:
-# systemd only observes ExecStart's (successful) exit, not the health of the
-# `claude remote-control` process running inside the tmux session — if THAT
-# process itself crashes, tmux keeps the (now-empty) session and systemd sees
-# nothing wrong. Inspect with `tmux attach -t rc-<repo-slug>`; restart with
-# `systemctl --user restart claude-rc-<repo-slug>.service`.
+# Type=simple + Restart=on-failure (issue #124, replacing the old
+# Type=oneshot + RemainAfterExit=yes): ExecStart is now an INLINE supervisor
+# that (1) starts the detached tmux session running `claude remote-control`,
+# then (2) BLOCKS, polling every 10s whether the tmux session still exists
+# and its pane is still alive (`tmux has-session` / `tmux list-panes ...
+# #{pane_dead}`), and (3) exits non-zero the instant the session or its pane
+# is gone (planner crash, `pkill -f remote-control`, a stray `tmux
+# kill-session`, etc). Because ExecStart itself is now the long-lived
+# process systemd actually tracks, a crash of the INNER `claude
+# remote-control` process is no longer invisible to systemd: the supervisor
+# loop notices within ~10s, ExecStart exits non-zero, the unit transitions to
+# failed, and Restart=on-failure relaunches it automatically within
+# RestartSec — no more permanently-"active" unit hiding a dead planner.
 #
 # DO NOT hand-edit the INSTALLED copy under ~/.config/systemd/user/ — it will
 # be silently overwritten the next time arm-loop.sh runs. Edit THIS checked-in
@@ -27,16 +30,17 @@
 # name if you want a permanently custom copy. Re-run `/orchestrator:sync` to
 # pick up plugin updates to this template before re-arming.
 [Unit]
-Description=claude remote-control server for __REPO_SLUG__ (detached tmux)
+Description=claude remote-control server for __REPO_SLUG__ (supervised tmux)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
+Restart=on-failure
+RestartSec=10s
 WorkingDirectory=__WORKDIR__
 ExecStartPre=-/usr/bin/tmux kill-session -t rc-__REPO_SLUG__
-ExecStart=/usr/bin/tmux new -d -s rc-__REPO_SLUG__ -c __WORKDIR__ /bin/bash -c 'export PATH=__CLAUDE_DIR__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec __CLAUDE_BIN__ remote-control --spawn __SPAWN_MODE__ --name __RC_NAME__ --remote-control-session-name-prefix __REPO_SLUG__ --capacity __CAPACITY__ --permission-mode __PERMISSION_MODE__'
+ExecStart=/bin/bash -c '/usr/bin/tmux new -d -s rc-__REPO_SLUG__ -c __WORKDIR__ /bin/bash -c "export PATH=__CLAUDE_DIR__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec __CLAUDE_BIN__ remote-control --spawn __SPAWN_MODE__ --name __RC_NAME__ --remote-control-session-name-prefix __REPO_SLUG__ --capacity __CAPACITY__ --permission-mode __PERMISSION_MODE__"; while /usr/bin/tmux has-session -t rc-__REPO_SLUG__ 2>/dev/null; do dead="$(/usr/bin/tmux list-panes -t rc-__REPO_SLUG__ -F "#{pane_dead}" 2>/dev/null | head -n1)"; if [ "$dead" = "1" ]; then exit 1; fi; sleep 10; done; exit 1'
 ExecStop=-/usr/bin/tmux kill-session -t rc-__REPO_SLUG__
 
 [Install]

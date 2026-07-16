@@ -223,10 +223,15 @@ systemctl --user daemon-reload
 # may have a driver in flight; a re-arm only rewrites its unit file, and the
 # owner restarts it explicitly when they want the new unit picked up.
 systemctl --user enable --now "pr-loop-$repo_slug.service"
-# claude-rc: enable + restart on purpose — Type=oneshot + RemainAfterExit
-# stays "active" forever, so `enable --now` would never re-run ExecStart and
-# a re-arm would silently keep serving the OLD unit. Restart is safe here
-# (independent of the loop daemon) and relaunches the tmux with the fresh unit.
+# claude-rc: enable + restart on purpose — even with Type=simple +
+# Restart=on-failure (issue #124), `systemctl --user enable --now` on an
+# ALREADY-enabled, already-running unit is a no-op: it does not re-run
+# ExecStart. So a re-arm's freshly-written unit file (new PATH, capacity,
+# permission-mode, spawn mode, etc.) would silently keep being ignored by the
+# still-running OLD supervisor process until something restarts it. `restart`
+# is what actually loads the new unit; it is safe here (independent of the
+# loop daemon) — the inline supervisor's ExecStop/kill-session step tears
+# down the old tmux session cleanly before the fresh ExecStart relaunches it.
 systemctl --user enable "claude-rc-$repo_slug.service"
 systemctl --user restart "claude-rc-$repo_slug.service"
 
@@ -236,11 +241,15 @@ cat <<EOF
 
 armed:
   pr-loop-$repo_slug.service       (the cron-less loop daemon; adaptive tick+sleep)
-  claude-rc-$repo_slug.service     (claude remote-control, in tmux session rc-$repo_slug)
+  claude-rc-$repo_slug.service     (claude remote-control, supervised tmux session
+                                     rc-$repo_slug; auto-restarts within RestartSec=10s
+                                     if the planner process dies)
 
 inspect:
   systemctl --user status pr-loop-$repo_slug.service
+  systemctl --user status claude-rc-$repo_slug.service
   journalctl --user -u pr-loop-$repo_slug.service -f
+  journalctl --user -u claude-rc-$repo_slug.service -f
   tail -f "$repo_root/.claude/state/loop-runs.log"
   tmux attach -t rc-$repo_slug
 
