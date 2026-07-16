@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @orchestrator-managed arm-loop v5
+# @orchestrator-managed arm-loop v6
 # arm-loop.sh — installs the cron-less PR-loop as systemd (user) units
 # (issue #102). Templated + re-stamped by `/orchestrator:setup`/`sync`; do
 # not hand-edit the copy scaffold.sh wrote into this repo if you want future
