@@ -619,6 +619,8 @@ check "scenario 11: RuntimeMaxSec threaded from LOOP_DRIVER_TIMEOUT=45m" bash -c
   grep -qF -- "RuntimeMaxSec=45m" "$1"' _ "$dir11/systemd-run.args"
 check "scenario 11: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS passed via --setenv (issue #111 pt 4 preserved)" bash -c '
   grep -qF -- "--setenv=CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0" "$1"' _ "$dir11/systemd-run.args"
+check "scenario 11: --working-directory pins the transient unit to the repo root (not \$HOME)" bash -c '
+  grep -qF -- "--working-directory=$2" "$1"' _ "$dir11/systemd-run.args" "$dir11"
 check "scenario 11: claude stub was invoked (under the transient unit)" [ -f "$dir11/claude.marker" ]
 check "scenario 11: claude stub received the prompt text" bash -c 'grep -qF "issue #200" "$1"' _ "$dir11/claude.marker"
 check "scenario 11: setsid (fallback path) was NOT invoked" [ ! -f "$dir11/setsid.marker" ]
