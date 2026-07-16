@@ -226,7 +226,7 @@ node -e '
 out5="$(run_tick "$dir5")"
 check "scenario 5 (attempts 5 >= budget 5): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out5"
 check "scenario 5: diagnostic cites the attempt budget" bash -c 'printf "%s\n" "$1" | grep -q "attempt budget exceeded for issue=42"' _ "$out5"
-check "scenario 5: exactly 3 gh calls (label create, issue edit, issue comment)" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 3 ]' _ "$dir5"
+check "scenario 5: exactly 4 gh calls (label-presence read, label create, issue edit, issue comment)" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 4 ]' _ "$dir5"
 check "scenario 5: the issue itself (not a PR) was labeled needs-human" bash -c 'gh_calls "$1" | grep -q "^issue edit 42 --add-label needs-human"' _ "$dir5"
 check "scenario 5: escalated is now persisted true, attempts unchanged at 5" node -e '
   const fs = require("fs");
@@ -235,7 +235,7 @@ check "scenario 5: escalated is now persisted true, attempts unchanged at 5" nod
 ' "$dir5/../state/loop-issue-attempts.json"
 out5b="$(run_tick "$dir5")"
 check "scenario 5b (still over budget, second tick): verdict is still action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out5b"
-check "scenario 5b: no additional gh calls (escalated guard held) -- still exactly 3" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 3 ]' _ "$dir5"
+check "scenario 5b: no additional gh calls (escalated guard held) -- still exactly 4" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 4 ]' _ "$dir5"
 
 # ---------------------------------------------------------------------------
 # 6. Per-issue attempt budget applies across advance AND feedback phases of

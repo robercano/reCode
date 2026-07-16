@@ -844,12 +844,16 @@ function renderRouting() {
 //   - "needs-human": an issue OR PR carrying the `needs-human` label (see
 //     needs-human.sh — the loop's escalation/PR-review/re-review points all
 //     apply this label through the one shared helper).
-//   - "awaiting your review": a PR with passing CI whose review decision is
-//     neither APPROVED nor CHANGES_REQUESTED (i.e. REVIEW_REQUIRED or no
-//     review yet) — the owner hasn't weighed in yet. CHANGES_REQUESTED is
-//     deliberately excluded here: that PR is in the BOT's court (pr-feedback.sh
-//     dispatches a fix), not the owner's, until it's addressed (which is when
-//     it picks up the `needs-human` label instead — see pr-feedback.sh).
+//   - "awaiting your review": a PR with passing CI, OR with NO CI checks at
+//     all (ciBadge's "no checks" — a PR the adapter has no checks configured
+//     for is not stuck on a red/pending build; it's simply waiting on the
+//     owner, same as a "passing" one), whose review decision is neither
+//     APPROVED nor CHANGES_REQUESTED (i.e. REVIEW_REQUIRED or no review yet)
+//     — the owner hasn't weighed in yet. CHANGES_REQUESTED is deliberately
+//     excluded here: that PR is in the BOT's court (pr-feedback.sh dispatches
+//     a fix), not the owner's, until it's addressed (which is when it picks
+//     up the `needs-human` label instead — see pr-feedback.sh). A "failing"
+//     or "pending" PR is also excluded: that one's blocked on CI, not on you.
 // Degrades to an empty group set (never a crash) when issues/prs are
 // unavailable, matching every other section's degrade contract; renders a
 // clear all-clear state when the total across both groups is zero.
@@ -875,7 +879,7 @@ function renderNeedsYou() {
       }
       const ci = ciBadge(pr.statusCheckRollup);
       const rd = pr.reviewDecision;
-      if (ci.label === "passing" && rd !== "APPROVED" && rd !== "CHANGES_REQUESTED") {
+      if ((ci.label === "passing" || ci.label === "no checks") && rd !== "APPROVED" && rd !== "CHANGES_REQUESTED") {
         push("awaiting your review", { num: pr.number, url: pr.url, title: pr.title });
       }
     }

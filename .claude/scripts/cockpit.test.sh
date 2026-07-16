@@ -380,9 +380,11 @@ check "no spend-ceiling state files: today's actions default to 0 / adapter ceil
 #     from the SAME issues.json/prs.json every other section already reads
 #     (no extra gh call). Two groups:
 #       - "needs-human": an issue OR PR carrying the `needs-human` label.
-#       - "awaiting your review": a PR with passing CI and a review decision
-#         that is neither APPROVED nor CHANGES_REQUESTED (the latter is the
-#         BOT's court via pr-feedback.sh, not the owner's).
+#       - "awaiting your review": a PR with passing CI (OR no CI checks
+#         configured at all -- re-review finding, a review-ready PR with zero
+#         checks must not be silently omitted) and a review decision that is
+#         neither APPROVED nor CHANGES_REQUESTED (the latter is the BOT's
+#         court via pr-feedback.sh, not the owner's).
 #     PR 200 (APPROVED, passing) and PR 201 (CHANGES_REQUESTED, failing) must
 #     NOT appear in either group.
 # ---------------------------------------------------------------------------
@@ -398,7 +400,8 @@ cat > "$work/fixtures-needs-you/prs.json" <<'EOF'
   {"number":200,"title":"Approved PR","url":"https://example.com/pr/200","headRefName":"feat/x","reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[]},
   {"number":201,"title":"Changes requested PR","url":"https://example.com/pr/201","headRefName":"feat/y","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"conclusion":"FAILURE","status":"COMPLETED","name":"test"}],"labels":[]},
   {"number":202,"title":"Needs-human PR","url":"https://example.com/pr/202","headRefName":"feat/z","reviewDecision":null,"statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[{"name":"needs-human"}]},
-  {"number":203,"title":"Awaiting review PR","url":"https://example.com/pr/203","headRefName":"feat/w","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[]}
+  {"number":203,"title":"Awaiting review PR","url":"https://example.com/pr/203","headRefName":"feat/w","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[]},
+  {"number":204,"title":"No-checks PR awaiting review","url":"https://example.com/pr/204","headRefName":"feat/v","reviewDecision":null,"statusCheckRollup":[],"labels":[]}
 ]
 EOF
 : >"$work/fixtures-needs-you/events.jsonl"
@@ -418,7 +421,7 @@ check "needs-you section is the FIRST section in <body> (before live/issues/prs)
     throw new Error("needs-you is not the first section after <body>");
   }
 ' "$html_needs_you"
-check "needs-you total count is 3 (issue 106 + PR 202 + PR 203)" grep -qF '<h2>Needs you (3)</h2>' "$html_needs_you"
+check "needs-you total count is 4 (issue 106 + PR 202 + PR 203 + PR 204)" grep -qF '<h2>Needs you (4)</h2>' "$html_needs_you"
 needs_you_section="$(node -e '
   const fs = require("fs");
   const html = fs.readFileSync(process.argv[1], "utf8");
@@ -431,6 +434,7 @@ check "awaiting-your-review group heading present" bash -c 'printf "%s" "$1" | g
 check "needs-human group lists issue #106" bash -c 'printf "%s" "$1" | grep -qF "<a href=\"https://example.com/106\">#106</a> Issue needing a human"' _ "$needs_you_section"
 check "needs-human group lists PR #202 (not the awaiting-review group)" bash -c 'printf "%s" "$1" | grep -qF "<a href=\"https://example.com/pr/202\">#202</a> Needs-human PR"' _ "$needs_you_section"
 check "awaiting-your-review group lists PR #203" bash -c 'printf "%s" "$1" | grep -qF "<a href=\"https://example.com/pr/203\">#203</a> Awaiting review PR"' _ "$needs_you_section"
+check "awaiting-your-review group ALSO lists PR #204 (no CI checks configured, must not be silently omitted)" bash -c 'printf "%s" "$1" | grep -qF "<a href=\"https://example.com/pr/204\">#204</a> No-checks PR awaiting review"' _ "$needs_you_section"
 check "approved PR #200 does NOT appear in the needs-you strip" bash -c '! printf "%s" "$1" | grep -qF "#200"' _ "$needs_you_section"
 check "changes-requested PR #201 does NOT appear in the needs-you strip (bot's court, not owner's)" bash -c '! printf "%s" "$1" | grep -qF "#201"' _ "$needs_you_section"
 check "ordinary issue #100 does NOT appear in the needs-you strip" bash -c '! printf "%s" "$1" | grep -qF "#100"' _ "$needs_you_section"

@@ -26,9 +26,26 @@
 #           independently, while repeats of the SAME kind on the SAME target
 #           stay throttled to notify.sh's window.
 #   SEVERITY/TITLE/BODY: passed straight through to notify.sh; BODY is also
-#           posted as a comment on TARGET (skipped when BODY is empty).
+#           posted as a comment on TARGET -- but ONLY on a FRESH escalation
+#           episode (see below); always skipped when BODY is empty.
 #   Idempotent: `gh label create --force` never fails if the label already
 #   exists; adding an already-present label is a no-op on GitHub's side.
+#
+#   Comment is first-transition-only (issue #99 re-review finding #1): BEFORE
+#   (re-)adding the label, this reads TARGET's CURRENT labels from GitHub. If
+#   `needs-human` is already present, this call is a REPEAT of an ongoing
+#   escalation episode -- the label add + notify (still throttled by
+#   notify.sh) still run, but the COMMENT is skipped, so a persisting
+#   block-on-owner condition doesn't spam a fresh GitHub comment every tick
+#   (loop-tick.sh/loop-census.sh invoke the callers of this seam every few
+#   minutes for as long as the condition holds). If `needs-human` is ABSENT,
+#   this is a fresh episode (first flag ever, or a prior episode was cleared)
+#   and the comment posts. Deriving "fresh episode" from GitHub's own label
+#   state (rather than a local state file) makes this self-heal across
+#   restarts/redeploys with no extra state to keep in sync. A failed label
+#   read (offline/unauthenticated) is treated as "not already labeled" so the
+#   comment still fires -- fail toward the OLD (safe, if noisier) behavior,
+#   never toward silently swallowing an escalation.
 #
 # needs_human_clear TARGET KIND
 #   Removes the needs-human label from TARGET (best-effort — a target that
@@ -50,9 +67,34 @@ _needs_human_split_target() {
   NH_NUM="${t#*:}"
 }
 
+# _needs_human_already_labeled: prints "yes" if TARGET (NH_TYPE/NH_NUM, must
+# already be split) currently carries the needs-human label on GitHub, "no"
+# otherwise -- including on any read failure (offline/unauthenticated/missing
+# gh), so callers fail toward still posting the comment (the old behavior)
+# rather than toward silently swallowing a fresh escalation. Read-only: never
+# mutates anything.
+_needs_human_already_labeled() {
+  local out=""
+  case "$NH_TYPE" in
+    pr) out="$(gh pr view "$NH_NUM" --json labels -q '.labels[].name' 2>/dev/null)" || out="" ;;
+    issue) out="$(gh issue view "$NH_NUM" --json labels -q '.labels[].name' 2>/dev/null)" || out="" ;;
+    *) out="" ;;
+  esac
+  if printf '%s\n' "$out" | grep -qx "needs-human"; then
+    printf 'yes\n'
+  else
+    printf 'no\n'
+  fi
+}
+
 needs_human_flag() {
   local target="$1" kind="$2" severity="$3" title="$4" body="$5"
   _needs_human_split_target "$target"
+
+  # Read BEFORE mutating: this call's own label add below must not make
+  # itself look like a "repeat" episode.
+  local fresh_episode="yes"
+  { [ "$(_needs_human_already_labeled)" = "yes" ] && fresh_episode="no"; } || true
 
   gh label create "needs-human" --color b60205 \
     --description "Loop is blocked on owner judgment -- see the issue/PR body/comments" \
@@ -66,11 +108,11 @@ needs_human_flag() {
   case "$NH_TYPE" in
     pr)
       gh pr edit "$NH_NUM" --add-label needs-human >/dev/null 2>&1 || true
-      { [ -n "$body" ] && gh pr comment "$NH_NUM" --body "$body" >/dev/null 2>&1; } || true
+      { [ "$fresh_episode" = "yes" ] && [ -n "$body" ] && gh pr comment "$NH_NUM" --body "$body" >/dev/null 2>&1; } || true
       ;;
     issue)
       gh issue edit "$NH_NUM" --add-label needs-human >/dev/null 2>&1 || true
-      { [ -n "$body" ] && gh issue comment "$NH_NUM" --body "$body" >/dev/null 2>&1; } || true
+      { [ "$fresh_episode" = "yes" ] && [ -n "$body" ] && gh issue comment "$NH_NUM" --body "$body" >/dev/null 2>&1; } || true
       ;;
     *) ;;
   esac

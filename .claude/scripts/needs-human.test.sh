@@ -57,8 +57,10 @@ new_fixture() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. needs_human_flag on an ISSUE target: label create + issue edit
-#    --add-label + issue comment (in that order), all via the stubbed `gh`.
+# 1. needs_human_flag on an ISSUE target, FRESH episode (stub `gh` returns no
+#    labels, so the pre-flight presence check reports "not already labeled"):
+#    label-presence read + label create + issue edit --add-label + issue
+#    comment (in that order), all via the stubbed `gh`.
 # ---------------------------------------------------------------------------
 dir1="$(new_fixture scenario1 "")"
 gh_log1="$work/scenario1-gh.log"
@@ -69,10 +71,11 @@ out1="$(bash -c '
 ' 2>&1)"
 rc1=$?
 check "scenario 1: needs_human_flag exits 0" [ "$rc1" -eq 0 ]
-check "scenario 1: label create is the FIRST gh call" bash -c 'head -1 "$1" | grep -q "^label create needs-human"' _ "$gh_log1"
-check "scenario 1: issue edit --add-label needs-human is the SECOND gh call" bash -c 'sed -n 2p "$1" | grep -qF "issue edit 42 --add-label needs-human"' _ "$gh_log1"
-check "scenario 1: issue comment with the body is the THIRD gh call" bash -c 'sed -n 3p "$1" | grep -qF "issue comment 42 --body Please look at issue 42"' _ "$gh_log1"
-check "scenario 1: exactly 3 gh calls (no extra side effects)" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 3 ]' _ "$gh_log1"
+check "scenario 1: label-presence check is the FIRST gh call" bash -c 'head -1 "$1" | grep -q "^issue view 42 --json labels"' _ "$gh_log1"
+check "scenario 1: label create is the SECOND gh call" bash -c 'sed -n 2p "$1" | grep -q "^label create needs-human"' _ "$gh_log1"
+check "scenario 1: issue edit --add-label needs-human is the THIRD gh call" bash -c 'sed -n 3p "$1" | grep -qF "issue edit 42 --add-label needs-human"' _ "$gh_log1"
+check "scenario 1: issue comment with the body is the FOURTH gh call" bash -c 'sed -n 4p "$1" | grep -qF "issue comment 42 --body Please look at issue 42"' _ "$gh_log1"
+check "scenario 1: exactly 4 gh calls (no extra side effects)" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 4 ]' _ "$gh_log1"
 
 # ---------------------------------------------------------------------------
 # 2. needs_human_flag on a PR target: `pr edit`/`pr comment`, not `issue *`.
@@ -154,6 +157,68 @@ out6="$(bash -c '
   echo "SURVIVED"
 ' 2>&1)"
 check "scenario 6: caller survives (prints SURVIVED) even when every gh call fails" bash -c 'printf "%s\n" "$1" | grep -q "SURVIVED"' _ "$out6"
+
+# ---------------------------------------------------------------------------
+# 7. Comment episode-gating (issue #99 re-review finding #1): a REPEAT flag
+#    call on a target that ALREADY carries the needs-human label (per the
+#    stubbed `gh issue view --json labels` read) still (re-)applies the label
+#    but SKIPS the comment -- this is the fix for the "fresh GitHub comment
+#    every tick" bug the reviewer reproduced.
+# ---------------------------------------------------------------------------
+dir7="$(new_fixture scenario7 "")"
+gh_log7="$work/scenario7-gh.log"
+bash -c '
+  gh() {
+    printf "%s\n" "$*" >> "'"$gh_log7"'"
+    case "$*" in
+      "issue view 50 --json labels -q .labels[].name") printf "needs-human\n" ;;
+      *) : ;;
+    esac
+  }
+  . "'"$dir7"'/.claude/scripts/needs-human.sh"
+  needs_human_flag "issue:50" "attempt-budget" "high" "T" "already labeled body"
+' >/dev/null 2>&1
+check "scenario 7: label is still (re-)applied when already present" grep -qF "issue edit 50 --add-label needs-human" "$gh_log7"
+check "scenario 7: comment is SKIPPED because the label was already present" bash -c '! grep -q "^issue comment" "$1"' _ "$gh_log7"
+
+# ---------------------------------------------------------------------------
+# 8. Same target shape, label ABSENT (a fresh episode -- e.g. right after a
+#    needs_human_clear, or the very first flag ever) -- comment posts.
+# ---------------------------------------------------------------------------
+dir8="$(new_fixture scenario8 "")"
+gh_log8="$work/scenario8-gh.log"
+bash -c '
+  gh() {
+    printf "%s\n" "$*" >> "'"$gh_log8"'"
+    case "$*" in
+      "issue view 51 --json labels -q .labels[].name") printf "some-other-label\n" ;;
+      *) : ;;
+    esac
+  }
+  . "'"$dir8"'/.claude/scripts/needs-human.sh"
+  needs_human_flag "issue:51" "attempt-budget" "high" "T" "fresh episode body"
+' >/dev/null 2>&1
+check "scenario 8: comment posts on a fresh episode (needs-human label absent)" grep -qF "issue comment 51 --body fresh episode body" "$gh_log8"
+
+# ---------------------------------------------------------------------------
+# 9. A failing label READ (offline/unauthenticated `gh issue view`) fails
+#    OPEN toward posting the comment -- the old, safe (if noisier) behavior
+#    -- never toward silently swallowing a genuinely fresh escalation.
+# ---------------------------------------------------------------------------
+dir9="$(new_fixture scenario9 "")"
+gh_log9="$work/scenario9-gh.log"
+bash -c '
+  gh() {
+    printf "%s\n" "$*" >> "'"$gh_log9"'"
+    case "$*" in
+      "issue view 52 --json labels -q .labels[].name") return 1 ;;
+      *) : ;;
+    esac
+  }
+  . "'"$dir9"'/.claude/scripts/needs-human.sh"
+  needs_human_flag "issue:52" "attempt-budget" "high" "T" "fail-open body"
+' >/dev/null 2>&1
+check "scenario 9: a failing label read fails OPEN -- comment still posts" grep -qF "issue comment 52 --body fail-open body" "$gh_log9"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

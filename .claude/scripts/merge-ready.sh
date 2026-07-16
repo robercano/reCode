@@ -101,8 +101,15 @@ for n in $(gh pr list -R "$repo" --base "$base" --state open --json number -q '.
   case "$verdict" in
     SKIP:no-owner-review|SKIP:approval-stale*)
       if command -v needs_human_flag >/dev/null 2>&1; then
+        # Human-readable reason, not the raw "SKIP:..." verdict token (non-
+        # blocking re-review nit): only these two verdicts reach this branch,
+        # so a simple case is enough -- no need to reformat the token itself.
+        reason_text="not yet reviewed"
+        case "$verdict" in
+          SKIP:approval-stale*) reason_text="approval is stale -- please re-review the current head" ;;
+        esac
         needs_human_flag "pr:$n" "pr-review" "low" \
-          "PR #$n ready for your review" "$title (${verdict#SKIP:})"
+          "PR #$n ready for your review" "$title ($reason_text)"
       fi
       ;;
     *)

@@ -192,7 +192,14 @@ open_pr_branches=$(gh pr list -R "$repo" --state open --base "$base" --json head
 # i.e. the blocking gate degrades to a no-op (same as before this feature).
 open_issue_set=$(gh issue list -R "$repo" --state open --json number --jq '.[].number' --limit 200 2>/dev/null) || true
 
-feedback_prs=$(bash "$script_dir/pr-feedback.sh" "$repo" | grep -c . || true)
+# PR_FEEDBACK_COUNT_ONLY=1 (issue #99 re-review finding #2): census is a
+# read-only report -- it must NEVER mutate GitHub state. pr-feedback.sh's own
+# per-PR loop calls needs_human_flag/needs_human_clear (label/comment/notify)
+# as a side effect of its real dispatch role; count-only mode suppresses all
+# of that while still printing the identical TSV this line counts. The real,
+# side-effecting invocation stays in loop-tick.sh, which actually dispatches
+# fixes for the PRs this counts.
+feedback_prs=$(PR_FEEDBACK_COUNT_ONLY=1 bash "$script_dir/pr-feedback.sh" "$repo" | grep -c . || true)
 echo "feedback_prs=$feedback_prs"
 
 # Open `planned` issues carrying any of the adapter's module labels, ascending.
