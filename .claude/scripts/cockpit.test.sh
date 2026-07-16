@@ -317,6 +317,65 @@ check "verdict-history default cap (10) does not truncate a shorter (5-tick) his
 ' "$html_history_default"
 
 # ---------------------------------------------------------------------------
+# 2d. Spend ceilings sub-panel (issue #95): stop-after countdown, today's
+#     action count vs the daily ceiling, and per-issue attempts vs the
+#     per-issue budget, sourced from loop-arming.json/loop-issue-attempts.json/
+#     loop-daily-ceiling.json. Missing files (exercised separately in section
+#     4 below) must degrade to placeholders, never a crash.
+# ---------------------------------------------------------------------------
+mkdir -p "$work/fixtures-ceilings"
+cat > "$work/fixtures-ceilings/issues.json" <<'EOF'
+[{"number":100,"title":"Known issue","url":"https://example.com/100","labels":[],"body":""}]
+EOF
+echo "[]" >"$work/fixtures-ceilings/prs.json"
+: >"$work/fixtures-ceilings/events.jsonl"
+cat > "$work/fixtures-ceilings/loop-ticks.jsonl" <<'EOF'
+{"ts":"2026-01-01T00:00:00Z","verdict":"action=none","cadence":"IDLE","action":"none","issue":"","pr":"","reason":"daily-ceiling"}
+EOF
+cat > "$work/fixtures-ceilings/loop-arming.json" <<'EOF'
+{"armed_at":"2026-01-01T00:00:00Z","expires_at":"2026-01-05T00:00:00Z","stop_after_days":4,"notified_expired":false,"notice_issue":null}
+EOF
+cat > "$work/fixtures-ceilings/loop-issue-attempts.json" <<'EOF'
+{"100":{"attempts":3,"escalated":false},"42":{"attempts":5,"escalated":true}}
+EOF
+cat > "$work/fixtures-ceilings/loop-daily-ceiling.json" <<'EOF'
+{"date":"2026-01-01","count":37,"halted":false,"issue_number":null}
+EOF
+html_ceilings="$work/cockpit-ceilings.html"
+COCKPIT_NOW="2026-01-01T00:10:00Z" bash "$cockpit" --fixtures "$work/fixtures-ceilings" "$html_ceilings" >/dev/null 2>"$work/stderr-ceilings.log"
+check "spend ceilings sub-heading present" grep -qF '<h3>Spend ceilings</h3>' "$html_ceilings"
+check "stop-after expiry + countdown rendered" grep -qF '<code>2026-01-05T00:00:00Z</code> <span class="muted">(in 3d 23h)</span>' "$html_ceilings"
+check "today's action count vs the daily ceiling (adapter default 50) rendered" grep -qF '<span class="badge muted">37 / 50</span>' "$html_ceilings"
+check "per-issue attempts table: over-budget issue 42 shows needs-human status" grep -qF '<tr><td>#42</td><td>5/5</td><td><span class="badge unavailable">needs-human</span></td></tr>' "$html_ceilings"
+check "per-issue attempts table: known issue 100 links to its section anchor" grep -qF '<tr><td><a href="#issue-100">#100</a></td><td>3/5</td><td></td></tr>' "$html_ceilings"
+
+# Expired stop-after (past expires_at) renders the DISARMED badge instead of a countdown.
+cat > "$work/fixtures-ceilings/loop-arming.json" <<'EOF'
+{"armed_at":"2025-12-01T00:00:00Z","expires_at":"2025-12-08T00:00:00Z","stop_after_days":7,"notified_expired":true,"notice_issue":123}
+EOF
+html_ceilings_expired="$work/cockpit-ceilings-expired.html"
+COCKPIT_NOW="2026-01-01T00:10:00Z" bash "$cockpit" --fixtures "$work/fixtures-ceilings" "$html_ceilings_expired" >/dev/null 2>"$work/stderr-ceilings-expired.log"
+check "expired stop-after renders the DISARMED badge, not a countdown" grep -qF 'DISARMED' "$html_ceilings_expired"
+
+# The loop HAS ticked (so the section renders past the early "loop not armed"
+# return) but none of the three spend-ceiling files exist yet -- read-only
+# cockpit.sh never lazily creates them the way loop-tick.sh itself does; it
+# must just degrade to placeholders, never crash.
+mkdir -p "$work/fixtures-ceilings-missing"
+cat > "$work/fixtures-ceilings-missing/issues.json" <<'EOF'
+[]
+EOF
+echo "[]" >"$work/fixtures-ceilings-missing/prs.json"
+: >"$work/fixtures-ceilings-missing/events.jsonl"
+cp "$work/fixtures-ceilings/loop-ticks.jsonl" "$work/fixtures-ceilings-missing/loop-ticks.jsonl"
+html_ceilings_missing="$work/cockpit-ceilings-missing.html"
+COCKPIT_NOW="2026-01-01T00:10:00Z" bash "$cockpit" --fixtures "$work/fixtures-ceilings-missing" "$html_ceilings_missing" >/dev/null 2>"$work/stderr-ceilings-missing.log"
+check "no spend-ceiling state files: generator still exits 0 (no crash)" [ -s "$html_ceilings_missing" ]
+check "no spend-ceiling state files: stop-after degrades to 'not armed yet'" grep -qF 'Stop-after: not armed yet' "$html_ceilings_missing"
+check "no spend-ceiling state files: per-issue attempts degrades to 'none tracked yet'" grep -qF 'Per-issue attempts: none tracked yet' "$html_ceilings_missing"
+check "no spend-ceiling state files: today's actions default to 0 / adapter ceiling" grep -qF '<span class="badge muted">0 / 50</span>' "$html_ceilings_missing"
+
+# ---------------------------------------------------------------------------
 # 3. GATES_FILE override is honored (self-host adapter), still with fixtures
 #    (no gh/network either way).
 # ---------------------------------------------------------------------------

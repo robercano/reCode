@@ -36,7 +36,12 @@
     "orchestrator_model": "opus", "worker_model": "sonnet",
     "explorer_model": "haiku", "reviewer_model": "sonnet",
     "reviewer_models": { "correctness": "opus" },
-    "max_parallel_workers": 2
+    "max_parallel_workers": 2,
+
+    "_spend_ceilings_note": "issue #95 — loop spend ceilings, read by loop-tick.sh's STEP 0 pre-flight and arm-loop.sh's default --stop-after-days. Documented in docs/TOKEN_BUDGET.md -> 'Loop spend ceilings'.",
+    "stop_after_days": 7,
+    "per_issue_attempts": 5,
+    "daily_action_ceiling": 50
   },
 
   "merge": { "policy": "pr-per-agent", "baseBranch": "main" }

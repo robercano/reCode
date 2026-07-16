@@ -29,7 +29,35 @@ each fire. The loop self-adjusts (STEP 0 in `/pr-loop`): FAST (1 min) only while
 IDLE (15 min) otherwise. A PR waiting on you does not burn a session a minute. If you'll be away for hours,
 consider disarming the cron entirely (`CronDelete`) and re-arming with `/pr-loop` when you're back.
 
-## 4. Review iterations
+## 4. Loop spend ceilings (issue #95)
+Model routing and cadence bound the cost of a single tick; these three bound the loop's **aggregate** spend —
+the failure mode where a pathological issue ping-pongs forever, or an armed loop is simply forgotten for
+weeks (see [DoltHub's $3,000-in-a-week write-up](https://www.dolthub.com/blog/2026-03-24-a-week-in-gas-town/)
+and [gh-aw's cost-management design](https://github.github.com/gh-aw/reference/cost-management/), which this
+mirrors). All three are configurable via `.claude/gates.json` → `budget`, enforced by `loop-tick.sh`'s STEP 0
+pre-flight (before the verdict decision), and surfaced in the cockpit's "Loop health" panel.
+
+| Config key | Default | Effect on breach |
+| --- | --- | --- |
+| `budget.stop_after_days` | `7` | The armed loop self-disarms `armed_at + N` days after arming (`arm-loop.sh`, or `--stop-after-days` to override). Every tick after that emits `action=none reason=expired`, posts a ONE-TIME "loop disarmed" notice, and takes no further action until re-armed. |
+| `budget.per_issue_attempts` | `5` | Per-issue advance/feedback dispatch budget — the anti-ping-pong bound. Once an issue (tracked across both its advance phase and its PR's feedback phase) has been dispatched this many times without landing, the tick refuses further dispatches (`reason=attempt-budget`), labels the PR/issue `needs-human`, and comments once explaining why. |
+| `budget.daily_action_ceiling` | `50` | Dispatches (advance + feedback combined) allowed per UTC calendar day. On breach the loop halts for the rest of the day (`reason=daily-ceiling`), files (or refreshes) a single tracking issue, and resumes automatically at UTC midnight — counting resets by date, not by a timer. |
+
+State (gitignored, `.claude/state/`, atomic temp+`mv` writes like the rest of the loop's state):
+- `loop-arming.json` — `{armed_at, expires_at, stop_after_days, notified_expired, notice_issue}`. Written by
+  `arm-loop.sh` on every arm/re-arm (which clears `notified_expired` and any prior expiry). If a loop was
+  armed before this feature existed and this file is missing, `loop-tick.sh` lazily creates one starting
+  *now* on its first tick, so an already-armed loop still gets a ceiling.
+- `loop-issue-attempts.json` — `{"<issue-number>": {attempts, escalated}}`. Incremented on every genuine
+  advance/feedback dispatch for that issue; `escalated` guards the one-time `needs-human` label/comment.
+- `loop-daily-ceiling.json` — `{date, count, halted, issue_number}`. `count`/`halted` reset automatically once
+  `date` no longer matches today; `issue_number` (the filed tracking issue) persists across the reset so a
+  later-day re-breach refreshes the same issue instead of filing a duplicate.
+
+All gh side effects here (notify/label/comment/file-issue) go through `bot-gh.sh`, same as the rest of the
+loop, and are best-effort — a failure never breaks a tick, it just means the human misses a notification.
+
+## 5. Review iterations
 - Re-reviews only re-run the lenses that **rejected** — an approval stands (orchestrator rule +
   `feature-fanout.js` v2). With 4 lenses and 1 rejection, iteration 2 costs 1 review, not 4.
 - `MAX_ITERS` caps the loop so a stubborn sub-task can't spiral.
@@ -37,7 +65,7 @@ consider disarming the cron entirely (`CronDelete`) and re-arming with `/pr-loop
 - Cap parallelism: `max_parallel_workers` bounds concurrent implementers (default 2). More workers ≈ more
   tokens *and* more for you to review.
 
-## 5. Context hygiene
+## 6. Context hygiene
 - **Long conversations are the silent cost.** Context is re-sent (cached, but not free) with every message,
   and each turn makes the next one dearer. `/clear` between unrelated tasks; `/rename` first so `/resume`
   can find the session later. `/compact <focus>` when you must keep going in-place.
@@ -53,12 +81,12 @@ consider disarming the cron entirely (`CronDelete`) and re-arming with `/pr-loop
 - Disable MCP servers you aren't using (`/mcp`); prefer CLIs (`gh`, `aws`, …) over MCP equivalents — they
   add zero per-tool context.
 
-## 6. Thinking & effort
+## 7. Thinking & effort
 Extended thinking is billed as output tokens and defaults generous. For routine work, lower it with
 `/effort` (or in `/model`); on fixed-budget models, `MAX_THINKING_TOKENS=8000` in the environment. Keep full
 effort for the orchestrator's scoping and the correctness/security reviews — that's where reasoning pays.
 
-## 7. Workflow budget guard
+## 8. Workflow budget guard
 The workflow engine exposes a token budget. When you set a target (e.g. type `+500k` style directives), scripts
 can scale fan-out / loop depth and HARD-STOP at the ceiling.
 
