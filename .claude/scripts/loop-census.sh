@@ -15,6 +15,11 @@
 #                               hasn't reached PR stage. A tick uses this to
 #                               avoid double-spawning an orchestrator for an
 #                               issue that already has a worktree in progress.
+#   stalled=<n> age_min=<m>      one line PER in_flight issue whose most recent
+#                               events.jsonl activity is older than the stall
+#                               threshold (issue #98) — see STALL DETECTION
+#                               below. A tick uses this to RESUME a hung/dead
+#                               in_flight issue instead of refusing it forever.
 #   blocked=<n> by=<N>          one line per candidate that would otherwise be
 #                               advance_ready but is skipped because its body
 #                               says "Blocked by #N" and issue N is still OPEN
@@ -57,6 +62,30 @@
 # one candidate was otherwise eligible; with zero eligible candidates,
 # advance_ready stays "none" exactly as before this feature.
 #
+# --- STALL DETECTION (issue #98) --------------------------------------------
+# An `in_flight` issue (feat/issue-N-* branch exists, no open PR yet) can sit
+# forever if the driver that created it hung or died without ever reaching
+# loop-daemon.sh's post-exit verification (issue #111) — e.g. the daemon
+# process itself was restarted/killed mid-drive. This census can't see driver
+# health directly, but it CAN see whether anything has logged progress for
+# that issue recently: log-event.sh (issue #52) appends one JSONL line per
+# phase transition to events.jsonl, with a `task` field that's been observed
+# in BOTH a bare issue number ("42") and an "issue-42" form across this
+# project's real history — an in_flight issue is STALLED when the newest
+# event naming it (by either form) is older than `budget.stall_minutes`
+# (adapter-configurable, default 30; see gates.json).
+#
+# CONSERVATIVE FALSE-POSITIVE RULE: an issue with ZERO events at all is NEVER
+# reported stalled — a branch/worktree just created by a driver that hasn't
+# logged its first event yet looks identical to a permanently-abandoned one
+# from events.jsonl's point of view alone; treating "no data yet" as "stalled"
+# would kill fresh work. Only a issue with AT LEAST ONE event, whose newest is
+# past the threshold, is reported.
+#
+# Events file: defaults to <root>/.claude/state/events.jsonl; override with
+# $CLAUDE_EVENTS_FILE (same env var log-event.sh itself honors) for
+# testability without touching the real, gitignored state dir.
+#
 # Repo derived from the git remote; override with $1. Bot login via $BOT_LOGIN.
 # Invoke as `bash .claude/scripts/loop-census.sh` (pre-approve that exact
 # command). Read-only: advances no cursor, mutates nothing — safe to re-run.
@@ -75,6 +104,46 @@ case "$gates_rel" in /*) gates="$gates_rel" ;; *) gates="$root/$gates_rel" ;; es
 # Adapter-derived facts: base branch + the module:* label set.
 base=$(node -e 'const g=require(process.argv[1]); console.log((g.merge&&g.merge.baseBranch)||"main")' "$gates")
 module_labels=$(node -e 'const g=require(process.argv[1]); console.log(g.modules.map(m=>"module:"+m.name).join("\n"))' "$gates")
+
+# Stall threshold (issue #98), adapter-overridable via budget.stall_minutes;
+# same node -e / require(gates) pattern as base/module_labels above.
+stall_minutes=$(node -e '
+  const g = require(process.argv[1]);
+  const v = g.budget && g.budget.stall_minutes;
+  console.log((Number.isFinite(v) && v > 0) ? v : 30);
+' "$gates" 2>/dev/null)
+case "$stall_minutes" in ''|*[!0-9]*) stall_minutes=30 ;; esac
+
+events_file="${CLAUDE_EVENTS_FILE:-$root/.claude/state/events.jsonl}"
+
+# --- stall detection helper (issue #98) --------------------------------------
+# $1 = issue number. Prints the age in whole minutes of the NEWEST
+# events.jsonl line whose `task` field is either "$1" or "issue-$1" (both
+# forms occur in this project's real log), or nothing when there is no such
+# event at all — callers must treat empty as "do not report stalled" (see the
+# conservative false-positive rule in the header comment above), never as 0.
+last_event_age_minutes() {
+  CLAUDE_STALL_EVENTS_FILE="$events_file" CLAUDE_STALL_ISSUE="$1" node -e '
+    const fs = require("fs");
+    const file = process.env.CLAUDE_STALL_EVENTS_FILE;
+    const num = process.env.CLAUDE_STALL_ISSUE;
+    let latest = null;
+    try {
+      const text = fs.readFileSync(file, "utf8");
+      for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        let o;
+        try { o = JSON.parse(line); } catch (e) { continue; }
+        if (o.task !== num && o.task !== ("issue-" + num)) continue;
+        const t = Date.parse(o.ts);
+        if (!Number.isFinite(t)) continue;
+        if (latest === null || t > latest) latest = t;
+      }
+    } catch (e) { /* no file / unreadable -> latest stays null */ }
+    if (latest === null) process.exit(0);
+    console.log(Math.floor((Date.now() - latest) / 60000));
+  ' 2>/dev/null
+}
 
 # --- driver-unit guard (issue #119): never advance an issue whose transient
 # driver unit (pr-loop-driver-issue<N>, spawned by loop-daemon.sh's run_driver)
@@ -135,6 +204,7 @@ advance_ready="none"
 fallback_ready="none"
 detail=""
 in_flight=""
+stalled_lines=""
 blocked_lines=""
 while IFS=$'\t' read -r num labels title; do
   [ -z "${num:-}" ] && continue
@@ -198,7 +268,18 @@ while IFS=$'\t' read -r num labels title; do
         "$b"|*"/$b") has_open_pr=1; break ;;
       esac
     done <<< "$open_pr_branches"
-    [ "$has_open_pr" -eq 1 ] || in_flight+="in_flight=$num"$'\n'
+    if [ "$has_open_pr" -eq 1 ]; then
+      : # already has an open PR -- never in_flight, never stalled
+    else
+      in_flight+="in_flight=$num"$'\n'
+      # --- stall detection (issue #98): only for genuinely in_flight issues,
+      # and only when at least one event exists (see the conservative
+      # false-positive rule in the header comment above) ---
+      age_min="$(last_event_age_minutes "$num")"
+      if [ -n "$age_min" ] && [ "$age_min" -ge "$stall_minutes" ]; then
+        stalled_lines+="stalled=$num age_min=$age_min"$'\n'
+      fi
+    fi
   fi
 done <<< "$planned"
 
@@ -212,6 +293,7 @@ fi
 echo "planned_issues=$planned_count"
 [ -n "$detail" ] && printf '%s' "$detail"
 [ -n "$in_flight" ] && printf '%s' "$in_flight"
+[ -n "$stalled_lines" ] && printf '%s' "$stalled_lines"
 [ -n "$blocked_lines" ] && printf '%s' "$blocked_lines"
 echo "advance_ready=$advance_ready"
 

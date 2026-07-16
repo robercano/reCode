@@ -115,6 +115,11 @@ write_tick_record() {
   case "$verdict" in
     "action=advance issue="*) action="advance"; issue="${verdict#action=advance issue=}" ;;
     "action=feedback pr="*) action="feedback"; pr="${verdict#action=feedback pr=}" ;;
+    "action=resume issue="*)
+      action="resume"
+      issue="${verdict#action=resume issue=}"
+      issue="${issue%% *}"
+      ;;
     "action=none") action="none" ;;
     *)
       action="${verdict#action=}"
@@ -516,6 +521,115 @@ if [ -z "$ceiling_block" ] && [ -n "$attempt_issue" ]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# STEP 0.5: stall/resume machinery (issue #98). An `in_flight` candidate (a
+# feat/issue-N-* branch exists, no open PR yet) used to be refused OUTRIGHT,
+# FOREVER -- exactly the incident issue #111's post-exit debris classifier
+# deals with AFTER a driver exits cleanly, but with no equivalent for a
+# driver that's still nominally "in flight" per the ledger yet has gone quiet
+# mid-session (hung, or its session died before loop-daemon.sh's own exit
+# handler ever ran verify_and_classify_post_exit on it). This closes that
+# gap: an in_flight candidate is RESUMED (verdict points at its existing
+# branch instead of refusing) when EITHER of two independent signals fires,
+# neither reimplemented here:
+#   - loop-census.sh's own stall clock (`stalled=N age_min=M`, driven by
+#     events.jsonl inactivity -- issue #98 pt 1), or
+#   - the branch's debris classifies as "half-done" via loop-daemon.sh's
+#     classify_debris (issue #111) -- called VERBATIM in a subshell below so
+#     the absent/empty/publishable/half-done state vocabulary never diverges
+#     between the two call sites.
+# Bounded to 2 resume attempts, tracked in a SIBLING state file
+# (.claude/state/loop-resume-attempts.json, {count,escalated} shape +
+# mktemp/atomic-mv discipline mirroring loop-issue-attempts.json) rather than
+# folded into loop-issue-attempts.json itself: that file counts advance/
+# feedback DISPATCHES against issue #95's spend ceiling -- a different budget
+# than "how many times has THIS stalled branch been resumed"; conflating the
+# two would let a resume silently eat into (or be eaten by) the dispatch
+# budget. The 3rd stall does not resume again: it escalates to needs-human
+# (mirroring the attempt-budget escalation block above -- label create +
+# issue edit + issue comment) and sets escalated:true so the loop never
+# auto-retries it again.
+# ---------------------------------------------------------------------------
+resume_attempts_file="$state_dir/loop-resume-attempts.json"
+
+# Best-effort telemetry only (issue #98) -- must never affect the tick, and
+# must never explode in a test fixture that doesn't ship log-event.sh.
+log_loop_event() {
+  [ -f "$script_dir/log-event.sh" ] || return 0
+  bash "$script_dir/log-event.sh" --role orchestrator --task "$1" --phase "$2" --detail "${3:-}" >/dev/null 2>&1 || true
+}
+
+# Is issue $1 named on one of census's own `stalled=N age_min=M` lines?
+is_census_stalled() {
+  printf '%s\n' "$census_out" | grep -q "^stalled=$1 "
+}
+
+# The bare branch name census printed for issue $1 on its
+# "issue=$1 branch=<name> title=..." detail line -- stripped of any
+# "origin/" remote-tracking prefix census may report (classify_debris and
+# loop-daemon.sh's worktree_for_branch both expect the BARE local branch
+# name). Prints nothing when the issue has no branch, or census's fixture
+# output never emitted a detail line for it.
+branch_for_issue() {
+  local b
+  b="$(printf '%s\n' "$census_out" | sed -n "s/^issue=$1 branch=\([^ ]*\) .*/\1/p" | head -1)"
+  [ -n "$b" ] && [ "$b" != "none" ] && printf '%s' "${b#origin/}"
+  return 0
+}
+
+# classify_debris for issue $1's branch, reusing loop-daemon.sh's classifier
+# VERBATIM (issue #111) -- sourced in a SUBSHELL so its top-level state
+# (state_dir, ledger, etc.) never leaks into this script's own variables.
+# Prints "absent" when there's no branch to classify, or when loop-daemon.sh
+# isn't sitting next to this script (a test fixture that never copied it in
+# -- guarded so those fixtures degrade to the pre-#98 in_flight-refuses
+# behavior instead of erroring).
+classify_debris_for_issue() {
+  local branch; branch="$(branch_for_issue "$1")"
+  [ -n "$branch" ] || { printf 'absent'; return 0; }
+  [ -f "$script_dir/loop-daemon.sh" ] || { printf 'absent'; return 0; }
+  (
+    # shellcheck source=loop-daemon.sh
+    . "$script_dir/loop-daemon.sh"
+    wt="$(worktree_for_branch "$branch")"
+    classify_debris "$branch" "$wt"
+  )
+}
+
+# $1=issue. Prints "<count>\t<escalated 0|1>" from resume_attempts_file.
+read_resume_state() {
+  local key="$1"
+  CLAUDE_RES_KEY="$key" node -e '
+    const fs = require("fs");
+    const key = process.env.CLAUDE_RES_KEY;
+    try {
+      const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const e = j[key] || {};
+      console.log((e.count||0) + "\t" + (e.escalated?1:0));
+    } catch (e) { console.log("0\t0"); }
+  ' "$resume_attempts_file" 2>/dev/null || printf '0\t0'
+}
+
+# $1=issue $2=count $3=escalated(0|1). Atomic temp+mv, mirroring every other
+# state-file writer in this script.
+write_resume_state() {
+  local key="$1" count="$2" escalated="$3"
+  local tmp; tmp="$(mktemp "$state_dir/.loop-resume-attempts.json.XXXXXX")"
+  if CLAUDE_RES_KEY="$key" CLAUDE_RES_COUNT="$count" CLAUDE_RES_ESC="$escalated" node -e '
+    const fs = require("fs");
+    const file = process.argv[1], tmp = process.argv[2];
+    const key = process.env.CLAUDE_RES_KEY;
+    let j = {};
+    try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) {}
+    j[key] = { count: parseInt(process.env.CLAUDE_RES_COUNT, 10) || 0, escalated: process.env.CLAUDE_RES_ESC === "1" };
+    fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\n");
+  ' "$resume_attempts_file" "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$resume_attempts_file"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 # --- Decide the verdict -----------------------------------------------------
 # The verdict string is captured into a variable (rather than echoed inline)
 # so it can ALSO be persisted to the tick log below without disturbing the
@@ -529,8 +643,46 @@ elif [ -n "$feedback_pr" ]; then
   verdict="action=feedback pr=$feedback_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
   if printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready"; then
-    echo "# advance refused: issue=$advance_ready is in_flight (a feat/issue-$advance_ready-* branch already exists with no open PR)"
-    verdict="action=none"
+    # --- stall/resume path (issue #98) --------------------------------------
+    stalled_now=0
+    is_census_stalled "$advance_ready" && stalled_now=1
+    debris_now="none"
+    if [ "$stalled_now" -eq 0 ]; then
+      debris_now="$(classify_debris_for_issue "$advance_ready")"
+    fi
+    if [ "$stalled_now" -eq 1 ] || [ "$debris_now" = "half-done" ]; then
+      log_loop_event "$advance_ready" "stall-detected" "in_flight issue=$advance_ready flagged stalled=$stalled_now debris=$debris_now"
+      IFS=$'\t' read -r resume_count resume_escalated <<<"$(read_resume_state "$advance_ready")"
+      case "$resume_count" in ''|*[!0-9]*) resume_count=0 ;; esac
+      case "$resume_escalated" in ''|*[!01]*) resume_escalated=0 ;; esac
+      resume_branch="$(branch_for_issue "$advance_ready")"
+      if [ "$resume_escalated" = "1" ]; then
+        echo "# advance refused: issue=$advance_ready is in_flight and stalled, but already escalated to needs-human -- not retrying"
+        verdict="action=none"
+      elif [ "$resume_count" -lt 2 ]; then
+        new_resume_count=$((resume_count + 1))
+        write_resume_state "$advance_ready" "$new_resume_count" "0"
+        echo "# resume: issue=$advance_ready is in_flight and stalled (attempt $new_resume_count/2) -- resuming the existing branch/worktree instead of refusing"
+        log_loop_event "$advance_ready" "resume-attempt" "resume attempt $new_resume_count/2 for issue=$advance_ready"
+        if [ -n "$resume_branch" ]; then
+          verdict="action=resume issue=$advance_ready branch=$resume_branch"
+        else
+          verdict="action=resume issue=$advance_ready"
+        fi
+      else
+        write_resume_state "$advance_ready" "$resume_count" "1"
+        gh label create "needs-human" --color b60205 --description "Loop attempt budget exhausted -- needs a human" --force >/dev/null 2>&1 || true
+        body="Issue #$advance_ready's feat/issue-$advance_ready-* branch has stalled and already been resumed $resume_count times without landing a PR. The loop will not retry it automatically -- labeling \`needs-human\`. Address it by hand, then either close it out or clear its entry in .claude/state/loop-resume-attempts.json to let the loop resume."
+        gh issue edit "$advance_ready" --add-label needs-human >/dev/null 2>&1 || true
+        gh issue comment "$advance_ready" --body "$body" >/dev/null 2>&1 || true
+        echo "# advance refused: issue=$advance_ready exhausted its 2 resume attempts -- escalated to needs-human"
+        log_loop_event "$advance_ready" "escalated-to-needs-human" "issue=$advance_ready escalated to needs-human after $resume_count resumes"
+        verdict="action=none"
+      fi
+    else
+      echo "# advance refused: issue=$advance_ready is in_flight (a feat/issue-$advance_ready-* branch already exists with no open PR)"
+      verdict="action=none"
+    fi
   elif [ "$lock_issue" = "$advance_ready" ]; then
     echo "# advance refused: spawn lock already held for issue=$advance_ready ($(cat "$lock_file" 2>/dev/null))"
     verdict="action=none"
@@ -551,6 +703,10 @@ fi
 dispatch_issue=""
 case "$verdict" in
   "action=advance issue="*) dispatch_issue="${verdict#action=advance issue=}" ;;
+  "action=resume issue="*)
+    dispatch_issue="${verdict#action=resume issue=}"
+    dispatch_issue="${dispatch_issue%% *}"
+    ;;
   "action=feedback pr="*)
     dispatch_pr="${verdict#action=feedback pr=}"
     if [ "$dispatch_pr" = "$feedback_pr" ] && [ -n "${feedback_issue:-}" ]; then

@@ -378,6 +378,164 @@ rc14=$?
 check "scenario 14: tick-record write failure never changes the exit status" [ "$rc14" -eq 0 ]
 check "scenario 14: verdict is still the LAST stdout line despite the write failure" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out14"
 
+# ---------------------------------------------------------------------------
+# 13. Stall/resume machinery (issue #98). An in_flight candidate that census
+# flags stalled=N (or whose branch classifies as half-done debris) must get a
+# `action=resume issue=N branch=...` verdict instead of a flat refusal, bounded
+# to 2 resume attempts before escalating to needs-human on the 3rd stall.
+# ---------------------------------------------------------------------------
+
+# Like new_fixture, but also copies in the REAL log-event.sh (issue #98
+# telemetry) -- needed only by scenarios that actually reach the stall/resume
+# path; every earlier scenario above never calls log_loop_event at all
+# (in_flight-without-stall short-circuits before it), so this never disturbs
+# them.
+new_fixture_with_events() {
+  local dir
+  dir="$(new_fixture "$@")"
+  cp "$script_dir/log-event.sh" "$dir/log-event.sh"
+  chmod +x "$dir/log-event.sh"
+  printf '%s\n' "$dir"
+}
+
+# Scenario 15: census's own stall clock (stalled=42) fires -> 1st resume
+# attempt. Verdict points at the existing branch; resume-attempts.json now
+# records count=1; both a stall-detected and a resume-attempt event land in
+# events.jsonl.
+ticks15_events="$work/scenario15-events.jsonl"
+dir15="$(new_fixture_with_events scenario15 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=42 branch=feat/issue-42-x title=Stalled thing
+in_flight=42
+stalled=42 age_min=45
+advance_ready=42
+cadence=FAST cron=* * * * *' '')"
+out15="$(CLAUDE_EVENTS_FILE="$ticks15_events" run_tick "$dir15")"
+check "scenario 15 (resume via census stall clock): verdict is action=resume issue=42 branch=feat/issue-42-x" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=42 branch=feat/issue-42-x" ]' _ "$out15"
+resume15="$dir15/../state/loop-resume-attempts.json"
+check "scenario 15: resume-attempts file records count=1, escalated=false for issue 42" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!j["42"] || j["42"].count !== 1 || j["42"].escalated !== false) throw new Error("got " + JSON.stringify(j));
+' "$resume15"
+check "scenario 15: stall-detected event logged (task=42)" bash -c 'grep -q "\"phase\":\"stall-detected\"" "$1" && grep -q "\"task\":\"42\"" "$1"' _ "$ticks15_events"
+check "scenario 15: resume-attempt event logged" bash -c 'grep -q "\"phase\":\"resume-attempt\"" "$1"' _ "$ticks15_events"
+check "scenario 15: no spawn lock written (resume is not a fresh advance)" [ ! -e "$dir15/../state/loop-advance.lock" ]
+
+# Scenario 16: SAME fixture/state, tick fires again while still stalled ->
+# 2nd resume attempt (bound not yet exhausted).
+out16="$(CLAUDE_EVENTS_FILE="$ticks15_events" run_tick "$dir15")"
+check "scenario 16 (2nd resume attempt): verdict is still action=resume issue=42" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=42 branch=feat/issue-42-x" ]' _ "$out16"
+check "scenario 16: resume-attempts file now records count=2" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!j["42"] || j["42"].count !== 2 || j["42"].escalated !== false) throw new Error("got " + JSON.stringify(j));
+' "$resume15"
+
+# Scenario 17: 3rd stall (count already at 2) -> escalate to needs-human
+# instead of resuming again: label create + issue edit + issue comment (all
+# via bot-gh.sh, captured here into a plain log file), escalated:true
+# persisted, and an escalated-to-needs-human event logged.
+gh_calls17="$work/scenario17-gh-calls.log"
+cat > "$dir15/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_calls17"
+exit 0
+EOF
+chmod +x "$dir15/bot-gh.sh"
+out17="$(CLAUDE_EVENTS_FILE="$ticks15_events" run_tick "$dir15")"
+check "scenario 17 (3rd stall, bound exhausted): verdict is action=none (does not resume again)" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out17"
+check "scenario 17: resume-attempts file now escalated=true (count stays 2)" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!j["42"] || j["42"].count !== 2 || j["42"].escalated !== true) throw new Error("got " + JSON.stringify(j));
+' "$resume15"
+check "scenario 17: needs-human label create + issue edit + issue comment all dispatched via bot-gh.sh" bash -c '
+  grep -q "^label create needs-human" "$1" &&
+  grep -q "^issue edit 42 --add-label needs-human" "$1" &&
+  grep -q "^issue comment 42 " "$1"
+' _ "$gh_calls17"
+check "scenario 17: escalated-to-needs-human event logged" bash -c 'grep -q "\"phase\":\"escalated-to-needs-human\"" "$1"' _ "$ticks15_events"
+
+# Scenario 18: a 4th tick, still stalled, AFTER escalation -> must not retry
+# automatically anymore (no further gh calls, no further resume).
+gh_calls_before18="$(wc -l < "$gh_calls17" | tr -d ' ')"
+out18="$(CLAUDE_EVENTS_FILE="$ticks15_events" run_tick "$dir15")"
+check "scenario 18 (already escalated): verdict stays action=none" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out18"
+check "scenario 18: diagnostic cites the prior escalation (not a fresh resume)" bash -c 'printf "%s\n" "$1" | grep -q "already escalated to needs-human"' _ "$out18"
+check "scenario 18: no additional gh calls were dispatched (stopped retrying automatically)" bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq "$2" ]' _ "$gh_calls17" "$gh_calls_before18"
+
+# Scenario 19: debris-based resume (issue #111's classify_debris reused
+# verbatim) -- NO census stalled= line at all, but the branch is genuinely
+# "half-done" (uncommitted work sitting in the worktree). Needs a REAL git
+# repo (loop-daemon.sh's classify_debris/worktree_for_branch shell out to
+# `git`) plus the real loop-daemon.sh copied alongside loop-tick.sh.
+new_git_backed_fixture() {
+  local name="$1" fake_census="$2" fake_feedback="$3"
+  local dir
+  dir="$(new_fixture_with_events "$name" "$fake_census" "$fake_feedback")"
+  cp "$script_dir/loop-daemon.sh" "$dir/loop-daemon.sh"
+  chmod +x "$dir/loop-daemon.sh"
+  local root_dir="${dir%/.claude/scripts}"
+  git -C "$root_dir" init -q -b main
+  git -C "$root_dir" config user.email t@e.st
+  git -C "$root_dir" config user.name t
+  git -C "$root_dir" commit -q --allow-empty -m init
+  printf '%s\n' "$dir"
+}
+
+dir19="$(new_git_backed_fixture scenario19 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=55 branch=feat/issue-55-x title=Debris thing
+in_flight=55
+advance_ready=55
+cadence=FAST cron=* * * * *' '')"
+root19="${dir19%/.claude/scripts}"
+# A SEPARATE linked worktree, not the main checkout -- mirrors real production
+# topology (an implementer's branch always lives in its own `.claude/worktrees/`
+# checkout, distinct from the root's own `.claude/state/`) and avoids tick's
+# OWN bookkeeping files (flock/lock/attempts, written into "$root/.claude/state"
+# moments before this classify call) being mistaken for a dirty worktree if the
+# candidate branch were checked out directly in root instead.
+git -C "$root19" branch feat/issue-55-x main
+wt19="$work/scenario19-wt"
+git -C "$root19" worktree add -q "$wt19" feat/issue-55-x
+echo "wip" > "$wt19/scratch.txt"   # uncommitted -> dirty worktree, 0 commits ahead -> half-done
+ticks19_events="$work/scenario19-events.jsonl"
+out19="$(CLAUDE_EVENTS_FILE="$ticks19_events" run_tick "$dir19")"
+check "scenario 19 (resume via half-done debris, no census stall clock): verdict is action=resume issue=55 branch=feat/issue-55-x" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=55 branch=feat/issue-55-x" ]' _ "$out19"
+check "scenario 19: stall-detected event records debris=half-done" bash -c 'grep -q "debris=half-done" "$1"' _ "$ticks19_events"
+resume19="$dir19/../state/loop-resume-attempts.json"
+check "scenario 19: resume-attempts file records count=1 for issue 55" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!j["55"] || j["55"].count !== 1) throw new Error("got " + JSON.stringify(j));
+' "$resume19"
+
+# Scenario 20 (negative control): in_flight, no census stall clock, and the
+# branch's debris is "publishable" (clean, committed, just no PR yet) rather
+# than half-done -- must NOT resume; the plain pre-#98 in_flight refusal
+# still applies unchanged.
+dir20="$(new_git_backed_fixture scenario20 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=66 branch=feat/issue-66-x title=Publishable thing
+in_flight=66
+advance_ready=66
+cadence=FAST cron=* * * * *' '')"
+root20="${dir20%/.claude/scripts}"
+# Same separate-worktree topology as scenario 19's fixture above.
+git -C "$root20" branch feat/issue-66-x main
+wt20="$work/scenario20-wt"
+git -C "$root20" worktree add -q "$wt20" feat/issue-66-x
+( cd "$wt20" && echo "done" > f.txt && git add f.txt && git -c user.email=t@e.st -c user.name=t commit -q -m work )
+out20="$(run_tick "$dir20")"
+check "scenario 20 (in_flight, publishable debris, no stall): still refused, no resume" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out20"
+check "scenario 20: diagnostic is the plain pre-#98 in_flight refusal" bash -c 'printf "%s\n" "$1" | grep -qF "is in_flight (a feat/issue-66-* branch already exists with no open PR)"' _ "$out20"
+check "scenario 20: no resume-attempts entry created for issue 66" bash -c '! grep -q "\"66\"" "$1" 2>/dev/null' _ "$dir20/../state/loop-resume-attempts.json"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-tick.test.sh: PASS ($ok checks)"
