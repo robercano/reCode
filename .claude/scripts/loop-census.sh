@@ -29,7 +29,30 @@
 #   advance_ready=<n|none>      lowest-numbered planned issue with no branch,
 #                               only when open_prs=0 (the ADVANCE precondition)
 #                               AND not blocked by an open "Blocked by #N" edge
+#   plan_wait=<n>                one line per candidate that would otherwise be
+#                               advance_ready but is awaiting owner review of a
+#                               posted plan (labelled `plan-review`, no
+#                               `plan-approved` yet) — issue #100's plan gate,
+#                               see PLAN GATE below. Only emitted when
+#                               plan.gate != "off".
+#   advance_mode=plan|implement-gated|implement   only emitted alongside a
+#                               non-"none" advance_ready when plan.gate !=
+#                               "off" (issue #100) — tells the tick which
+#                               driver prompt variant to build.
 #   cadence=FAST|WATCH|IDLE cron=<expr>   desired cadence per the loop policy
+#
+# --- PLAN GATE (issue #100) -------------------------------------------------
+# Optional, adapter-configured via plan.gate ("off" default | "label" |
+# "always"; see gates.json). When enabled, each candidate's labels classify it
+# as needs-plan (no plan posted yet — advance_mode=plan gates it into a
+# PLAN-ONLY driver turn), awaiting-owner (`plan-review` label present, no
+# `plan-approved` yet — treated like an open "Blocked by" edge: skipped for
+# BOTH advance_ready and fallback_ready, reported via plan_wait=<n>),
+# gated-approved (`plan-approved` present — advance_mode=implement-gated, the
+# approved plan comment is injected into the implementer/reviewers as
+# authoritative scope), or ungated (advance_mode=implement, today's behavior).
+# plan.gate="off" makes every line above a no-op — census output stays
+# byte-identical to pre-#100 behavior.
 #
 # The module label set is derived from $GATES_FILE (default .claude/gates.json)
 # → modules[].name, so the same script serves the self-hosted loop
@@ -113,6 +136,19 @@ stall_minutes=$(node -e '
   console.log((Number.isFinite(v) && v > 0) ? v : 30);
 ' "$gates" 2>/dev/null)
 case "$stall_minutes" in ''|*[!0-9]*) stall_minutes=30 ;; esac
+
+# Plan gate mode (issue #100), adapter-configurable via plan.gate: "off"
+# (default — this whole feature is a no-op, census output stays byte-identical
+# to pre-#100 behavior) | "label" (gate only candidates that ALSO carry the
+# plan-first label) | "always" (gate every planned+module candidate). Unknown/
+# missing value falls back to "off". Read ONCE, same node -e / require(gates)
+# pattern as base/module_labels/stall_minutes above.
+plan_mode=$(node -e '
+  const g = require(process.argv[1]);
+  const v = (g.plan && g.plan.gate) || "off";
+  console.log(["off", "label", "always"].includes(v) ? v : "off");
+' "$gates" 2>/dev/null)
+case "$plan_mode" in off|label|always) ;; *) plan_mode=off ;; esac
 
 events_file="${CLAUDE_EVENTS_FILE:-$root/.claude/state/events.jsonl}"
 
@@ -213,6 +249,9 @@ detail=""
 in_flight=""
 stalled_lines=""
 blocked_lines=""
+plan_wait_lines=""
+advance_plan_state=""
+fallback_plan_state=""
 while IFS=$'\t' read -r num labels title; do
   [ -z "${num:-}" ] && continue
   hit=0
@@ -234,10 +273,41 @@ while IFS=$'\t' read -r num labels title; do
   if [ "$branch" = "none" ] && [ "$open_prs" -eq 0 ] && ! driver_unit_active "$num"; then
     eligible=1
   fi
+
+  # --- plan gate (issue #100): derive this candidate's plan state from its
+  # labels. When gated (mode==always, or mode==label+plan-first) and not yet
+  # plan-reviewed/approved, an "awaiting-owner" candidate (plan posted, owner
+  # hasn't approved/rejected it yet) is NOT eligible for advance — the same
+  # treatment as a "Blocked by" dependency: it's blocked on a human, not ready
+  # to advance. Entirely a no-op (plan_state stays "ungated", eligible
+  # untouched) when plan_mode=off, so this feature costs nothing on the
+  # default path and census output stays byte-identical.
+  plan_state="ungated"
+  if [ "$plan_mode" != "off" ]; then
+    case ",$labels," in
+      *",plan-approved,"*) plan_state="gated-approved" ;;
+      *",plan-review,"*) plan_state="awaiting-owner" ;;
+      *)
+        gated=0
+        if [ "$plan_mode" = "always" ]; then
+          gated=1
+        else
+          case ",$labels," in *",plan-first,"*) gated=1 ;; esac
+        fi
+        [ "$gated" -eq 1 ] && plan_state="needs-plan"
+        ;;
+    esac
+    if [ "$plan_state" = "awaiting-owner" ]; then
+      eligible=0
+      plan_wait_lines+="plan_wait=$num"$'\n'
+    fi
+  fi
+
   # fallback_ready: lowest-numbered otherwise-eligible candidate, IGNORING the
   # blocking-graph gate — used only if the gate leaves advance_ready="none".
   if [ "$eligible" -eq 1 ] && [ "$fallback_ready" = "none" ]; then
     fallback_ready="$num"
+    fallback_plan_state="$plan_state"
   fi
   if [ "$eligible" -eq 1 ] && [ "$advance_ready" = "none" ]; then
     # Fetch this candidate's body only now — we're actually considering it.
@@ -260,6 +330,7 @@ while IFS=$'\t' read -r num labels title; do
       blocked_lines+="blocked=$num by=$first_open_blocker"$'\n'
     else
       advance_ready="$num"
+      advance_plan_state="$plan_state"
     fi
   fi
 
@@ -295,6 +366,7 @@ done <<< "$planned"
 if [ "$advance_ready" = "none" ] && [ "$fallback_ready" != "none" ]; then
   echo "census: all planned candidates blocked (possible cycle); falling back to lowest-number #$fallback_ready" >&2
   advance_ready="$fallback_ready"
+  advance_plan_state="$fallback_plan_state"
 fi
 
 echo "planned_issues=$planned_count"
@@ -302,6 +374,18 @@ echo "planned_issues=$planned_count"
 [ -n "$in_flight" ] && printf '%s' "$in_flight"
 [ -n "$stalled_lines" ] && printf '%s' "$stalled_lines"
 [ -n "$blocked_lines" ] && printf '%s' "$blocked_lines"
+[ -n "$plan_wait_lines" ] && printf '%s' "$plan_wait_lines"
+# advance_mode (issue #100): only emitted when the plan gate is on AND a
+# candidate was actually chosen — a tick reading this defaults to "implement"
+# when the line is absent (plan_mode=off, or advance_ready=none), which is
+# exactly today's ungated single-pass behavior.
+if [ "$plan_mode" != "off" ] && [ "$advance_ready" != "none" ]; then
+  case "$advance_plan_state" in
+    needs-plan) echo "advance_mode=plan" ;;
+    gated-approved) echo "advance_mode=implement-gated" ;;
+    *) echo "advance_mode=implement" ;;
+  esac
+fi
 echo "advance_ready=$advance_ready"
 
 # Desired cadence per the loop policy: FAST only when the loop can ACT now.

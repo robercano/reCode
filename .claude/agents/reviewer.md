@@ -26,6 +26,9 @@ If you touch GitHub at all (e.g. `gh pr diff`, `gh pr view`, `gh api`), route it
 1. Read the diff and the surrounding code it affects. Stay scoped: the diff plus what it touches — don't crawl the repo. For long test/build logs, filter to the relevant lines (`grep`/`tail`) instead of reading whole outputs into context.
 2. Apply ONLY your assigned lens — go deep, not broad:
    - **correctness**: logic errors, edge cases, off-by-one, error handling, race conditions, broken invariants.
+     If the task provides an APPROVED PLAN / authoritative scope (e.g. issue #100's plan gate), also verify
+     the diff stays within it — a diff that exceeds the approved plan's declared files or approach is a
+     valid reject under this lens ("exceeds approved scope").
    - **tests**: do tests actually exercise the change? coverage of edge/failure paths? meaningful assertions, not just "it runs"? Run the test gate if needed.
    - **security**: injection, auth/access control, unsafe input, secrets, dependency risk, (for smart contracts) reentrancy/overflow/access — defer to the project security skill if configured.
    - **performance**: needless work, N+1, allocations, blocking calls, complexity regressions.

@@ -210,6 +210,13 @@ echo "=== verdict ==="
 # --- Parse census telemetry needed for the verdict -------------------------
 advance_ready="$(printf '%s\n' "$census_out" | sed -n 's/^advance_ready=//p' | tail -1)"
 advance_ready="${advance_ready:-none}"
+# Plan-gate mode (issue #100): census emits advance_mode=plan|implement-gated|
+# implement alongside a non-"none" advance_ready ONLY when plan.gate != "off"
+# — absent (default "implement") reproduces today's ungated single-pass
+# behavior. Only meaningful for an actual action=advance verdict below; see
+# where it's echoed into this tick's own stdout, scoped to that branch only.
+advance_mode="$(printf '%s\n' "$census_out" | sed -n 's/^advance_mode=//p' | tail -1)"
+advance_mode="${advance_mode:-implement}"
 in_flight_issues="$(printf '%s\n' "$census_out" | sed -n 's/^in_flight=//p')"
 # Cadence (FAST/WATCH/IDLE), for the tick record (issue #85) -- census emits
 # e.g. "cadence=FAST cron=* * * * *"; keep only the leading token.
@@ -715,6 +722,13 @@ elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
     printf 'issue=%s ts=%s\n' "$advance_ready" "$(date -u +%FT%TZ)" > "$tmp"
     mv -f "$tmp" "$lock_file"
     verdict="action=advance issue=$advance_ready"
+    # advance_mode telemetry (issue #100): only for a GENUINE advance dispatch
+    # (never on a refused/downgraded verdict above) -- loop-event.sh greps
+    # this out of the tick's full stdout (not the tail-1 verdict) to pick the
+    # right driver prompt variant. Printed BEFORE the final verdict line
+    # below, so it never disturbs the "verdict is the last stdout line"
+    # invariant.
+    echo "advance_mode=$advance_mode"
   fi
 else
   # --- stall/resume path (issue #98, reworked) -----------------------------
