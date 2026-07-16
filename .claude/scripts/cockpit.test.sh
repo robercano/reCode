@@ -1060,6 +1060,111 @@ html_stale_off="$work/cockpit-stale-off.html"
 COCKPIT_NOW="2026-02-01T01:00:00Z" COCKPIT_STALE_AFTER_SECONDS=864000 bash "$cockpit" --fixtures "$work/fixtures-stale" "$html_stale_off" >/dev/null 2>"$work/stderr-stale-off.log"
 check "COCKPIT_STALE_AFTER_SECONDS raises the threshold (no stale badge anywhere)" bash -c '! grep -qF ">stale &middot;" "$1"' _ "$html_stale_off"
 
+# ---------------------------------------------------------------------------
+# 9. Live-progress age/timeout-budget badge (issue #116): renderLiveProgress()
+#    appends "<elapsed>m / <budget>m timeout" INSIDE each worker row's
+#    existing "Updated" cell (never a new column), muted under
+#    TIMEOUT_WARN_FRACTION (80% default) of LOOP_DRIVER_TIMEOUT (90m
+#    default), warn from 80% up to 100%, bad at/over 100% -- but ONLY while a
+#    .loop-driver-out.*.json file signals a driver is still running; once it
+#    has exited the badge mutes regardless of ratio (timeoutBadge(), see the
+#    comment block above it in cockpit.sh). All three fixture dirs below pin
+#    COCKPIT_NOW to the SAME instant so every row's elapsed minutes are exact
+#    (no floor()-rounding edge cases), and use exact-minute offsets from it.
+# ---------------------------------------------------------------------------
+tb_now="2026-04-01T12:00:00Z"
+mkdir -p "$work/fixtures-timeout"
+echo "[]" > "$work/fixtures-timeout/issues.json"
+echo "[]" > "$work/fixtures-timeout/prs.json"
+# 401: 60m elapsed / 90m default budget = 66.7% -> muted (case: under 80%).
+# 402: 73m elapsed / 90m default budget = 81.1% -> warn (case: just over 80%).
+# 403: 91m elapsed / 90m default budget = 101.1% -> bad (case: just over 100%).
+cat > "$work/fixtures-timeout/events.jsonl" <<'EOF'
+{"ts":"2026-04-01T11:00:00Z","role":"implementer","model":"sonnet","task":"401","phase":"implementing","lens":"","detail":""}
+{"ts":"2026-04-01T10:47:00Z","role":"implementer","model":"sonnet","task":"402","phase":"implementing","lens":"","detail":""}
+{"ts":"2026-04-01T10:29:00Z","role":"implementer","model":"sonnet","task":"403","phase":"implementing","lens":"","detail":""}
+EOF
+echo '{"running":true}' > "$work/fixtures-timeout/loop-driver-running.json"
+
+html_timeout="$work/cockpit-timeout.html"
+COCKPIT_NOW="$tb_now" bash "$cockpit" --fixtures "$work/fixtures-timeout" "$html_timeout" >/dev/null 2>"$work/stderr-timeout.log"
+rc_timeout=$?
+check "timeout-budget fixture run exits 0 (driver running)" [ "$rc_timeout" -eq 0 ]
+
+check "under-80%-budget row badges muted while the driver is running (401)" \
+  grep -qF '<td>2026-04-01T11:00:00Z <span class="badge muted">60m / 90m timeout</span></td>' "$html_timeout"
+check "just-over-80%-budget row badges warn (402)" \
+  grep -qF '<td>2026-04-01T10:47:00Z <span class="badge warn">73m / 90m timeout</span></td>' "$html_timeout"
+check "just-over-100%-budget row badges bad while the driver is running (403)" \
+  grep -qF '<td>2026-04-01T10:29:00Z <span class="badge bad">91m / 90m timeout</span></td>' "$html_timeout"
+
+# Colspan-preserving regression guard: the "Xm / Ym timeout" badge must live
+# INSIDE the existing Updated <td> (immediately after the row's own
+# timestamp, no closing </td> in between) and the row must still end with
+# exactly the same trailing hidden wrow-meta <td> the pre-#116 rows had -- an
+# accidental new column would break this exact-row match even though the
+# per-cell greps above would still pass.
+check "timeout badge is nested INSIDE the Updated <td>, not a new column (colspan/column-count regression guard)" \
+  grep -qF '<tr><td>implementer</td><td>401</td><td><code>sonnet</code></td><td><span class="badge warn">implementing</span></td><td></td><td>2026-04-01T11:00:00Z <span class="badge muted">60m / 90m timeout</span></td><td class="wrow-meta" data-role="implementer" data-task="401" hidden></td></tr>' "$html_timeout"
+
+# Driver-exited override: same >100%-elapsed row (403) as above, but with the
+# loop-driver-running.json seam flipped to {"running":false} -- the elapsed/
+# budget numbers stay identical, only the class must drop to muted (a "bad"
+# badge on a driver that has already exited would misleadingly read as a
+# still-ticking alarm).
+echo '{"running":false}' > "$work/fixtures-timeout/loop-driver-running.json"
+html_timeout_exited="$work/cockpit-timeout-exited.html"
+COCKPIT_NOW="$tb_now" bash "$cockpit" --fixtures "$work/fixtures-timeout" "$html_timeout_exited" >/dev/null 2>"$work/stderr-timeout-exited.log"
+rc_timeout_exited=$?
+check "timeout-budget fixture run exits 0 (driver exited)" [ "$rc_timeout_exited" -eq 0 ]
+check "same >100%-elapsed row badges muted once the driver has exited (403, driver-exited override)" \
+  grep -qF '<td>2026-04-01T10:29:00Z <span class="badge muted">91m / 90m timeout</span></td>' "$html_timeout_exited"
+
+# LOOP_DRIVER_TIMEOUT override: changes BOTH the budget half of the label AND
+# the threshold math it's checked against (mirrors the
+# COCKPIT_STALE_AFTER_SECONDS override test above) -- 9m elapsed against a
+# 10m budget is 90%, past the 80% warn line under the OVERRIDDEN budget, even
+# though 9m is nowhere near 80% of the 90m DEFAULT budget.
+mkdir -p "$work/fixtures-timeout-override"
+echo "[]" > "$work/fixtures-timeout-override/issues.json"
+echo "[]" > "$work/fixtures-timeout-override/prs.json"
+cat > "$work/fixtures-timeout-override/events.jsonl" <<'EOF'
+{"ts":"2026-04-01T11:51:00Z","role":"implementer","model":"sonnet","task":"501","phase":"implementing","lens":"","detail":""}
+EOF
+echo '{"running":true}' > "$work/fixtures-timeout-override/loop-driver-running.json"
+html_timeout_override="$work/cockpit-timeout-override.html"
+COCKPIT_NOW="$tb_now" LOOP_DRIVER_TIMEOUT="10m" bash "$cockpit" --fixtures "$work/fixtures-timeout-override" "$html_timeout_override" >/dev/null 2>"$work/stderr-timeout-override.log"
+rc_timeout_override=$?
+check "timeout-budget fixture run exits 0 (LOOP_DRIVER_TIMEOUT override)" [ "$rc_timeout_override" -eq 0 ]
+check "LOOP_DRIVER_TIMEOUT override changes both the label's budget AND the threshold math (501: 9m/10m = 90% -> warn)" \
+  grep -qF '<td>2026-04-01T11:51:00Z <span class="badge warn">9m / 10m timeout</span></td>' "$html_timeout_override"
+check "LOOP_DRIVER_TIMEOUT override is actually applied, not silently falling back to the 90m default" \
+  bash -c '! grep -qF "9m / 90m timeout" "$1"' _ "$html_timeout_override"
+
+# Case 8 (SSE-path cross-check between cockpit.sh's server render and
+# cockpit-serve.sh's client-side upsertRow()/timeoutBadgeInfo()) is
+# deliberately SKIPPED here, not silently dropped:
+#   - cockpit-serve.sh's injected client script (see clientScript() and its
+#     comment block, "duplicated rather than shared") computes elapsed off
+#     the BROWSER's real Date.now() with no COCKPIT_NOW-style override seam
+#     -- by design, so an open dashboard tab's badge keeps ticking live. Any
+#     check against it is therefore inherently real-wall-clock-dependent,
+#     breaking the COCKPIT_NOW-pinned determinism every other case in this
+#     file (including the cases just above) relies on, for a timing-
+#     sensitive minute-floor label comparison that would be genuinely flaky
+#     in CI.
+#   - Actually driving upsertRow() end-to-end would need a real DOM/browser
+#     (EventSource, document.createElement, etc.), which this offline harness
+#     has no way to execute; adding one (e.g. puppeteer) would pull in a new
+#     dependency, contradicting root package.json's documented "cockpit
+#     dashboard ... no dependencies, node built-ins only" contract.
+# Direct code review confirms the two implementations stay structurally
+# identical (same parseDurationToSeconds regex/multipliers, same ratio
+# math, same 0.8 default fraction, same muted/warn/bad thresholds) -- see
+# cockpit.sh's timeoutBadge() (~line 735) vs cockpit-serve.sh's
+# timeoutBadgeInfo() (~line 288), and the "mirrors cockpit.sh's own ..."
+# comments tying them together at each divergence point.
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "cockpit.test.sh: PASS ($ok checks)"
