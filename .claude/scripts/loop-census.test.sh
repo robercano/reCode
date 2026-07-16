@@ -502,6 +502,97 @@ check "(d) task-list ref alone does not gate — advance_ready=40" bash -c \
 check "(d) no blocked= line emitted for a task-list-only reference" bash -c \
   '! printf "%s\n" "$1" | grep -q "^blocked="' _ "$outTasklist"
 
+# ---------------------------------------------------------------------------
+# Stall detection (issue #98): loop-census.sh must emit `stalled=N age_min=M`
+# for an in_flight issue whose newest events.jsonl activity (task field either
+# "N" or "issue-N" -- both forms occur in real logs) is older than
+# budget.stall_minutes, while leaving fresh/zero-event/has-a-PR issues alone.
+#
+# Fixture: four planned+module:test issues, each with its own
+# feat/issue-N-* branch and NO open PR (issue 90 is the one exception, with
+# an open PR, to prove "stalled branch + open PR -> NOT stalled"):
+#   80  stale events (task="80", well past the threshold)      -> stalled
+#   81  fresh events (task="issue-81", well within the threshold) -> NOT stalled
+#   82  zero events at all for this task                        -> NOT stalled
+#     (conservative false-positive rule: never kill a just-created branch)
+#   90  stale events (task="90") but an OPEN PR already exists   -> NOT stalled
+#     (never even in_flight, so never even considered for staleness)
+# stall_minutes is set to 2 in this fixture's own gates.json so the test
+# doesn't need to wait a real 30 minutes -- timestamps below are computed
+# relative to the ACTUAL wall clock at test run time via `date -u -d`.
+# ---------------------------------------------------------------------------
+dirStall="$work/stall"
+scriptsStall="$dirStall/.claude/scripts"
+mkdir -p "$scriptsStall"
+cp "$census_src" "$scriptsStall/loop-census.sh"
+cp "$resolve_roots_src" "$scriptsStall/resolve-roots.sh"
+cat > "$dirStall/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" },
+  "budget": { "stall_minutes": 2 }
+}
+EOF
+cat > "$scriptsStall/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsStall/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      printf '%s\n' "feat/issue-90-x"
+    else
+      echo 1
+    fi
+    ;;
+  issue)
+    printf '80\tplanned,module:test\tStale issue eighty\n'
+    printf '81\tplanned,module:test\tFresh issue eighty one\n'
+    printf '82\tplanned,module:test\tNo-events issue eighty two\n'
+    printf '90\tplanned,module:test\tStale-but-has-PR issue ninety\n'
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$scriptsStall"/*.sh
+git -C "$dirStall" init -q -b main
+git -C "$dirStall" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+git -C "$dirStall" branch feat/issue-80-a main >/dev/null
+git -C "$dirStall" branch feat/issue-81-a main >/dev/null
+git -C "$dirStall" branch feat/issue-82-a main >/dev/null
+git -C "$dirStall" branch feat/issue-90-x main >/dev/null
+
+eventsStall="$work/stall-events.jsonl"
+stale_ts="$(date -u -d '-45 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+fresh_ts="$(date -u -d '-1 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+{
+  printf '{"ts":"%s","role":"implementer","model":"sonnet","task":"80","phase":"implementing","lens":"","detail":""}\n' "$stale_ts"
+  printf '{"ts":"%s","role":"implementer","model":"sonnet","task":"issue-81","phase":"implementing","lens":"","detail":""}\n' "$fresh_ts"
+  printf '{"ts":"%s","role":"implementer","model":"sonnet","task":"90","phase":"implementing","lens":"","detail":""}\n' "$stale_ts"
+} > "$eventsStall"
+
+outStall="$(env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsStall" bash "$scriptsStall/loop-census.sh" "acme/repo")"
+
+check "stall: stale in_flight issue 80 (task=\"80\" form) IS reported stalled" bash -c \
+  'printf "%s\n" "$1" | grep -q "^stalled=80 age_min="' _ "$outStall"
+check "stall: fresh in_flight issue 81 (task=\"issue-81\" form) is NOT stalled" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^stalled=81 "' _ "$outStall"
+check "stall: issue 82 has zero events -> NOT stalled (conservative false-positive rule)" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^stalled=82 "' _ "$outStall"
+check "stall: issue 90 has stale events but an OPEN PR -> NOT stalled" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^stalled=90 "' _ "$outStall"
+check "stall: issue 90 with an open PR is also NOT in_flight" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "in_flight=90"' _ "$outStall"
+check "stall: exactly one stalled= line total" bash -c \
+  '[ "$(printf "%s\n" "$1" | grep -c "^stalled=")" -eq 1 ]' _ "$outStall"
+check "stall: age_min on the stalled line is at least the 2-minute threshold" bash -c '
+  age="$(printf "%s\n" "$1" | sed -n "s/^stalled=80 age_min=\([0-9]*\)/\1/p")"
+  [ -n "$age" ] && [ "$age" -ge 2 ]
+' _ "$outStall"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-census.test.sh: PASS ($ok checks)"
