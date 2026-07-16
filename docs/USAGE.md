@@ -356,7 +356,13 @@ decide what the loop actually touches:
   The ADVANCE step picks the **lowest-numbered open issue labelled `planned` + `module:*`** with no
   existing `feat/issue-<n>-*` branch — one at a time, and only when there are zero open PRs. Tracking
   issues (plans split into `Blocked by` sub-issue chains) stay `backlog` forever so the loop works the
-  chain, never the tracker.
+  chain, never the tracker. **"Blocked by #N" in an issue body is load-bearing for this selection, not
+  merely cosmetic for the cockpit graph** (`loop-census.sh`, issue #97): the census skips a `planned`
+  candidate while any issue it declares "Blocked by" is still open, emits a `blocked=<n> by=<N>` line
+  explaining the skip, and picks the next unblocked lowest-numbered candidate instead — a blocker
+  closing makes the skipped issue eligible again on the very next tick, no extra bookkeeping required.
+  A "Blocked by" cycle falls back to the lowest-numbered candidate rather than wedging the loop. Only
+  the explicit "Blocked by" phrase gates; task-list/parent-child refs (`- [ ] #N`) do not.
 - **Owner-approval merge gate.** Workers author PRs as the **bot** (`bot-gh.sh`); the MERGE step (above)
   only merges PRs the repo **owner** has Approved on GitHub that are CI-green and mergeable. It never
   approves on the owner's behalf.
