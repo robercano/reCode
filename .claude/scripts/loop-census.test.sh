@@ -38,6 +38,7 @@ set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 census_src="$script_dir/loop-census.sh"
 resolve_roots_src="$script_dir/resolve-roots.sh"
+cockpit_src="$script_dir/cockpit.sh"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/loop-census-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -261,6 +262,245 @@ dirB="$(build_guard_fixture guardB)"
 outB="$(env -u GATES_FILE PATH="$curated_bin" bash "$dirB/.claude/scripts/loop-census.sh" "acme/repo")"
 check "driver_unit_active guard (b): systemctl unavailable — guard no-ops, advance_ready falls back to issue 5" bash -c '
   printf "%s\n" "$1" | grep -qx "advance_ready=5"' _ "$outB"
+
+# ---------------------------------------------------------------------------
+# Blocking-graph gate (issue #97): advance_ready must skip a candidate whose
+# body says "Blocked by #N" while N is still OPEN, emit a `blocked=<n> by=<N>`
+# census line for it, and pick the next unblocked lowest-numbered candidate
+# instead. A blocker closing (dropping out of the open-issue set) must make
+# the previously-blocked candidate eligible again on the very next run — no
+# extra state, since census re-derives everything from the current gh state
+# every time it's invoked. A "Blocked by" cycle between two planned issues
+# must not wedge the loop: fall back to the lowest-numbered of the cycle and
+# log the fallback to stderr. Task-list refs (`- [ ] #N`) must NOT gate.
+#
+# Each fixture below reuses the REAL cockpit.sh (`--parse-blocking` seam),
+# copied in verbatim — never reimplemented — plus a stub bot-gh.sh that
+# dispatches on `issue list` (with/without `--label`, to tell the planned-
+# issue TSV fetch apart from the all-open-issue-numbers fetch) and
+# `issue view <n> --json body` (per-candidate body fetch).
+# ---------------------------------------------------------------------------
+scaffold_blocking_fixture() {
+  local dir="$1"
+  local scripts="$dir/.claude/scripts"
+  mkdir -p "$scripts"
+  cp "$census_src" "$scripts/loop-census.sh"
+  cp "$resolve_roots_src" "$scripts/resolve-roots.sh"
+  cp "$cockpit_src" "$scripts/cockpit.sh"
+  cat > "$dir/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+  cat > "$scripts/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$scripts/pr-feedback.sh" "$scripts/cockpit.sh" "$scripts/loop-census.sh"
+  git -C "$dir" init -q -b main
+  git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+}
+
+run_blocking_fixture() {
+  # $1 = fixture dir, $2 = stderr capture file. Stdout returned on stdout.
+  env -u GATES_FILE bash "$1/.claude/scripts/loop-census.sh" "acme/repo" 2>"$2"
+}
+
+# --- (a)+(b): issue 20 "Blocked by #99", issue 21 no blockers. Two states of
+# the SAME fixture shape, differing only in whether 99 is in the open set. ---
+dirBlockOpen="$work/blockOpen"
+scaffold_blocking_fixture "$dirBlockOpen"
+cat > "$dirBlockOpen/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '20\tplanned,module:test\tCandidate twenty\n'
+          printf '21\tplanned,module:test\tCandidate twenty one\n'
+        else
+          # all-open-issue-numbers fetch: 99 (the blocker) is still OPEN.
+          printf '20\n21\n99\n'
+        fi
+        ;;
+      view)
+        case "$3" in
+          20) echo '{"body":"Blocked by #99"}' ;;
+          21) echo '{"body":"no blockers here"}' ;;
+          *) echo '{"body":""}' ;;
+        esac
+        ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirBlockOpen/.claude/scripts/bot-gh.sh"
+errBlockOpen="$work/blockOpen.stderr"
+outBlockOpen="$(run_blocking_fixture "$dirBlockOpen" "$errBlockOpen")"
+
+check "(a) issue 20 blocked by OPEN #99 is not advance_ready" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "advance_ready=20"' _ "$outBlockOpen"
+check "(a) blocked=20 by=99 census line emitted" bash -c \
+  'printf "%s\n" "$1" | grep -qx "blocked=20 by=99"' _ "$outBlockOpen"
+check "(a) advance_ready instead picks unblocked candidate 21" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=21"' _ "$outBlockOpen"
+
+# Same fixture, but 99 has since been closed (dropped from the open set) —
+# copy the fixture and swap only the bot-gh.sh's open-issue-numbers branch.
+dirBlockClosed="$work/blockClosed"
+scaffold_blocking_fixture "$dirBlockClosed"
+cat > "$dirBlockClosed/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '20\tplanned,module:test\tCandidate twenty\n'
+          printf '21\tplanned,module:test\tCandidate twenty one\n'
+        else
+          # all-open-issue-numbers fetch: 99 (the blocker) is now CLOSED —
+          # absent from this list entirely.
+          printf '20\n21\n'
+        fi
+        ;;
+      view)
+        case "$3" in
+          20) echo '{"body":"Blocked by #99"}' ;;
+          21) echo '{"body":"no blockers here"}' ;;
+          *) echo '{"body":""}' ;;
+        esac
+        ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirBlockClosed/.claude/scripts/bot-gh.sh"
+errBlockClosed="$work/blockClosed.stderr"
+outBlockClosed="$(run_blocking_fixture "$dirBlockClosed" "$errBlockClosed")"
+
+check "(b) blocker #99 closed -> no blocked=20 line" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "blocked=20 by=99"' _ "$outBlockClosed"
+check "(b) issue 20 becomes advance_ready again once its blocker closes" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=20"' _ "$outBlockClosed"
+
+# --- (c): cycle — issue 30 "Blocked by #31", issue 31 "Blocked by #30", both
+# open+planned. Must not wedge: falls back to the lowest-numbered (#30) and
+# logs the fallback to stderr. ---
+dirCycle="$work/cycle"
+scaffold_blocking_fixture "$dirCycle"
+cat > "$dirCycle/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '30\tplanned,module:test\tCandidate thirty\n'
+          printf '31\tplanned,module:test\tCandidate thirty one\n'
+        else
+          printf '30\n31\n'
+        fi
+        ;;
+      view)
+        case "$3" in
+          30) echo '{"body":"Blocked by #31"}' ;;
+          31) echo '{"body":"Blocked by #30"}' ;;
+          *) echo '{"body":""}' ;;
+        esac
+        ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirCycle/.claude/scripts/bot-gh.sh"
+errCycle="$work/cycle.stderr"
+outCycle="$(run_blocking_fixture "$dirCycle" "$errCycle")"
+
+check "(c) cycle: advance_ready is non-none (loop does not wedge)" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "advance_ready=none"' _ "$outCycle"
+check "(c) cycle: advance_ready falls back to the lowest-numbered issue (30)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=30"' _ "$outCycle"
+check "(c) cycle: both directions reported as blocked=" bash -c \
+  'printf "%s\n" "$1" | grep -qx "blocked=30 by=31" && printf "%s\n" "$1" | grep -qx "blocked=31 by=30"' _ "$outCycle"
+check "(c) cycle: fallback logged to stderr" bash -c \
+  'grep -q "all planned candidates blocked" "$1" && grep -q "falling back to lowest-number #30" "$1"' _ "$errCycle"
+
+# --- (d): task-list edge (`- [ ] #N`) but NO "Blocked by" — must NOT gate. ---
+dirTasklist="$work/tasklist"
+scaffold_blocking_fixture "$dirTasklist"
+cat > "$dirTasklist/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '40\tplanned,module:test\tTracker forty\n'
+        else
+          printf '40\n41\n'
+        fi
+        ;;
+      view)
+        case "$3" in
+          40) echo '{"body":"- [ ] #41 sub-task, not a blocker"}' ;;
+          *) echo '{"body":""}' ;;
+        esac
+        ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirTasklist/.claude/scripts/bot-gh.sh"
+errTasklist="$work/tasklist.stderr"
+outTasklist="$(run_blocking_fixture "$dirTasklist" "$errTasklist")"
+
+check "(d) task-list ref alone does not gate — advance_ready=40" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=40"' _ "$outTasklist"
+check "(d) no blocked= line emitted for a task-list-only reference" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^blocked="' _ "$outTasklist"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
