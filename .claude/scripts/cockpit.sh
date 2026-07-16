@@ -15,6 +15,13 @@
 # first), and a STALLED banner if no tick has landed in over 2x the cadence's
 # expected interval (FAST=60s -> 120s, WATCH=300s -> 600s, IDLE=900s -> 1800s).
 #
+# The live panel derives ACCURATE task state, not just last-event-per-raw-key
+# (the stale-cockpit fix): worker identity is (role, normalized task, lens) so
+# id variants like "81"/"issue-81" merge; a task whose orchestrator logged
+# "done" last is rendered as one done-badged header (no phantom in-flight
+# rows); an unfinished task silent for >COCKPIT_STALE_AFTER_SECONDS (default
+# 2h) is badged "stale" with muted rows instead of reading as active work.
+#
 # Usage:
 #   cockpit.sh [--fixtures <dir>] [output-path]
 #   cockpit.sh --parse-blocking
@@ -424,11 +431,21 @@ function prBadge(pr) {
 }
 
 function renderLiveProgress() {
-  const latest = new Map(); // "role\u0000task" -> event
+  // Worker identity is (role, NORMALIZED task, lens) - not the raw task
+  // string. Workers log the same task inconsistently ("81", "issue-81",
+  // "issue-70-worker-inspector"), and keying on the raw string meant a
+  // "done" logged under one variant never overwrote the "reviewing" logged
+  // under another, leaving phantom in-flight rows forever (the stale-cockpit
+  // bug on issues 70/81). Lens stays in the key: two reviewers of the same
+  // task under different lenses are genuinely distinct workers.
+  const latest = new Map(); // "role\u0000groupKey\u0000lens" -> event
+  let seq = 0;
   for (const ev of events) {
     const role = ev.role != null ? String(ev.role) : "";
     const task = ev.task != null ? String(ev.task) : "";
-    const key = role + "\u0000" + task;
+    const lens = ev.lens != null ? String(ev.lens) : "";
+    const key = role + "\u0000" + taskGroupKey(task).key + "\u0000" + lens;
+    ev._seq = seq++; // file order == append order; used by the finished check
     latest.set(key, ev); // later lines overwrite earlier ones for the same key
   }
   const workers = [...latest.values()];
@@ -475,18 +492,52 @@ function renderLiveProgress() {
         const pr = findPRForIssue(g.num);
         if (pr) header += ` &middot; PR ${prBadge(pr)}`;
       }
+      // Task-level terminal state (stale-cockpit fix): the orchestrator owns
+      // the task lifecycle, so a group whose orchestrator's latest event is
+      // "done" — with no worker activity logged AFTER it (_seq = file order)
+      // — is finished, even when a sub-worker never logged its own "done"
+      // (crashed, or logged it under a task-id variant the old raw-string
+      // keying missed). No orchestrator events at all falls back to "every
+      // worker done". Finished groups render as one done-badged header row,
+      // not a table of phantom "implementing"/"reviewing" workers.
+      const orch = g.workers.filter((w) => String(w.role) === "orchestrator");
+      const orchDoneSeq = orch.length > 0 && orch.every((w) => w.phase === "done")
+        ? Math.max(...orch.map((w) => w._seq || 0)) : -1;
+      const lastActiveSeq = g.workers.reduce(
+        (acc, w) => (w.phase !== "done" && (w._seq || 0) > acc ? (w._seq || 0) : acc), -1);
+      const finished = orchDoneSeq >= 0
+        ? orchDoneSeq > lastActiveSeq
+        : g.workers.every((w) => w.phase === "done");
+      // Staleness (same fix): an unfinished group with no events for over
+      // STALE_AFTER_SECONDS is far more likely a crashed/wedged worker than
+      // live work — badge it and mute its rows so it never reads as active.
+      const newestMs = g.workers.reduce((acc, w) => {
+        const t = Date.parse(String(w.ts || ""));
+        return Number.isFinite(t) && t > acc ? t : acc;
+      }, -Infinity);
+      const stale = !finished && Number.isFinite(newestMs)
+        && nowMs - newestMs > STALE_AFTER_SECONDS * 1000;
+      if (finished) header += ` <span class="badge good">done</span>`;
+      if (stale) {
+        const hours = Math.floor((nowMs - newestMs) / 3600000);
+        const age = hours >= 48 ? `${Math.floor(hours / 24)}d` : `${hours}h`;
+        header += ` <span class="badge muted">stale &middot; no events for ${esc(age)}</span>`;
+      }
       // Group-header row: a full-width <td colspan> so it never collides
       // with the "<tr><td>" pattern a plain worker row starts with (tests
       // and the client sort script both rely on being able to tell the two
       // apart) — it uses <tr class="task-group"> instead of a bare <tr>.
       html += `<tr class="task-group"><td colspan="7"><strong>${header}</strong></td></tr>`;
+      if (finished) continue;
       const rows = g.workers.slice().sort((a, b) => {
         const ar = String(a.role || ""), br = String(b.role || "");
         if (ar !== br) return ar.localeCompare(br);
         return String(a.task || "").localeCompare(String(b.task || ""));
       });
       for (const w of rows) {
-        const badge = phaseBadge(w.phase);
+        // Stale groups mute every phase badge: a week-old "implementing"
+        // rendered warn-yellow is exactly the lie this fix removes.
+        const badge = stale ? { cls: "muted" } : phaseBadge(w.phase);
         html += `<tr><td>${esc(w.role)}</td><td>${esc(w.task)}</td><td><code>${esc(w.model || "(none)")}</code></td>`;
         html += `<td><span class="badge ${badge.cls}">${esc(w.phase || "(unknown)")}</span></td>`;
         html += `<td>${esc(w.lens || "")}</td><td>${esc(w.ts)}</td>`;
@@ -520,6 +571,16 @@ const nowMs = process.env.COCKPIT_NOW ? Date.parse(process.env.COCKPIT_NOW) : Da
 const VERDICT_HISTORY_N = (() => {
   const n = parseInt(process.env.COCKPIT_VERDICT_HISTORY_N, 10);
   return Number.isFinite(n) && n > 0 ? n : 10;
+})();
+// Live-progress staleness threshold (stale-cockpit fix, see
+// renderLiveProgress): an unfinished task group with no events for longer
+// than this is badged "stale" instead of rendering as active work. Default
+// 2h — long enough for a slow gate run, far shorter than the days-old
+// phantom workers this guards against. Same override style as the consts
+// above; COCKPIT_NOW pins "now" for tests.
+const STALE_AFTER_SECONDS = (() => {
+  const n = parseInt(process.env.COCKPIT_STALE_AFTER_SECONDS, 10);
+  return Number.isFinite(n) && n > 0 ? n : 7200;
 })();
 function renderLoopHealth() {
   let html = `<section id="loop-health"><h2>Loop health</h2>`;

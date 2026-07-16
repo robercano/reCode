@@ -821,6 +821,107 @@ check "live-progress table headers carry data-sort-key attributes for the client
 check "output HTML has no external <script src=...> (self-contained-HTML constraint)" bash -c '! grep -q "<script src=" "$1"' _ "$html_groups"
 check "output HTML has no external <link href=...> (self-contained-HTML constraint)" bash -c '! grep -q "<link href=" "$1"' _ "$html_groups"
 
+# ---------------------------------------------------------------------------
+# 8. Accurate live-state derivation (stale-cockpit fix): finished tasks must
+#    not render phantom in-flight workers, split task-id variants must merge
+#    into one worker identity, and long-silent unfinished groups must be
+#    badged stale instead of reading as active. Fixture mirrors the REAL
+#    production log shape that exposed the bug (issues 70/81): an implementer
+#    that never logs done, a reviewer whose done lands under an "issue-N"
+#    variant of the id it started under, and an orchestrator done closing the
+#    task afterwards.
+# ---------------------------------------------------------------------------
+mkdir -p "$work/fixtures-stale"
+echo "[]" > "$work/fixtures-stale/issues.json"
+echo "[]" > "$work/fixtures-stale/prs.json"
+cat > "$work/fixtures-stale/events.jsonl" <<'EOF'
+{"ts":"2026-01-30T00:00:00Z","role":"implementer","model":"sonnet","task":"60","phase":"implementing","lens":"","detail":""}
+{"ts":"2026-02-01T00:00:00Z","role":"implementer","model":"sonnet","task":"81","phase":"implementing","lens":"","detail":""}
+{"ts":"2026-02-01T00:05:00Z","role":"reviewer","model":"opus","task":"81","phase":"reviewing","lens":"correctness","detail":""}
+{"ts":"2026-02-01T00:10:00Z","role":"reviewer","model":"opus","task":"issue-81","phase":"done","lens":"correctness","detail":""}
+{"ts":"2026-02-01T00:15:00Z","role":"orchestrator","model":"opus","task":"81","phase":"done","lens":"","detail":""}
+{"ts":"2026-02-01T00:20:00Z","role":"reviewer","model":"opus","task":"issue-78","phase":"scoped","lens":"tests","detail":""}
+{"ts":"2026-02-01T00:25:00Z","role":"reviewer","model":"opus","task":"78","phase":"reviewing","lens":"tests","detail":""}
+{"ts":"2026-02-01T00:30:00Z","role":"implementer","model":"sonnet","task":"77","phase":"done","lens":"","detail":""}
+{"ts":"2026-02-01T00:40:00Z","role":"orchestrator","model":"opus","task":"95","phase":"done","lens":"","detail":""}
+{"ts":"2026-02-01T00:45:00Z","role":"implementer","model":"sonnet","task":"95","phase":"implementing","lens":"","detail":""}
+EOF
+
+# COCKPIT_NOW 1h after the newest event: tasks 81/78/77/95 are recent (no
+# stale path), task 60's newest event is 49h old -> stale at the 2h default.
+html_stale="$work/cockpit-stale.html"
+COCKPIT_NOW="2026-02-01T01:00:00Z" bash "$cockpit" --fixtures "$work/fixtures-stale" "$html_stale" >/dev/null 2>"$work/stderr-stale.log"
+rc_stale=$?
+check "accurate-live-state fixture run exits 0" [ "$rc_stale" -eq 0 ]
+
+# Shared header extractor: task-group headers as {num: headerHtml}.
+extract_headers() { node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="live">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("live section not found");
+  const out = {};
+  for (const r of m[0].matchAll(/<tr class="task-group"><td colspan="7"><strong>Task ([\s\S]*?)<\/strong><\/td><\/tr>/g)) {
+    const num = r[1].match(/#(\d+)/);
+    out[num ? num[1] : r[1]] = r[1];
+  }
+  process.stdout.write(JSON.stringify(out));
+' "$1"; }
+
+headers_json="$(extract_headers "$html_stale")"
+
+# (1) Orchestrator done finishes the task even though the implementer never
+#     logged done: header badged done, zero worker rows for the group.
+check "orchestrator-done group (81) header carries a done badge" bash -c '
+  echo "$1" | grep -qF "\"81\":" && echo "$1" | node -e "
+    const h = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\"));
+    if (!/badge good..done/.test(h[\"81\"])) throw new Error(\"no done badge on 81: \" + h[\"81\"]);
+  "' _ "$headers_json"
+check "orchestrator-done group (81) renders NO phantom worker rows (implementer never logged done)" bash -c '! grep -qF "<td>81</td>" "$1" && ! grep -qF "<td>issue-81</td>" "$1"' _ "$html_stale"
+
+# (2) Split task-id variants ("issue-78" then "78", same role+lens) merge to
+#     ONE worker whose phase is the LATER event's.
+check "split-id variants merge to one worker row at the later phase (78 reviewing)" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const rows = (html.match(/<tr><td>reviewer<\/td><td>(?:issue-)?78<\/td>[\s\S]*?<\/tr>/g) || []);
+  if (rows.length !== 1) throw new Error("expected exactly 1 merged row for task 78, got " + rows.length);
+  if (!/badge warn..reviewing/.test(rows[0])) throw new Error("merged row is not at the later reviewing phase: " + rows[0]);
+' "$html_stale"
+
+# (3) No orchestrator events at all: every-worker-done fallback finishes the
+#     group (77) — done badge, no rows.
+check "all-workers-done group (77) finishes via the no-orchestrator fallback" bash -c '
+  echo "$1" | node -e "
+    const h = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\"));
+    if (!/badge good..done/.test(h[\"77\"])) throw new Error(\"no done badge on 77: \" + h[\"77\"]);
+  " && ! grep -qF "<td>77</td>" "$2"' _ "$headers_json" "$html_stale"
+
+# (4) Work logged AFTER an orchestrator done (task 95 re-scoped) keeps the
+#     group ACTIVE: no done badge, implementer row renders warn.
+check "activity after an orchestrator done keeps the group active (95)" bash -c '
+  echo "$1" | node -e "
+    const h = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\"));
+    if (/badge good..done/.test(h[\"95\"])) throw new Error(\"95 wrongly finished: \" + h[\"95\"]);
+  " && grep -qF "<td>95</td>" "$2"' _ "$headers_json" "$html_stale"
+check "active recent group (95) keeps its warn phase badge (not muted)" grep -qF '<span class="badge warn">implementing</span>' "$html_stale"
+
+# (5) Unfinished group silent for 49h: stale badge with a day-granular age,
+#     and its row badges muted so it never reads as active work.
+check "silent unfinished group (60) is badged stale with its age" bash -c '
+  echo "$1" | node -e "
+    const h = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\"));
+    if (!/badge muted..stale &middot; no events for 2d/.test(h[\"60\"])) throw new Error(\"no stale badge on 60: \" + h[\"60\"]);
+  "' _ "$headers_json"
+check "stale group (60) rows render muted, not warn" bash -c 'grep -qF "<span class=\"badge muted\">implementing</span>" "$1"' _ "$html_stale"
+
+# (6) COCKPIT_STALE_AFTER_SECONDS override: with a 10-day threshold nothing
+#     in this fixture is stale (same override style as COCKPIT_NOW /
+#     COCKPIT_VERDICT_HISTORY_N).
+html_stale_off="$work/cockpit-stale-off.html"
+COCKPIT_NOW="2026-02-01T01:00:00Z" COCKPIT_STALE_AFTER_SECONDS=864000 bash "$cockpit" --fixtures "$work/fixtures-stale" "$html_stale_off" >/dev/null 2>"$work/stderr-stale-off.log"
+check "COCKPIT_STALE_AFTER_SECONDS raises the threshold (no stale badge anywhere)" bash -c '! grep -qF ">stale &middot;" "$1"' _ "$html_stale_off"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "cockpit.test.sh: PASS ($ok checks)"
