@@ -402,6 +402,15 @@ new_fixture_with_events() {
 # attempt. Verdict points at the existing branch; resume-attempts.json now
 # records count=1; both a stall-detected and a resume-attempt event land in
 # events.jsonl.
+#
+# NOTE (post-review correction): advance_ready is "none" here, NOT "42" --
+# real loop-census.sh can NEVER report the SAME issue as both advance_ready
+# (requires branch=none) and in_flight (requires branch!=none); the earlier
+# version of this fixture set advance_ready=42 alongside in_flight=42, which
+# is a combination the real census cannot produce and made the resume path
+# unreachable in production (it was gated on advance_ready being found
+# inside in_flight_issues). See scenario 21 below for an end-to-end
+# reachability check driven by the REAL loop-census.sh.
 ticks15_events="$work/scenario15-events.jsonl"
 dir15="$(new_fixture_with_events scenario15 'open_prs=0
 feedback_prs=0
@@ -409,8 +418,8 @@ planned_issues=1
 issue=42 branch=feat/issue-42-x title=Stalled thing
 in_flight=42
 stalled=42 age_min=45
-advance_ready=42
-cadence=FAST cron=* * * * *' '')"
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '')"
 out15="$(CLAUDE_EVENTS_FILE="$ticks15_events" run_tick "$dir15")"
 check "scenario 15 (resume via census stall clock): verdict is action=resume issue=42 branch=feat/issue-42-x" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=42 branch=feat/issue-42-x" ]' _ "$out15"
 resume15="$dir15/../state/loop-resume-attempts.json"
@@ -490,8 +499,8 @@ feedback_prs=0
 planned_issues=1
 issue=55 branch=feat/issue-55-x title=Debris thing
 in_flight=55
-advance_ready=55
-cadence=FAST cron=* * * * *' '')"
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '')"
 root19="${dir19%/.claude/scripts}"
 # A SEPARATE linked worktree, not the main checkout -- mirrors real production
 # topology (an implementer's branch always lives in its own `.claude/worktrees/`
@@ -523,8 +532,8 @@ feedback_prs=0
 planned_issues=1
 issue=66 branch=feat/issue-66-x title=Publishable thing
 in_flight=66
-advance_ready=66
-cadence=FAST cron=* * * * *' '')"
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '')"
 root20="${dir20%/.claude/scripts}"
 # Same separate-worktree topology as scenario 19's fixture above.
 git -C "$root20" branch feat/issue-66-x main
@@ -535,6 +544,186 @@ out20="$(run_tick "$dir20")"
 check "scenario 20 (in_flight, publishable debris, no stall): still refused, no resume" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out20"
 check "scenario 20: diagnostic is the plain pre-#98 in_flight refusal" bash -c 'printf "%s\n" "$1" | grep -qF "is in_flight (a feat/issue-66-* branch already exists with no open PR)"' _ "$out20"
 check "scenario 20: no resume-attempts entry created for issue 66" bash -c '! grep -q "\"66\"" "$1" 2>/dev/null' _ "$dir20/../state/loop-resume-attempts.json"
+
+# ---------------------------------------------------------------------------
+# 21. Precedence: a FRESH branchless advance candidate (advance_ready=7) still
+# wins over a SEPARATE, genuinely stalled in_flight issue (42) in the same
+# census snapshot -- matches the documented "fresh advance beats resume"
+# precedence and the real invariant that advance_ready and in_flight never
+# name the SAME issue (they can, of course, both be populated for DIFFERENT
+# issues in one census run).
+# ---------------------------------------------------------------------------
+dir21="$(new_fixture_with_events scenario21 'open_prs=0
+feedback_prs=0
+planned_issues=2
+issue=7 branch=none title=Fresh branchless issue
+issue=42 branch=feat/issue-42-x title=Stalled thing
+in_flight=42
+stalled=42 age_min=45
+advance_ready=7
+cadence=FAST cron=* * * * *' '')"
+out21="$(run_tick "$dir21")"
+check "scenario 21 (fresh advance beats resume): verdict is action=advance issue=7" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=advance issue=7" ]' _ "$out21"
+check "scenario 21: no resume-attempts entry created for the stalled-but-deferred issue 42" bash -c '! grep -q "\"42\"" "$1" 2>/dev/null' _ "$dir21/../state/loop-resume-attempts.json"
+
+# ---------------------------------------------------------------------------
+# 22. Lowest-numbered-wins: TWO in_flight issues both stalled (30 and 20) with
+# no fresh advance candidate -- resume must pick the LOWER-numbered one (20),
+# mirroring feedback's "lowest PR wins" rule.
+# ---------------------------------------------------------------------------
+dir22="$(new_fixture_with_events scenario22 'open_prs=0
+feedback_prs=0
+planned_issues=2
+issue=30 branch=feat/issue-30-x title=Stalled thing higher
+issue=20 branch=feat/issue-20-x title=Stalled thing lower
+in_flight=30
+in_flight=20
+stalled=30 age_min=99
+stalled=20 age_min=50
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '')"
+out22="$(run_tick "$dir22")"
+check "scenario 22 (lowest-numbered wins): verdict is action=resume issue=20, not 30" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=20 branch=feat/issue-20-x" ]' _ "$out22"
+
+# ---------------------------------------------------------------------------
+# 23. Escalated candidate is SKIPPED in favor of a later, not-yet-escalated
+# candidate, instead of refusing the whole tick: issue 10 is stalled but
+# already escalated (pre-seeded loop-resume-attempts.json); issue 20 is
+# ALSO stalled and not yet escalated -- resume must pick 20, and must NOT
+# re-touch issue 10's already-escalated state.
+# ---------------------------------------------------------------------------
+dir23="$(new_fixture_with_events scenario23 'open_prs=0
+feedback_prs=0
+planned_issues=2
+issue=10 branch=feat/issue-10-x title=Already escalated
+issue=20 branch=feat/issue-20-x title=Not yet escalated
+in_flight=10
+in_flight=20
+stalled=10 age_min=200
+stalled=20 age_min=50
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '')"
+resume23="$dir23/../state/loop-resume-attempts.json"
+mkdir -p "$(dirname "$resume23")"
+cat > "$resume23" <<'EOF'
+{ "10": { "count": 2, "escalated": true } }
+EOF
+out23="$(run_tick "$dir23")"
+check "scenario 23 (escalated candidate skipped): verdict is action=resume issue=20, not the already-escalated 10" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=20 branch=feat/issue-20-x" ]' _ "$out23"
+check "scenario 23: issue 10's escalated state is untouched (still count=2, escalated=true)" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!j["10"] || j["10"].count !== 2 || j["10"].escalated !== true) throw new Error("got " + JSON.stringify(j));
+' "$resume23"
+check "scenario 23: issue 20 now has a fresh resume entry (count=1, escalated=false)" node -e '
+  const fs = require("fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!j["20"] || j["20"].count !== 1 || j["20"].escalated !== false) throw new Error("got " + JSON.stringify(j));
+' "$resume23"
+
+# ---------------------------------------------------------------------------
+# 24. BLOCKER 2 regression guard: a resume verdict must NOT charge issue #95's
+# advance/feedback dispatch budget (loop-issue-attempts.json) or its daily
+# action ceiling -- those are tracked ONLY in the sibling
+# loop-resume-attempts.json (already asserted above). Drive a resume verdict
+# and assert loop-issue-attempts.json / loop-daily-ceiling.json are BOTH
+# left untouched (absent -- this fixture's state dir starts empty).
+# ---------------------------------------------------------------------------
+dir24="$(new_fixture_with_events scenario24 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=88 branch=feat/issue-88-x title=Resume must not charge issue 95 budget
+in_flight=88
+stalled=88 age_min=60
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '')"
+out24="$(run_tick "$dir24")"
+check "scenario 24: verdict is action=resume issue=88" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=88 branch=feat/issue-88-x" ]' _ "$out24"
+check "scenario 24: loop-issue-attempts.json (issue #95's dispatch budget) was never created" [ ! -e "$dir24/../state/loop-issue-attempts.json" ]
+check "scenario 24: loop-daily-ceiling.json (issue #95's daily ceiling) was never created" [ ! -e "$dir24/../state/loop-daily-ceiling.json" ]
+
+# ---------------------------------------------------------------------------
+# 25. REACHABILITY (the bug this fix closes): drive loop-tick.sh against the
+# REAL loop-census.sh (not a hand-fabricated fixture) so the resume path is
+# proven reachable through the actual integration, not just a census snapshot
+# that respects the invariant by construction. A single planned issue (77)
+# already has a real local git branch (so census reports it in_flight, never
+# advance_ready -- the SAME mutual exclusivity the earlier fixtures above
+# were reworked to respect) and a stale events.jsonl entry old enough to trip
+# census's own stall clock (default budget.stall_minutes=30).
+#
+# SABOTAGE CHECK (do this by hand when reviewing, not asserted by the test
+# itself): reverting loop-tick.sh's verdict decision to the old
+# `if printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready"` gate
+# makes this scenario's verdict regress to action=none, since advance_ready
+# is (correctly, per the real census) "none" and can never equal in_flight's
+# "77" -- proving this test is non-vacuous.
+# ---------------------------------------------------------------------------
+build_real_census_fixture() {
+  local name="$1"
+  local dir="$work/$name"
+  local scripts="$dir/.claude/scripts"
+  mkdir -p "$scripts"
+  cp "$script_dir/loop-tick.sh" "$scripts/loop-tick.sh"
+  cp "$script_dir/loop-census.sh" "$scripts/loop-census.sh"
+  cp "$script_dir/resolve-roots.sh" "$scripts/resolve-roots.sh"
+  cp "$script_dir/loop-daemon.sh" "$scripts/loop-daemon.sh"
+  cp "$script_dir/log-event.sh" "$scripts/log-event.sh"
+  cat > "$dir/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+  cat > "$scripts/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/notify-poll.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "=== fake notify-poll output ==="
+EOF
+  cat > "$scripts/merge-ready.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "=== merge-ready: merged=0 skipped=0 ==="
+EOF
+  # Fake bot-gh.sh: real loop-census.sh's ACTUAL gh call shapes -- one open
+  # planned issue (77), zero open PRs, no open-issue set needed (issue 77 has
+  # a branch so it's never eligible and its body/blockers are never fetched).
+  cat > "$scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs -> no branches
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    if printf '%s\n' "$*" | grep -q -- '--label'; then
+      printf '77\tplanned,module:test\tStalled real thing\n'
+    else
+      : # open_issue_set -- unused by this fixture (issue 77 is never eligible)
+    fi
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$scripts"/*.sh
+  git -C "$dir" init -q -b main
+  git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+  git -C "$dir" branch feat/issue-77-x main
+  printf '%s\n' "$scripts"
+}
+
+dir25="$(build_real_census_fixture scenario25)"
+events25="$work/scenario25-events.jsonl"
+printf '%s\n' '{"ts":"2020-01-01T00:00:00Z","task":"77","phase":"driver-start","role":"orchestrator"}' > "$events25"
+out25="$(env -u GATES_FILE CLAUDE_EVENTS_FILE="$events25" bash "$dir25/loop-tick.sh" "acme/repo")"
+check "scenario 25 (real loop-census.sh reports advance_ready=none, issue 77 in_flight+stalled)" bash -c 'printf "%s\n" "$1" | grep -qx "advance_ready=none" && printf "%s\n" "$1" | grep -qx "in_flight=77" && printf "%s\n" "$1" | grep -q "^stalled=77 "' _ "$out25"
+check "scenario 25 (end-to-end reachability via REAL census): verdict is action=resume issue=77 branch=feat/issue-77-x" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=77 branch=feat/issue-77-x" ]' _ "$out25"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

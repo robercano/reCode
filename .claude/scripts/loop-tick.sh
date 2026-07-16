@@ -7,6 +7,7 @@
 #   action=none
 #   action=advance issue=N
 #   action=feedback pr=N
+#   action=resume issue=N branch=<name>   (issue #98 -- see STEP 0.5 below)
 #
 # WHY THIS EXISTS (issue #81): the tick used to be a multi-step PROMPT
 # (.claude/commands/pr-loop.md) that a model re-derived, from scratch, every
@@ -29,6 +30,10 @@
 # planned+module issue + no existing branch), N is not census's in_flight=N
 # (a feat/issue-N-* branch with no open PR — someone/something is already
 # mid-flight on it), and the spawn lock (below) is not already held for N.
+# RESUME (issue #98, see STEP 0.5 below) is lowest precedence: it only fires
+# when neither FEEDBACK nor a fresh ADVANCE claimed the tick (advance_ready=
+# none), and picks the lowest-numbered in_flight issue that census's stall
+# clock or debris classifier flags as stuck.
 #
 # Spawn lock: .claude/state/loop-advance.lock (root-relative; .claude/state/
 # is already gitignored). Written the moment this script emits
@@ -538,17 +543,52 @@ fi
 #     classify_debris (issue #111) -- called VERBATIM in a subshell below so
 #     the absent/empty/publishable/half-done state vocabulary never diverges
 #     between the two call sites.
-# Bounded to 2 resume attempts, tracked in a SIBLING state file
+#
+# REACHABILITY (post-review correction): the first cut of this feature gated
+# the whole resume path on "advance_ready equals an issue ALSO reported
+# in_flight" -- but loop-census.sh makes those mutually exclusive for any
+# single issue: advance_ready only ever names a candidate with branch=none
+# (eligible=1 requires it), while in_flight only ever names a candidate whose
+# branch is NOT none. No real census snapshot can ever satisfy both for the
+# same issue, so that gate was dead code -- a genuinely stalled in_flight
+# issue was NEVER resumed or escalated in production. Fixed by consuming
+# in_flight=/stalled= DIRECTLY off the fresh census output below, entirely
+# independent of advance_ready. This block only runs once advance_ready has
+# resolved to "none" for this tick (see the verdict decision below) -- i.e.
+# a genuinely fresh, branchless advance candidate still has first claim on
+# the tick ("fresh advance beats resume", mirroring the existing
+# feedback-beats-advance precedence). Among several in_flight candidates
+# that qualify (stalled OR half-done debris), the LOWEST-numbered one that
+# is not YET escalated is picked (mirrors feedback's "lowest PR wins"); one
+# already escalated to needs-human is skipped in favor of a later candidate
+# rather than refusing the whole tick.
+#
+# Bounded to 2 resume attempts PER ISSUE, tracked in a SIBLING state file
 # (.claude/state/loop-resume-attempts.json, {count,escalated} shape +
 # mktemp/atomic-mv discipline mirroring loop-issue-attempts.json) rather than
 # folded into loop-issue-attempts.json itself: that file counts advance/
 # feedback DISPATCHES against issue #95's spend ceiling -- a different budget
 # than "how many times has THIS stalled branch been resumed"; conflating the
 # two would let a resume silently eat into (or be eaten by) the dispatch
-# budget. The 3rd stall does not resume again: it escalates to needs-human
-# (mirroring the attempt-budget escalation block above -- label create +
-# issue edit + issue comment) and sets escalated:true so the loop never
-# auto-retries it again.
+# budget (see the dispatch-bookkeeping block near the bottom of this script,
+# which deliberately does NOT charge action=resume against
+# loop-issue-attempts.json/the daily ceiling). The 3rd stall does not resume
+# again: it escalates to needs-human (mirroring the attempt-budget
+# escalation block above -- label create + issue edit + issue comment) and
+# sets escalated:true so the loop never auto-retries it again.
+#
+# NOTE (latent risk, acknowledged, follow-up out of scope): driver-side
+# resume DISPATCH -- actually reconnecting to / resuming work in the stalled
+# branch's worktree -- does not exist yet; this script only emits the
+# verdict. Until that dispatch exists, a resume verdict burns one of the 2
+# attempts with no actual resume happening, so a stalled issue whose driver
+# is never manually restarted will still escalate to needs-human within 3
+# stalled ticks once this fix makes the path reachable. That is the correct,
+# safe default for an unresumable stall (it surfaces to a human instead of
+# wedging forever, the bug this fix closes), and the accounting stays
+# coherent because an "attempt" is only counted when a resume verdict is
+# ACTUALLY emitted below -- never speculatively on a tick that took some
+# other action.
 # ---------------------------------------------------------------------------
 resume_attempts_file="$state_dir/loop-resume-attempts.json"
 
@@ -643,46 +683,14 @@ elif [ -n "$feedback_pr" ]; then
   verdict="action=feedback pr=$feedback_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
   if printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready"; then
-    # --- stall/resume path (issue #98) --------------------------------------
-    stalled_now=0
-    is_census_stalled "$advance_ready" && stalled_now=1
-    debris_now="none"
-    if [ "$stalled_now" -eq 0 ]; then
-      debris_now="$(classify_debris_for_issue "$advance_ready")"
-    fi
-    if [ "$stalled_now" -eq 1 ] || [ "$debris_now" = "half-done" ]; then
-      log_loop_event "$advance_ready" "stall-detected" "in_flight issue=$advance_ready flagged stalled=$stalled_now debris=$debris_now"
-      IFS=$'\t' read -r resume_count resume_escalated <<<"$(read_resume_state "$advance_ready")"
-      case "$resume_count" in ''|*[!0-9]*) resume_count=0 ;; esac
-      case "$resume_escalated" in ''|*[!01]*) resume_escalated=0 ;; esac
-      resume_branch="$(branch_for_issue "$advance_ready")"
-      if [ "$resume_escalated" = "1" ]; then
-        echo "# advance refused: issue=$advance_ready is in_flight and stalled, but already escalated to needs-human -- not retrying"
-        verdict="action=none"
-      elif [ "$resume_count" -lt 2 ]; then
-        new_resume_count=$((resume_count + 1))
-        write_resume_state "$advance_ready" "$new_resume_count" "0"
-        echo "# resume: issue=$advance_ready is in_flight and stalled (attempt $new_resume_count/2) -- resuming the existing branch/worktree instead of refusing"
-        log_loop_event "$advance_ready" "resume-attempt" "resume attempt $new_resume_count/2 for issue=$advance_ready"
-        if [ -n "$resume_branch" ]; then
-          verdict="action=resume issue=$advance_ready branch=$resume_branch"
-        else
-          verdict="action=resume issue=$advance_ready"
-        fi
-      else
-        write_resume_state "$advance_ready" "$resume_count" "1"
-        gh label create "needs-human" --color b60205 --description "Loop attempt budget exhausted -- needs a human" --force >/dev/null 2>&1 || true
-        body="Issue #$advance_ready's feat/issue-$advance_ready-* branch has stalled and already been resumed $resume_count times without landing a PR. The loop will not retry it automatically -- labeling \`needs-human\`. Address it by hand, then either close it out or clear its entry in .claude/state/loop-resume-attempts.json to let the loop resume."
-        gh issue edit "$advance_ready" --add-label needs-human >/dev/null 2>&1 || true
-        gh issue comment "$advance_ready" --body "$body" >/dev/null 2>&1 || true
-        echo "# advance refused: issue=$advance_ready exhausted its 2 resume attempts -- escalated to needs-human"
-        log_loop_event "$advance_ready" "escalated-to-needs-human" "issue=$advance_ready escalated to needs-human after $resume_count resumes"
-        verdict="action=none"
-      fi
-    else
-      echo "# advance refused: issue=$advance_ready is in_flight (a feat/issue-$advance_ready-* branch already exists with no open PR)"
-      verdict="action=none"
-    fi
+    # Defensive only: real census can never report the SAME issue as both
+    # advance_ready (requires branch=none) and in_flight (requires branch!=
+    # none) -- see the STEP 0.5 comment above. Kept as a belt-and-suspenders
+    # refusal in case a future census bug (or a hand-built test fixture)
+    # ever produces this combination; it must never fall through to a fresh
+    # action=advance for an issue that also looks in_flight.
+    echo "# advance refused: issue=$advance_ready is in_flight (a feat/issue-$advance_ready-* branch already exists with no open PR)"
+    verdict="action=none"
   elif [ "$lock_issue" = "$advance_ready" ]; then
     echo "# advance refused: spawn lock already held for issue=$advance_ready ($(cat "$lock_file" 2>/dev/null))"
     verdict="action=none"
@@ -693,20 +701,104 @@ elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
     verdict="action=advance issue=$advance_ready"
   fi
 else
-  verdict="action=none"
+  # --- stall/resume path (issue #98, reworked) -----------------------------
+  # No fresh, branchless candidate is ready this tick (advance_ready=none) --
+  # scan census's in_flight= issues DIRECTLY (independent of advance_ready;
+  # see the reachability note in the STEP 0.5 comment above) for the lowest-
+  # numbered one that's genuinely stalled (census's own clock) or whose
+  # branch classifies as half-done debris, and that hasn't already been
+  # escalated to needs-human.
+  resume_issue="" resume_branch="" resume_stalled_now=0 resume_debris_now="none"
+  # Lowest-numbered qualifying candidate that's ALREADY escalated -- tracked
+  # only so a tick where every qualifying candidate happens to be escalated
+  # still emits the specific "already escalated" diagnostic below rather than
+  # the generic in_flight refusal (matches this feature's pre-rework
+  # behavior for the single-candidate case).
+  escalated_issue=""
+  for cand in $(printf '%s\n' "$in_flight_issues" | sort -n -u); do
+    [ -n "$cand" ] || continue
+    cand_stalled=0
+    is_census_stalled "$cand" && cand_stalled=1
+    cand_debris="none"
+    if [ "$cand_stalled" -eq 0 ]; then
+      cand_debris="$(classify_debris_for_issue "$cand")"
+    fi
+    [ "$cand_stalled" -eq 1 ] || [ "$cand_debris" = "half-done" ] || continue
+    IFS=$'\t' read -r cand_count cand_escalated <<<"$(read_resume_state "$cand")"
+    case "$cand_escalated" in ''|*[!01]*) cand_escalated=0 ;; esac
+    if [ "$cand_escalated" = "1" ]; then
+      [ -n "$escalated_issue" ] || escalated_issue="$cand"
+      continue
+    fi
+    resume_issue="$cand"
+    resume_stalled_now="$cand_stalled"
+    resume_debris_now="$cand_debris"
+    resume_branch="$(branch_for_issue "$cand")"
+    break
+  done
+
+  if [ -n "$resume_issue" ]; then
+    log_loop_event "$resume_issue" "stall-detected" "in_flight issue=$resume_issue flagged stalled=$resume_stalled_now debris=$resume_debris_now"
+    IFS=$'\t' read -r resume_count resume_escalated <<<"$(read_resume_state "$resume_issue")"
+    case "$resume_count" in ''|*[!0-9]*) resume_count=0 ;; esac
+    case "$resume_escalated" in ''|*[!01]*) resume_escalated=0 ;; esac
+    if [ "$resume_escalated" = "1" ]; then
+      # Unreachable given the loop above already skips escalated candidates,
+      # kept for defense in depth against a race between the read above and
+      # here (state file changed underneath us mid-tick).
+      echo "# advance refused: issue=$resume_issue is in_flight and stalled, but already escalated to needs-human -- not retrying"
+      verdict="action=none"
+    elif [ "$resume_count" -lt 2 ]; then
+      new_resume_count=$((resume_count + 1))
+      write_resume_state "$resume_issue" "$new_resume_count" "0"
+      echo "# resume: issue=$resume_issue is in_flight and stalled (attempt $new_resume_count/2) -- resuming the existing branch/worktree instead of refusing"
+      log_loop_event "$resume_issue" "resume-attempt" "resume attempt $new_resume_count/2 for issue=$resume_issue"
+      if [ -n "$resume_branch" ]; then
+        verdict="action=resume issue=$resume_issue branch=$resume_branch"
+      else
+        verdict="action=resume issue=$resume_issue"
+      fi
+    else
+      write_resume_state "$resume_issue" "$resume_count" "1"
+      gh label create "needs-human" --color b60205 --description "Loop attempt budget exhausted -- needs a human" --force >/dev/null 2>&1 || true
+      body="Issue #$resume_issue's feat/issue-$resume_issue-* branch has stalled and already been resumed $resume_count times without landing a PR. The loop will not retry it automatically -- labeling \`needs-human\`. Address it by hand, then either close it out or clear its entry in .claude/state/loop-resume-attempts.json to let the loop resume."
+      gh issue edit "$resume_issue" --add-label needs-human >/dev/null 2>&1 || true
+      gh issue comment "$resume_issue" --body "$body" >/dev/null 2>&1 || true
+      echo "# advance refused: issue=$resume_issue exhausted its 2 resume attempts -- escalated to needs-human"
+      log_loop_event "$resume_issue" "escalated-to-needs-human" "issue=$resume_issue escalated to needs-human after $resume_count resumes"
+      verdict="action=none"
+    fi
+  elif [ -n "$escalated_issue" ]; then
+    # Every stalled/half-done candidate this tick is already escalated to
+    # needs-human -- do not resume, and do not re-touch its state.
+    echo "# advance refused: issue=$escalated_issue is in_flight and stalled, but already escalated to needs-human -- not retrying"
+    verdict="action=none"
+  else
+    # No in_flight candidate qualifies for resume this tick (none are
+    # stalled/half-done, or there are no in_flight issues at all) -- refuse
+    # each in_flight issue individually, matching the pre-#98 diagnostic
+    # verbatim so operators/tests can still tell WHICH issue(s) are sitting
+    # in_flight-but-untouched this tick.
+    for cand in $(printf '%s\n' "$in_flight_issues" | sort -n -u); do
+      [ -n "$cand" ] || continue
+      echo "# advance refused: issue=$cand is in_flight (a feat/issue-$cand-* branch already exists with no open PR)"
+    done
+    verdict="action=none"
+  fi
 fi
 
 # --- Spend-ceiling bookkeeping: increment counts on an ACTUAL dispatch ------
 # Only runs when the verdict just decided is a genuine advance/feedback
 # dispatch (never on action=none, ceiling-blocked or not) -- so a blocked
-# tick never itself grows the very counters that blocked it.
+# tick never itself grows the very counters that blocked it. action=resume is
+# DELIBERATELY excluded here: resume attempts are tracked in the SIBLING
+# loop-resume-attempts.json (written above, alongside the verdict decision),
+# precisely so a resume never charges issue #95's advance/feedback dispatch
+# budget (loop-issue-attempts.json) or its daily action ceiling -- see the
+# STEP 0.5 comment above.
 dispatch_issue=""
 case "$verdict" in
   "action=advance issue="*) dispatch_issue="${verdict#action=advance issue=}" ;;
-  "action=resume issue="*)
-    dispatch_issue="${verdict#action=resume issue=}"
-    dispatch_issue="${dispatch_issue%% *}"
-    ;;
   "action=feedback pr="*)
     dispatch_pr="${verdict#action=feedback pr=}"
     if [ "$dispatch_pr" = "$feedback_pr" ] && [ -n "${feedback_issue:-}" ]; then
