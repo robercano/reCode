@@ -64,6 +64,18 @@
 # issues/prs arrays every other section already fetches (no extra gh call) —
 # the live PR fetch now also asks for `labels` alongside the fields it always
 # fetched, so a needs-human-labeled PR is visible without a second round trip.
+#
+# Issue #116 adds a per-row age/timeout-budget badge to the live-progress
+# table ("<elapsed>m / <budget>m timeout"): elapsed = now - the row's own
+# timestamp, budget = LOOP_DRIVER_TIMEOUT (loop-daemon.sh's run_driver() wall-
+# clock cap, default 90m). The badge escalates muted -> warn (>= 80% of
+# budget) -> bad (>= 100%) ONLY while a `.loop-driver-out.*.json` file still
+# exists in the state dir (loop-daemon.sh deletes it right after the driver
+# exits, so its existence is the "still running" signal); once the driver has
+# exited the badge renders muted regardless of elapsed, since that row's clock
+# has already stopped ticking against any enforced ceiling. cockpit-serve.sh's
+# injected SSE client applies the SAME formula/thresholds to rows it upserts
+# live (see cockpit-serve.sh's own comment block) so both renderers agree.
 set -uo pipefail
 
 # Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
@@ -269,6 +281,40 @@ if [ -f "$arming_file" ]; then cp "$arming_file" "$tmpdir/loop-arming.json"; els
 if [ -f "$attempts_file" ]; then cp "$attempts_file" "$tmpdir/loop-issue-attempts.json"; else echo "{}" >"$tmpdir/loop-issue-attempts.json"; fi
 if [ -f "$daily_ceiling_file" ]; then cp "$daily_ceiling_file" "$tmpdir/loop-daily-ceiling.json"; else echo "{}" >"$tmpdir/loop-daily-ceiling.json"; fi
 
+# ---- loop-driver "still running" signal (issue #116, live-progress timeout
+# budget badge) --------------------------------------------------------------
+# loop-daemon.sh's run_driver() spawns AT MOST ONE driver at a time (each tick
+# blocks on `wait` before the next can spawn — see run_once()), writing its
+# `claude --output-format json` transcript to a `mktemp`'d
+# .loop-driver-out.XXXXXX.json under the state dir. That file is created
+# empty up front and only WRITTEN at process exit (json output mode has no
+# incremental flush), then immediately `rm -f`'d right after — so its mere
+# EXISTENCE (not its contents) is the "a driver is still running" signal used
+# below to color the per-row timeout badge (renderLiveProgress). Same offline
+# seam as the arming/attempts/ceiling blocks above: fixtures mode reads a
+# small synthetic <dir>/loop-driver-running.json ({"running": true|false})
+# instead of touching any real filesystem state; otherwise this globs the
+# real (gitignored) state dir, honoring CLAUDE_DRIVER_OUT_DIR for parity with
+# the CLAUDE_EVENTS_FILE/CLAUDE_TICKS_FILE override style used elsewhere in
+# this file.
+if [ -n "$fixtures" ]; then
+  if [ -f "$fixtures/loop-driver-running.json" ]; then
+    cp "$fixtures/loop-driver-running.json" "$tmpdir/loop-driver-running.json"
+  else
+    echo '{"running":false}' >"$tmpdir/loop-driver-running.json"
+  fi
+else
+  driver_out_dir="${CLAUDE_DRIVER_OUT_DIR:-$root/.claude/state}"
+  driver_running=false
+  if [ -d "$driver_out_dir" ]; then
+    for f in "$driver_out_dir"/.loop-driver-out.*.json; do
+      if [ -e "$f" ]; then driver_running=true; fi
+      break
+    done
+  fi
+  printf '{"running":%s}\n' "$driver_running" >"$tmpdir/loop-driver-running.json"
+fi
+
 # ---- active worktrees -----------------------------------------------------------
 node -e '
   const fs = require("fs");
@@ -292,6 +338,8 @@ COCKPIT_PRS_UNAVAILABLE="$prs_unavailable" \
 COCKPIT_GATES_REF="$gates_ref" \
 COCKPIT_NOW="${COCKPIT_NOW:-}" \
 COCKPIT_VERDICT_HISTORY_N="${COCKPIT_VERDICT_HISTORY_N:-10}" \
+COCKPIT_LOOP_DRIVER_TIMEOUT="${LOOP_DRIVER_TIMEOUT:-90m}" \
+COCKPIT_TIMEOUT_WARN_FRACTION="${COCKPIT_TIMEOUT_WARN_FRACTION:-0.8}" \
 node - <<'NODE_RENDER'
 const fs = require("fs");
 const path = require("path");
@@ -356,6 +404,11 @@ const ticks = readTicks();
 const arming = readJson("loop-arming.json", {});
 const issueAttempts = readJson("loop-issue-attempts.json", {});
 const dailyCeiling = readJson("loop-daily-ceiling.json", {});
+
+// Loop-driver "still running" signal (issue #116): {running: bool} gathered
+// by the bash prelude above (globs .loop-driver-out.*.json in the state dir,
+// or reads the fixtures/loop-driver-running.json seam in --fixtures mode).
+const driverRunning = !!readJson("loop-driver-running.json", { running: false }).running;
 
 function esc(s) {
   return String(s == null ? "" : s)
@@ -521,7 +574,12 @@ function renderLiveProgress() {
     // Column headers carry data-sort-key hooks for the client-side sort
     // script appended near the end of <body>. The hidden trailing <th>
     // mirrors the hidden per-row wrow-meta cell below and is left exactly as
-    // it was (no sort hook — it has no visible text to sort by).
+    // it was (no sort hook — it has no visible text to sort by). The
+    // "Updated" column doubles as the age/timeout-budget badge's home (issue
+    // #116, see timeoutBadge() below) rather than a new column: cockpit.test.sh
+    // hardcodes this table's column count/colspan, so the row shape here MUST
+    // stay unchanged — the budget badge is appended INSIDE the existing
+    // Updated cell instead.
     html += `<table class="routing"><thead><tr>`;
     html += `<th data-sort-key="role">Role</th><th data-sort-key="task">Task</th>`;
     html += `<th data-sort-key="model">Model</th><th data-sort-key="phase">Phase</th>`;
@@ -584,7 +642,18 @@ function renderLiveProgress() {
         const badge = stale ? { cls: "muted" } : phaseBadge(w.phase);
         html += `<tr><td>${esc(w.role)}</td><td>${esc(w.task)}</td><td><code>${esc(w.model || "(none)")}</code></td>`;
         html += `<td><span class="badge ${badge.cls}">${esc(w.phase || "(unknown)")}</span></td>`;
-        html += `<td>${esc(w.lens || "")}</td><td>${esc(w.ts)}</td>`;
+        html += `<td>${esc(w.lens || "")}</td>`;
+        // Age/timeout-budget badge (issue #116): "<elapsed>m / <budget>m
+        // timeout", appended into the SAME "Updated" cell as the row's own
+        // timestamp (not a new column — cockpit.test.sh hardcodes this
+        // table's colspan/column count, see the thead comment above). Muted
+        // while under TIMEOUT_WARN_FRACTION of the budget (or whenever the
+        // backing driver has already exited), warn/bad past it. Stale groups
+        // mute it too, same rationale as the phase badge above.
+        const tb = timeoutBadge(w.ts);
+        const tbCls = stale ? "muted" : (tb ? tb.cls : "muted");
+        const tbHtml = tb ? ` <span class="badge ${tbCls}">${esc(tb.label)}</span>` : "";
+        html += `<td>${esc(w.ts)}${tbHtml}</td>`;
         // Hidden trailing cell: stable data-role/data-task hook for the
         // worker inspector (issue #70). Appended AFTER every column the
         // existing tests exact-match, so it never disturbs them.
@@ -626,6 +695,57 @@ const STALE_AFTER_SECONDS = (() => {
   const n = parseInt(process.env.COCKPIT_STALE_AFTER_SECONDS, 10);
   return Number.isFinite(n) && n > 0 ? n : 7200;
 })();
+
+// ---- Per-row age/timeout-budget badge (issue #116) -------------------------
+// Parses a GNU-`timeout`-style duration string ("90m", "45s", "2h", "1.5d",
+// or a bare number of seconds) into seconds. loop-daemon.sh's run_driver()
+// passes LOOP_DRIVER_TIMEOUT straight through to `timeout`/`RuntimeMaxSec`
+// unparsed, so this mirrors that exact grammar. Falls back to fallbackSeconds
+// on anything unparseable so a malformed/missing env var degrades to the
+// default budget instead of crashing the render.
+function parseDurationToSeconds(str, fallbackSeconds) {
+  const s = String(str == null ? "" : str).trim();
+  const m = s.match(/^([0-9]*\.?[0-9]+)([smhd]?)$/);
+  if (!m) return fallbackSeconds;
+  const n = parseFloat(m[1]);
+  if (!Number.isFinite(n)) return fallbackSeconds;
+  const mult = { s: 1, m: 60, h: 3600, d: 86400 }[m[2] || "s"];
+  return n * mult;
+}
+// Budget: LOOP_DRIVER_TIMEOUT (or its "90m" default — loop-daemon.sh's own
+// fallback, see run_driver()), threaded in via COCKPIT_LOOP_DRIVER_TIMEOUT so
+// this stays in sync with whatever the daemon is actually enforcing.
+const LOOP_DRIVER_TIMEOUT_SECONDS = parseDurationToSeconds(process.env.COCKPIT_LOOP_DRIVER_TIMEOUT, 90 * 60);
+// Fraction of budget at which the badge flips from "muted" to "warn" (then
+// "bad" once elapsed >= budget). Default 80%, overridable for tests.
+const TIMEOUT_WARN_FRACTION = (() => {
+  const n = parseFloat(process.env.COCKPIT_TIMEOUT_WARN_FRACTION);
+  return Number.isFinite(n) && n > 0 ? n : 0.8;
+})();
+// Renders "<elapsed>m / <budget>m timeout": elapsed = now - the row's OWN
+// timestamp (the data source the issue specifies — a worker's last-logged
+// event, not the driver's own start time, which this file has no exact
+// per-row way to recover). The badge only escalates to warn/bad while
+// driverRunning is true (a live .loop-driver-out.*.json file exists, see the
+// bash prelude) — once the backing driver process has exited, this row's
+// clock has already stopped ticking against any enforced ceiling, so a loud
+// "bad" badge would misleadingly read as an active, still-ticking alarm; it
+// renders muted instead (the separate "stale" badge above already flags a
+// long-abandoned row). Returns null for a row with no parseable timestamp.
+function timeoutBadge(ts) {
+  const rowMs = Date.parse(String(ts || ""));
+  if (!Number.isFinite(rowMs)) return null;
+  const elapsedSec = Math.max(0, (nowMs - rowMs) / 1000);
+  const budgetSec = LOOP_DRIVER_TIMEOUT_SECONDS;
+  const ratio = budgetSec > 0 ? elapsedSec / budgetSec : 0;
+  let cls = "muted";
+  if (driverRunning) {
+    if (ratio >= 1) cls = "bad";
+    else if (ratio >= TIMEOUT_WARN_FRACTION) cls = "warn";
+  }
+  const label = `${Math.floor(elapsedSec / 60)}m / ${Math.floor(budgetSec / 60)}m timeout`;
+  return { cls, label };
+}
 function renderLoopHealth() {
   let html = `<section id="loop-health"><h2>Loop health</h2>`;
   if (ticks.length === 0) {

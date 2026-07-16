@@ -108,6 +108,23 @@ worktrees_root="${COCKPIT_SERVE_WORKTREES_ROOT:-$root}"
 # this at a synthetic temp file instead of the real, gitignored state dir.
 worker_tools_file="${CLAUDE_WORKER_TOOLS_FILE:-$root/.claude/state/worker-tools.jsonl}"
 
+# Loop-driver timeout budget + "still running" signal (issue #116): same data
+# sources cockpit.sh's own bash prelude gathers for its static render (see
+# cockpit.sh's comment block on the same feature) — duplicated here (rather
+# than shelling into cockpit.sh per request) because this value must be
+# recomputed fresh on every page load, not just once at process startup.
+# Fixtures mode points at the SAME <dir>/loop-driver-running.json seam
+# cockpit.sh reads; live mode globs the real (gitignored) state dir at
+# request time, honoring CLAUDE_DRIVER_OUT_DIR for parity.
+if [ -n "$fixtures" ]; then
+  driver_running_fixture="$fixtures/loop-driver-running.json"
+  driver_out_dir=""
+else
+  driver_running_fixture=""
+  driver_out_dir="${CLAUDE_DRIVER_OUT_DIR:-$root/.claude/state}"
+fi
+loop_driver_timeout="${LOOP_DRIVER_TIMEOUT:-90m}"
+
 tmp_out="$(mktemp "${TMPDIR:-/tmp}/cockpit-serve.XXXXXX.html")"
 # NOTE: deliberately NO bash `trap ... EXIT` here. `exec` below REPLACES this
 # shell process image with node (same PID) — a bash-level EXIT trap
@@ -128,6 +145,10 @@ COCKPIT_SERVE_GH_REFRESH="$gh_refresh" \
 COCKPIT_SERVE_TMP_OUT="$tmp_out" \
 COCKPIT_SERVE_WORKTREES_ROOT="$worktrees_root" \
 CLAUDE_WORKER_TOOLS_FILE="$worker_tools_file" \
+COCKPIT_SERVE_DRIVER_RUNNING_FIXTURE="$driver_running_fixture" \
+COCKPIT_SERVE_DRIVER_OUT_DIR="$driver_out_dir" \
+COCKPIT_SERVE_LOOP_DRIVER_TIMEOUT="$loop_driver_timeout" \
+COCKPIT_SERVE_TIMEOUT_WARN_FRACTION="${COCKPIT_TIMEOUT_WARN_FRACTION:-0.8}" \
 exec node - <<'NODE_SERVE'
 const http = require("http");
 const fs = require("fs");
@@ -147,6 +168,58 @@ const WORKTREES_ROOT = process.env.COCKPIT_SERVE_WORKTREES_ROOT || process.cwd()
 const WORKER_TOOLS_FILE =
   process.env.CLAUDE_WORKER_TOOLS_FILE ||
   path.join(process.cwd(), ".claude", "state", "worker-tools.jsonl");
+
+// ---------------------------------------------------------------------------
+// Live-progress age/timeout-budget badge (issue #116): the SSE upsert path
+// below (upsertRow, inside clientScript()) applies the SAME formula/badge
+// thresholds cockpit.sh's own renderLiveProgress()/timeoutBadge() use for the
+// server-rendered rows, so a row upserted live never disagrees with a row
+// that survives into the next full-page re-render. Duplicated rather than
+// shared (these are two separate inline scripts with no shared module), same
+// as every other per-row field this file already re-derives from raw event
+// JSON independently of cockpit.sh (role/task/model/phase/lens/ts).
+const DRIVER_RUNNING_FIXTURE = process.env.COCKPIT_SERVE_DRIVER_RUNNING_FIXTURE || "";
+const DRIVER_OUT_DIR = process.env.COCKPIT_SERVE_DRIVER_OUT_DIR || "";
+const LOOP_DRIVER_TIMEOUT_ENV = process.env.COCKPIT_SERVE_LOOP_DRIVER_TIMEOUT || "90m";
+const TIMEOUT_WARN_FRACTION = (() => {
+  const n = parseFloat(process.env.COCKPIT_SERVE_TIMEOUT_WARN_FRACTION);
+  return Number.isFinite(n) && n > 0 ? n : 0.8;
+})();
+
+// Mirrors cockpit.sh's own parseDurationToSeconds(): GNU-`timeout`-style
+// duration grammar ("90m", "45s", "2h", "1.5d", or a bare number of seconds).
+function parseDurationToSeconds(str, fallbackSeconds) {
+  const s = String(str == null ? "" : str).trim();
+  const m = s.match(/^([0-9]*\.?[0-9]+)([smhd]?)$/);
+  if (!m) return fallbackSeconds;
+  const n = parseFloat(m[1]);
+  if (!Number.isFinite(n)) return fallbackSeconds;
+  const mult = { s: 1, m: 60, h: 3600, d: 86400 }[m[2] || "s"];
+  return n * mult;
+}
+const DRIVER_BUDGET_SECONDS = parseDurationToSeconds(LOOP_DRIVER_TIMEOUT_ENV, 90 * 60);
+
+// "Still running" signal, re-checked on every full-page render (see
+// clientScript() below, called fresh from handleIndex() on every request):
+// fixtures mode reads the same <dir>/loop-driver-running.json seam cockpit.sh
+// reads; live mode checks for any .loop-driver-out.*.json file in the state
+// dir (loop-daemon.sh deletes it right after its driver exits).
+function isDriverRunning() {
+  if (DRIVER_RUNNING_FIXTURE) {
+    try {
+      const j = JSON.parse(fs.readFileSync(DRIVER_RUNNING_FIXTURE, "utf8"));
+      return !!j.running;
+    } catch (e) {
+      return false;
+    }
+  }
+  if (!DRIVER_OUT_DIR) return false;
+  try {
+    return fs.readdirSync(DRIVER_OUT_DIR).some((f) => /^\.loop-driver-out\..*\.json$/.test(f));
+  } catch (e) {
+    return false;
+  }
+}
 
 // Fix (issue #70, 3a-followup): TMP_OUT cleanup moved here from the now-dead
 // bash EXIT trap (see the shell comment above `exec node`, above) — this
@@ -196,10 +269,35 @@ function getHtml(force) {
 // via textContent, never innerHTML.
 // ---------------------------------------------------------------------------
 function clientScript() {
+  // Fresh per call (see injectClientScript(), invoked on every handleIndex()
+  // request): DRIVER_RUNNING is re-checked right now, so a page reload always
+  // reflects the CURRENT driver state, same freshness as the cached HTML
+  // itself gets on its own refresh cadence.
+  const driverRunning = isDriverRunning();
   return `
 <script>
 (function () {
   try {
+    var DRIVER_RUNNING = ${driverRunning ? "true" : "false"};
+    var DRIVER_BUDGET_SECONDS = ${DRIVER_BUDGET_SECONDS};
+    var TIMEOUT_WARN_FRACTION = ${TIMEOUT_WARN_FRACTION};
+    // Mirrors cockpit.sh's timeoutBadge(): "<elapsed>m / <budget>m timeout",
+    // muted while under budget or once the driver has already exited (its
+    // clock stopped ticking against any enforced ceiling), warn/bad past
+    // TIMEOUT_WARN_FRACTION/100% of budget while the driver is still running.
+    function timeoutBadgeInfo(ts) {
+      var rowMs = Date.parse(ts || "");
+      if (!isFinite(rowMs)) return null;
+      var elapsedSec = Math.max(0, (Date.now() - rowMs) / 1000);
+      var ratio = DRIVER_BUDGET_SECONDS > 0 ? elapsedSec / DRIVER_BUDGET_SECONDS : 0;
+      var cls = "muted";
+      if (DRIVER_RUNNING) {
+        if (ratio >= 1) cls = "bad";
+        else if (ratio >= TIMEOUT_WARN_FRACTION) cls = "warn";
+      }
+      var label = Math.floor(elapsedSec / 60) + "m / " + Math.floor(DRIVER_BUDGET_SECONDS / 60) + "m timeout";
+      return { cls: cls, label: label };
+    }
     var h1 = document.querySelector("h1");
     var statusBadge = document.createElement("span");
     statusBadge.id = "stream-status";
@@ -275,7 +373,21 @@ function clientScript() {
       cells[2].textContent = ev.model || "(none)";
       cells[3].textContent = ev.phase || "(unknown)";
       cells[4].textContent = ev.lens || "";
-      cells[5].textContent = ev.ts || "";
+      // Age/timeout-budget badge (issue #116): appended INSIDE the same
+      // "Updated" cell as the row's own timestamp, mirroring cockpit.sh's
+      // renderLiveProgress() exactly (folded into the existing Updated
+      // column rather than a new one, so the row shape here matches the
+      // server-rendered rows column-for-column).
+      cells[5].textContent = "";
+      cells[5].appendChild(document.createTextNode(ev.ts || ""));
+      var tb = timeoutBadgeInfo(ev.ts);
+      if (tb) {
+        cells[5].appendChild(document.createTextNode(" "));
+        var span = document.createElement("span");
+        span.className = "badge " + tb.cls;
+        span.textContent = tb.label;
+        cells[5].appendChild(span);
+      }
     }
 
     function connect() {
