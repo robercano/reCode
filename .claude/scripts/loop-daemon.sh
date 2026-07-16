@@ -531,8 +531,17 @@ run_driver() {
     # running/lingering). Both failure modes otherwise look identical: some
     # nonzero rc, no driver output, no other signal to tell them apart.
     local start_marker; start_marker="$(mktemp -u "$state_dir/.driver-started.XXXXXX")"
+    # --working-directory is NOT optional: a transient --user unit defaults its
+    # WorkingDirectory to $HOME, and a driver started there never loads the
+    # repo's .claude/settings.local.json (bypassPermissions) — every gh call
+    # then dies on "requires approval" with no approver in headless mode, and
+    # the driver exits phantom. Burned 5 attempts on issue #97 (2026-07-16)
+    # before this line existed. The setsid fallback below doesn't need it: a
+    # plain child inherits the daemon's own cwd (the repo, per the service
+    # unit's WorkingDirectory).
     systemd-run --user --wait --collect --quiet \
       --unit="$unit" \
+      --working-directory="$root" \
       -p "RuntimeMaxSec=$timeout_dur" \
       --setenv="CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" \
       --setenv="PATH=$PATH" \
