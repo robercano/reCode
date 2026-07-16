@@ -108,7 +108,7 @@ repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 # LOOP_TICKS_MAX_LINES (default 2000), matching log-event.sh's
 # EVENTS_MAX_LINES.
 write_tick_record() {
-  local verdict="$1" cadence="$2"
+  local verdict="$1" cadence="$2" reason="${3:-}"
   local ticks_file="${CLAUDE_TICKS_FILE:-$root/.claude/state/loop-ticks.jsonl}"
   local max_lines="${LOOP_TICKS_MAX_LINES:-2000}"
   local action="" issue="" pr=""
@@ -133,6 +133,7 @@ write_tick_record() {
   CLAUDE_TICK_ACTION="$action" \
   CLAUDE_TICK_ISSUE="$issue" \
   CLAUDE_TICK_PR="$pr" \
+  CLAUDE_TICK_REASON="$reason" \
   node -e '
     const line = JSON.stringify({
       ts: process.env.CLAUDE_TICK_TS || "",
@@ -141,6 +142,10 @@ write_tick_record() {
       action: process.env.CLAUDE_TICK_ACTION || "",
       issue: process.env.CLAUDE_TICK_ISSUE || "",
       pr: process.env.CLAUDE_TICK_PR || "",
+      // Spend-ceiling diagnostic (issue #95): empty unless a ceiling forced
+      // the verdict to action=none -- one of
+      // expired|daily-ceiling|attempt-budget. Surfaced by cockpit.sh.
+      reason: process.env.CLAUDE_TICK_REASON || "",
     });
     process.stdout.write(line + "\n");
   ' >>"$ticks_file" 2>/dev/null || return 0
@@ -195,7 +200,14 @@ cadence="$(printf '%s\n' "$census_out" | sed -n 's/^cadence=\([A-Za-z]*\).*/\1/p
 
 # --- Parse pr-feedback.sh's TSV (num, branch, reviewer, changes_requested_at) --
 # Lowest-numbered PR wins when several need feedback addressed.
-feedback_pr="$(printf '%s\n' "$feedback_out" | awk -F'\t' 'NF>=1 && $1 ~ /^[0-9]+$/ {print $1}' | sort -n | head -1)"
+feedback_line="$(printf '%s\n' "$feedback_out" | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}' | sort -t $'\t' -k1,1n | head -1)"
+feedback_pr="$(printf '%s\n' "$feedback_line" | awk -F'\t' '{print $1}')"
+feedback_branch="$(printf '%s\n' "$feedback_line" | awk -F'\t' '{print $2}')"
+# The issue this PR's branch was cut from (feat/issue-N-*), used to key the
+# per-issue attempt budget (issue #95) so advance-phase and feedback-phase
+# dispatches for the SAME issue share one counter. Falls back to the PR
+# number itself when the branch doesn't follow that convention.
+feedback_issue="$(printf '%s\n' "$feedback_branch" | sed -n 's#.*feat/issue-\([0-9][0-9]*\)-.*#\1#p')"
 
 # --- Spawn lock: read + self-heal against the FRESH census above -----------
 # TTL rationale: this lock is written the instant a tick emits
@@ -260,12 +272,260 @@ if [ -n "$lock_issue" ]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# STEP 0: spend-ceiling pre-flight (issue #95). Three independent, adapter-
+# configurable ceilings (defaults documented in docs/TOKEN_BUDGET.md ->
+# "Loop spend ceilings"):
+#   budget.stop_after_days       self-disarm horizon (armed_at + Nd)
+#   budget.per_issue_attempts    advance/feedback dispatch budget PER ISSUE
+#   budget.daily_action_ceiling  dispatches (advance+feedback) per UTC day
+# A breach sets ceiling_block (non-empty), which forces the verdict decided
+# below to action=none WITHOUT the spawn-lock side effect, and ceiling_reason
+# (persisted on the tick record for the cockpit): one of
+# expired|daily-ceiling|attempt-budget. Every gh side effect below (notify /
+# label / comment) is best-effort and ONCE-guarded via small state files
+# under .claude/state/ -- a failure here can never break a tick, and normal
+# ticks (no breach) never call gh at all.
+# ---------------------------------------------------------------------------
+gates_rel="${GATES_FILE:-.claude/gates.json}"
+case "$gates_rel" in /*) gates_path="$gates_rel" ;; *) gates_path="$root/$gates_rel" ;; esac
+budget_cfg="$(node -e '
+  const fs = require("fs");
+  let g = null;
+  try { g = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch (e) { g = null; }
+  const b = (g && g.budget) || {};
+  const num = (v, d) => (Number.isFinite(v) && v > 0 ? v : d);
+  console.log([num(b.stop_after_days, 7), num(b.per_issue_attempts, 5), num(b.daily_action_ceiling, 50)].join(" "));
+' "$gates_path" 2>/dev/null)"
+stop_after_days="$(printf '%s\n' "$budget_cfg" | awk '{print $1}')"
+per_issue_attempts="$(printf '%s\n' "$budget_cfg" | awk '{print $2}')"
+daily_action_ceiling="$(printf '%s\n' "$budget_cfg" | awk '{print $3}')"
+case "$stop_after_days" in ''|*[!0-9.]*) stop_after_days=7 ;; esac
+case "$per_issue_attempts" in ''|*[!0-9]*) per_issue_attempts=5 ;; esac
+case "$daily_action_ceiling" in ''|*[!0-9]*) daily_action_ceiling=50 ;; esac
+
+# File-or-refresh-ONE-issue helper, shared by the expiry and daily-ceiling
+# notices below. $1 = existing tracked issue number (may be empty), $2 =
+# title (used only when filing new), $3 = body. Prints the issue number that
+# now tracks this notice (existing/refreshed, or freshly filed) -- empty on
+# total gh failure (offline), which callers treat as "nothing to persist".
+budget_notify_issue() {
+  local existing="$1" title="$2" body="$3"
+  if [ -n "$existing" ]; then
+    local st
+    st="$(gh issue view "$existing" --json state --jq .state 2>/dev/null || true)"
+    if [ "$st" = "OPEN" ]; then
+      gh issue comment "$existing" --body "$body" >/dev/null 2>&1 || true
+      printf '%s' "$existing"
+      return 0
+    fi
+  fi
+  local out num
+  out="$(gh issue create --title "$title" --label backlog --body "$body" 2>/dev/null || true)"
+  num="$(printf '%s\n' "$out" | grep -oE '[0-9]+$' | tail -1)"
+  printf '%s' "$num"
+}
+
+ceiling_block=""
+ceiling_reason=""
+
+# --- 1) stop-after self-disarm ----------------------------------------------
+# .claude/state/loop-arming.json is normally written by arm-loop.sh at arm
+# time (armed_at/expires_at/stop_after_days/notified_expired/notice_issue).
+# Fallback: an already-armed loop from before this feature existed never had
+# arm-loop.sh write one -- lazily create one starting NOW on first tick, so
+# it still gets a ceiling instead of running forever unnoticed.
+arming_file="$state_dir/loop-arming.json"
+now_iso="$(date -u +%FT%TZ)"
+if [ ! -f "$arming_file" ]; then
+  tmp_arm="$(mktemp "$state_dir/.loop-arming.json.XXXXXX")"
+  if CLAUDE_ARM_NOW="$now_iso" CLAUDE_ARM_DAYS="$stop_after_days" node -e '
+    const fs = require("fs");
+    const now = process.env.CLAUDE_ARM_NOW;
+    const days = parseFloat(process.env.CLAUDE_ARM_DAYS) || 7;
+    const expires = new Date(Date.parse(now) + days * 86400000).toISOString();
+    fs.writeFileSync(process.argv[1], JSON.stringify({
+      armed_at: now, expires_at: expires, stop_after_days: days,
+      notified_expired: false, notice_issue: null,
+    }, null, 2) + "\n");
+  ' "$tmp_arm" 2>/dev/null; then
+    mv -f "$tmp_arm" "$arming_file"
+  else
+    rm -f "$tmp_arm"
+  fi
+fi
+
+expired=0
+expires_at="" notified_expired="0" arming_notice_issue=""
+if [ -f "$arming_file" ]; then
+  arm_read="$(node -e '
+    const fs = require("fs");
+    try {
+      const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      console.log((j.expires_at||"") + "\t" + (j.notified_expired?1:0) + "\t" + (j.notice_issue||""));
+    } catch (e) { console.log("\t0\t"); }
+  ' "$arming_file" 2>/dev/null || printf '\t0\t')"
+  IFS=$'\t' read -r expires_at notified_expired arming_notice_issue <<<"$arm_read"
+  case "$notified_expired" in ''|*[!01]*) notified_expired=0 ;; esac
+  if [ -n "$expires_at" ]; then
+    now_epoch="$(date -u +%s)"
+    expires_epoch="$(date -u -d "$expires_at" +%s 2>/dev/null || echo 0)"
+    if [ "$expires_epoch" -gt 0 ] && [ "$now_epoch" -gt "$expires_epoch" ]; then
+      expired=1
+    fi
+  fi
+fi
+
+if [ "$expired" -eq 1 ]; then
+  ceiling_block="1"; ceiling_reason="expired"
+  echo "# pre-flight: loop disarmed (stop-after expired at $expires_at)"
+  if [ "$notified_expired" != "1" ]; then
+    body="The armed loop's stop-after horizon (armed_at + ${stop_after_days}d) expired at $expires_at. It stays disarmed -- no further advance/feedback dispatches -- until re-armed. Re-arm with \`/pr-loop\` or \`bash .claude/scripts/arm-loop.sh\`."
+    new_issue="$(budget_notify_issue "$arming_notice_issue" "Loop disarmed: stop-after expired" "$body")"
+    tmp_arm="$(mktemp "$state_dir/.loop-arming.json.XXXXXX")"
+    if CLAUDE_NEW_ISSUE="${new_issue:-}" node -e '
+      const fs = require("fs");
+      let j = {};
+      try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch (e) {}
+      j.notified_expired = true;
+      const ni = process.env.CLAUDE_NEW_ISSUE;
+      if (ni) j.notice_issue = parseInt(ni, 10);
+      fs.writeFileSync(process.argv[2], JSON.stringify(j, null, 2) + "\n");
+    ' "$arming_file" "$tmp_arm" 2>/dev/null; then
+      mv -f "$tmp_arm" "$arming_file"
+    else
+      rm -f "$tmp_arm"
+    fi
+  fi
+fi
+
+# --- 2) daily action ceiling -------------------------------------------------
+# .claude/state/loop-daily-ceiling.json: {date,count,halted,issue_number}.
+# count/halted reset automatically once `date` no longer matches today;
+# issue_number persists ACROSS the reset so a re-breach on a later day
+# refreshes the same tracking issue instead of filing a duplicate.
+daily_file="$state_dir/loop-daily-ceiling.json"
+# CLAUDE_TODAY (mirrors cockpit.sh's COCKPIT_NOW override pattern): lets tests
+# pin "today" instead of relying on `date -u` at the exact instant this script
+# runs -- without it there's a narrow UTC-midnight race between a test writing
+# daily-ceiling fixture state and this script reading it moments later, where
+# the two could disagree on the calendar date. Unset/empty in production (and
+# in every real invocation) -> falls back to the real UTC date, unchanged.
+today="${CLAUDE_TODAY:-$(date -u +%Y-%m-%d)}"
+daily_read="$(node -e '
+  const fs = require("fs");
+  let j = {};
+  try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch (e) {}
+  const today = process.argv[2];
+  const count = j.date === today ? (j.count||0) : 0;
+  const halted = j.date === today ? !!j.halted : false;
+  console.log(count + "\t" + (halted?1:0) + "\t" + (j.issue_number||""));
+' "$daily_file" "$today" 2>/dev/null || printf '0\t0\t')"
+IFS=$'\t' read -r daily_count daily_halted daily_issue_num <<<"$daily_read"
+case "$daily_count" in ''|*[!0-9]*) daily_count=0 ;; esac
+case "$daily_halted" in ''|*[!01]*) daily_halted=0 ;; esac
+
+if [ -z "$ceiling_block" ] && [ "$daily_count" -ge "$daily_action_ceiling" ]; then
+  ceiling_block="1"; ceiling_reason="daily-ceiling"
+  echo "# pre-flight: daily action ceiling reached ($daily_count >= $daily_action_ceiling actions on $today)"
+  if [ "$daily_halted" != "1" ]; then
+    body="The autonomous loop hit its daily action ceiling (budget.daily_action_ceiling=$daily_action_ceiling) after $daily_count dispatched actions on $today (UTC). It halts for the rest of today and resumes automatically at UTC midnight. Raise budget.daily_action_ceiling in the adapter if this volume is expected."
+    new_issue="$(budget_notify_issue "$daily_issue_num" "Loop budget exceeded: daily action ceiling" "$body")"
+    [ -n "$new_issue" ] && daily_issue_num="$new_issue"
+    tmp_daily="$(mktemp "$state_dir/.loop-daily-ceiling.json.XXXXXX")"
+    if CLAUDE_TODAY="$today" CLAUDE_COUNT="$daily_count" CLAUDE_ISSUE="${daily_issue_num:-}" node -e '
+      const fs = require("fs");
+      const issue = process.env.CLAUDE_ISSUE ? parseInt(process.env.CLAUDE_ISSUE, 10) : null;
+      fs.writeFileSync(process.argv[1], JSON.stringify({
+        date: process.env.CLAUDE_TODAY,
+        count: parseInt(process.env.CLAUDE_COUNT, 10) || 0,
+        halted: true,
+        issue_number: issue,
+      }, null, 2) + "\n");
+    ' "$tmp_daily" 2>/dev/null; then
+      mv -f "$tmp_daily" "$daily_file"
+    else
+      rm -f "$tmp_daily"
+    fi
+  fi
+fi
+
+# --- 3) per-issue advance/feedback attempt budget ----------------------------
+# .claude/state/loop-issue-attempts.json: { "<issue>": {attempts,escalated} }.
+# Keyed by the ORIGINATING issue number (advance_ready directly; feedback via
+# feedback_issue, parsed from the PR's feat/issue-N-* branch) so advance-phase
+# and feedback-phase dispatches for the same issue share one counter -- the
+# candidate mirrors the SAME preconditions the verdict decision below applies
+# (feedback beats advance; in_flight/lock-held candidates are never charged).
+attempts_file="$state_dir/loop-issue-attempts.json"
+attempt_issue="" attempt_escalate_kind="" attempt_escalate_num=""
+if [ -n "$feedback_pr" ]; then
+  attempt_issue="${feedback_issue:-$feedback_pr}"
+  attempt_escalate_kind="pr"
+  attempt_escalate_num="$feedback_pr"
+elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ] \
+     && ! printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready" \
+     && [ "$lock_issue" != "$advance_ready" ]; then
+  attempt_issue="$advance_ready"
+  attempt_escalate_kind="issue"
+  attempt_escalate_num="$advance_ready"
+fi
+
+if [ -z "$ceiling_block" ] && [ -n "$attempt_issue" ]; then
+  attempt_read="$(CLAUDE_ATT_KEY="$attempt_issue" node -e '
+    const fs = require("fs");
+    const key = process.env.CLAUDE_ATT_KEY;
+    try {
+      const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const e = j[key] || {};
+      console.log((e.attempts||0) + "\t" + (e.escalated?1:0));
+    } catch (e) { console.log("0\t0"); }
+  ' "$attempts_file" 2>/dev/null || printf '0\t0')"
+  IFS=$'\t' read -r attempts_now attempts_escalated <<<"$attempt_read"
+  case "$attempts_now" in ''|*[!0-9]*) attempts_now=0 ;; esac
+  case "$attempts_escalated" in ''|*[!01]*) attempts_escalated=0 ;; esac
+
+  if [ "$attempts_now" -ge "$per_issue_attempts" ]; then
+    ceiling_block="1"; ceiling_reason="attempt-budget"
+    echo "# pre-flight: attempt budget exceeded for issue=$attempt_issue ($attempts_now >= $per_issue_attempts)"
+    if [ "$attempts_escalated" != "1" ]; then
+      gh label create "needs-human" --color b60205 --description "Loop attempt budget exhausted -- needs a human" --force >/dev/null 2>&1 || true
+      body="This ${attempt_escalate_kind} has ping-ponged through $attempts_now advance/feedback dispatches for issue #$attempt_issue without landing (budget.per_issue_attempts=$per_issue_attempts). The loop will not retry it automatically -- labeling \`needs-human\`. Address it by hand, then either close it out or clear its entry in .claude/state/loop-issue-attempts.json to let the loop resume."
+      if [ "$attempt_escalate_kind" = "pr" ]; then
+        gh pr edit "$attempt_escalate_num" --add-label needs-human >/dev/null 2>&1 || true
+        gh pr comment "$attempt_escalate_num" --body "$body" >/dev/null 2>&1 || true
+      else
+        gh issue edit "$attempt_escalate_num" --add-label needs-human >/dev/null 2>&1 || true
+        gh issue comment "$attempt_escalate_num" --body "$body" >/dev/null 2>&1 || true
+      fi
+      tmp_att="$(mktemp "$state_dir/.loop-issue-attempts.json.XXXXXX")"
+      if CLAUDE_ATT_KEY="$attempt_issue" CLAUDE_ATT_COUNT="$attempts_now" node -e '
+        const fs = require("fs");
+        const file = process.argv[1], tmp = process.argv[2];
+        const key = process.env.CLAUDE_ATT_KEY;
+        let j = {};
+        try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) {}
+        j[key] = { attempts: parseInt(process.env.CLAUDE_ATT_COUNT, 10) || 0, escalated: true };
+        fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\n");
+      ' "$attempts_file" "$tmp_att" 2>/dev/null; then
+        mv -f "$tmp_att" "$attempts_file"
+      else
+        rm -f "$tmp_att"
+      fi
+    fi
+  fi
+fi
+
 # --- Decide the verdict -----------------------------------------------------
 # The verdict string is captured into a variable (rather than echoed inline)
 # so it can ALSO be persisted to the tick log below without disturbing the
-# invariant that the verdict line is the LAST line of stdout.
+# invariant that the verdict line is the LAST line of stdout. A spend-ceiling
+# breach above (ceiling_block) short-circuits straight to action=none,
+# WITHOUT the spawn-lock write the advance branch below would otherwise do.
 verdict=""
-if [ -n "$feedback_pr" ]; then
+if [ -n "$ceiling_block" ]; then
+  verdict="action=none"
+elif [ -n "$feedback_pr" ]; then
   verdict="action=feedback pr=$feedback_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
   if printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready"; then
@@ -284,10 +544,63 @@ else
   verdict="action=none"
 fi
 
+# --- Spend-ceiling bookkeeping: increment counts on an ACTUAL dispatch ------
+# Only runs when the verdict just decided is a genuine advance/feedback
+# dispatch (never on action=none, ceiling-blocked or not) -- so a blocked
+# tick never itself grows the very counters that blocked it.
+dispatch_issue=""
+case "$verdict" in
+  "action=advance issue="*) dispatch_issue="${verdict#action=advance issue=}" ;;
+  "action=feedback pr="*)
+    dispatch_pr="${verdict#action=feedback pr=}"
+    if [ "$dispatch_pr" = "$feedback_pr" ] && [ -n "${feedback_issue:-}" ]; then
+      dispatch_issue="$feedback_issue"
+    else
+      dispatch_issue="$dispatch_pr"
+    fi
+    ;;
+esac
+
+if [ -n "$dispatch_issue" ]; then
+  tmp_att="$(mktemp "$state_dir/.loop-issue-attempts.json.XXXXXX")"
+  if CLAUDE_ATT_KEY="$dispatch_issue" node -e '
+    const fs = require("fs");
+    const file = process.argv[1], tmp = process.argv[2];
+    const key = process.env.CLAUDE_ATT_KEY;
+    let j = {};
+    try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) {}
+    const cur = j[key] || { attempts: 0, escalated: false };
+    j[key] = { attempts: (cur.attempts || 0) + 1, escalated: !!cur.escalated };
+    fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\n");
+  ' "$attempts_file" "$tmp_att" 2>/dev/null; then
+    mv -f "$tmp_att" "$attempts_file"
+  else
+    rm -f "$tmp_att"
+  fi
+
+  tmp_daily="$(mktemp "$state_dir/.loop-daily-ceiling.json.XXXXXX")"
+  if CLAUDE_TODAY="$today" node -e '
+    const fs = require("fs");
+    const file = process.argv[1], tmp = process.argv[2];
+    const today = process.env.CLAUDE_TODAY;
+    let j = {};
+    try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) {}
+    const count = (j.date === today) ? (j.count || 0) + 1 : 1;
+    fs.writeFileSync(tmp, JSON.stringify({
+      date: today, count, halted: (j.date === today) ? !!j.halted : false,
+      issue_number: j.issue_number || null,
+    }, null, 2) + "\n");
+  ' "$daily_file" "$tmp_daily" 2>/dev/null; then
+    mv -f "$tmp_daily" "$daily_file"
+  else
+    rm -f "$tmp_daily"
+  fi
+fi
+
 echo "$verdict"
 
 # Persist the tick record (issue #85) AFTER the verdict has been echoed, and
 # writing to the FILE ONLY -- never stdout -- so the verdict line above stays
 # the last line of this script's stdout. Best-effort: never allowed to affect
 # the exit status set below.
-write_tick_record "$verdict" "$cadence" || true
+write_tick_record "$verdict" "$cadence" "$ceiling_reason" || true

@@ -240,6 +240,26 @@ else
 fi
 if [ -f "$ticks_file" ]; then cp "$ticks_file" "$tmpdir/loop-ticks.jsonl"; else : >"$tmpdir/loop-ticks.jsonl"; fi
 
+# ---- spend-ceiling state (issue #95, "Loop health" panel additions) --------
+# Same offline seam as the events/ticks blocks above: fixtures mode reads
+# <dir>/loop-arming.json, <dir>/loop-issue-attempts.json,
+# <dir>/loop-daily-ceiling.json (if present); otherwise the real, gitignored
+# .claude/state/ files loop-tick.sh itself reads/writes. A missing file just
+# means that ceiling has never tripped/been armed yet -- rendered as a
+# placeholder below, never an error.
+if [ -n "$fixtures" ]; then
+  arming_file="$fixtures/loop-arming.json"
+  attempts_file="$fixtures/loop-issue-attempts.json"
+  daily_ceiling_file="$fixtures/loop-daily-ceiling.json"
+else
+  arming_file="$root/.claude/state/loop-arming.json"
+  attempts_file="$root/.claude/state/loop-issue-attempts.json"
+  daily_ceiling_file="$root/.claude/state/loop-daily-ceiling.json"
+fi
+if [ -f "$arming_file" ]; then cp "$arming_file" "$tmpdir/loop-arming.json"; else echo "{}" >"$tmpdir/loop-arming.json"; fi
+if [ -f "$attempts_file" ]; then cp "$attempts_file" "$tmpdir/loop-issue-attempts.json"; else echo "{}" >"$tmpdir/loop-issue-attempts.json"; fi
+if [ -f "$daily_ceiling_file" ]; then cp "$daily_ceiling_file" "$tmpdir/loop-daily-ceiling.json"; else echo "{}" >"$tmpdir/loop-daily-ceiling.json"; fi
+
 # ---- active worktrees -----------------------------------------------------------
 node -e '
   const fs = require("fs");
@@ -320,6 +340,13 @@ function readTicks() {
   return ticks;
 }
 const ticks = readTicks();
+
+// Spend-ceiling state (issue #95): three small JSON objects gathered by the
+// bash prelude above. Each defaults to {} (never null/undefined) so the
+// render code below can dot into them without a guard on every access.
+const arming = readJson("loop-arming.json", {});
+const issueAttempts = readJson("loop-issue-attempts.json", {});
+const dailyCeiling = readJson("loop-daily-ceiling.json", {});
 
 function esc(s) {
   return String(s == null ? "" : s)
@@ -614,7 +641,67 @@ function renderLoopHealth() {
   }
   html += `</tbody></table>`;
 
+  html += renderSpendCeilings();
+
   html += `</section>`;
+  return html;
+}
+
+// ---- Spend ceilings sub-section (issue #95) --------------------------------
+// Best-effort surfacing of the three loop spend ceilings inside the SAME
+// "Loop health" section: stop-after expiry/countdown, today's dispatch count
+// vs the daily ceiling, and per-issue attempt counts vs the per-issue budget.
+// Reads adapter.budget for the configured thresholds (falling back to the
+// same defaults loop-tick.sh itself uses when a key is absent), so this
+// panel and the enforcement it describes never drift out of sync.
+function renderSpendCeilings() {
+  const b = adapter.budget || {};
+  const perIssueAttempts = Number.isFinite(b.per_issue_attempts) ? b.per_issue_attempts : 5;
+  const dailyCeilingCfg = Number.isFinite(b.daily_action_ceiling) ? b.daily_action_ceiling : 50;
+
+  let html = `<h3>Spend ceilings</h3>`;
+
+  // --- stop-after expiry/countdown ---
+  if (arming && arming.expires_at) {
+    const expMs = Date.parse(arming.expires_at);
+    let line = `Stop-after: <code>${esc(arming.expires_at)}</code>`;
+    if (Number.isFinite(expMs)) {
+      const diffMs = expMs - nowMs;
+      if (diffMs > 0) {
+        const days = Math.floor(diffMs / 86400000);
+        const hours = Math.floor((diffMs % 86400000) / 3600000);
+        line += ` <span class="muted">(in ${days}d ${hours}h)</span>`;
+      } else {
+        line += ` <span class="badge unavailable">DISARMED — re-arm to resume</span>`;
+      }
+    }
+    html += `<p>${line}</p>`;
+  } else {
+    html += `<p class="muted">Stop-after: not armed yet</p>`;
+  }
+
+  // --- today's dispatch count vs the daily ceiling ---
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  const todaysCount = dailyCeiling && dailyCeiling.date === today ? (dailyCeiling.count || 0) : 0;
+  const overDaily = todaysCount >= dailyCeilingCfg;
+  html += `<p>Today's actions: <span class="badge ${overDaily ? "unavailable" : "muted"}">${todaysCount} / ${dailyCeilingCfg}</span></p>`;
+
+  // --- per-issue attempt counts vs the per-issue budget ---
+  const attemptEntries = Object.entries(issueAttempts || {}).filter(([, v]) => v && (v.attempts || 0) > 0);
+  if (attemptEntries.length === 0) {
+    html += `<p class="muted">Per-issue attempts: none tracked yet</p>`;
+  } else {
+    attemptEntries.sort((a, b2) => (b2[1].attempts || 0) - (a[1].attempts || 0));
+    html += `<table class="routing"><thead><tr><th>Issue</th><th>Attempts</th><th>Status</th></tr></thead><tbody>`;
+    for (const [k, v] of attemptEntries) {
+      const n = parseInt(k, 10);
+      const over = (v.attempts || 0) >= perIssueAttempts;
+      const status = over ? `<span class="badge unavailable">needs-human</span>` : "";
+      html += `<tr><td>${Number.isFinite(n) ? refLink(n) : esc(k)}</td><td>${esc(v.attempts)}/${perIssueAttempts}</td><td>${status}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
   return html;
 }
 

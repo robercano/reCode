@@ -13,7 +13,7 @@
 # then recreate).
 #
 # Usage:
-#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>] [--spawn <mode>]
+#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>] [--spawn <mode>] [--stop-after-days N]
 #
 #   --gates-file <path>       passed to pr-loop.service as GATES_FILE (e.g.
 #                              .claude/self/gates.json for the self-hosted
@@ -30,6 +30,16 @@
 #   --spawn <mode>             remote-control spawn mode: same-dir (default) or
 #                              worktree. Passed explicitly so the server never
 #                              blocks on its interactive first-run question.
+#   --stop-after-days N        self-disarm horizon (issue #95): loop-tick.sh
+#                              refuses every advance/feedback dispatch once
+#                              armed_at + N days has passed, until re-armed.
+#                              Defaults to budget.stop_after_days in the
+#                              adapter picked by --gates-file (or the default
+#                              .claude/gates.json when --gates-file is
+#                              omitted), else 7. Every re-arm rewrites
+#                              .claude/state/loop-arming.json fresh --
+#                              clearing any prior expiry AND the one-time
+#                              "disarmed" notification guard.
 set -euo pipefail
 
 gates_file=""
@@ -37,6 +47,7 @@ permission_mode=""
 capacity="8"
 rc_name=""
 spawn_mode="same-dir"
+stop_after_days=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --gates-file) gates_file="${2:?--gates-file needs a value}"; shift 2 ;;
@@ -49,8 +60,10 @@ while [ "$#" -gt 0 ]; do
     --spawn) spawn_mode="${2:?--spawn needs a value}"; shift 2 ;;
     --spawn=*) spawn_mode="${1#--spawn=}"; shift ;;
     --capacity=*) capacity="${1#--capacity=}"; shift ;;
+    --stop-after-days) stop_after_days="${2:?--stop-after-days needs a value}"; shift 2 ;;
+    --stop-after-days=*) stop_after_days="${1#--stop-after-days=}"; shift ;;
     -h|--help)
-      sed -n '2,32p' "$0"
+      sed -n '2,42p' "$0"
       exit 0
       ;;
     *) echo "arm-loop.sh: unknown argument '$1'" >&2; exit 2 ;;
@@ -95,6 +108,46 @@ gates_env=""
 if [ -n "$gates_file" ]; then
   gates_env="Environment=GATES_FILE=$gates_file"
 fi
+
+# --- spend-ceiling arming state (issue #95) ---------------------------------
+# Resolve the stop-after horizon: --stop-after-days wins; else
+# budget.stop_after_days from the SAME adapter the armed daemon will read
+# (gates_file, defaulting to .claude/gates.json); else 7. Always WRITE a
+# fresh .claude/state/loop-arming.json on every arm/re-arm -- this is what
+# clears a prior expiry and the one-time "disarmed" notification guard.
+if [ -z "$stop_after_days" ]; then
+  adapter_for_stop_after="${gates_file:-.claude/gates.json}"
+  case "$adapter_for_stop_after" in
+    /*) ;;
+    *) adapter_for_stop_after="$repo_root/$adapter_for_stop_after" ;;
+  esac
+  stop_after_days="$(node -e '
+    try {
+      const g = require(process.argv[1]);
+      const d = g && g.budget && g.budget.stop_after_days;
+      if (Number.isFinite(d) && d > 0) { console.log(d); process.exit(0); }
+    } catch (e) {}
+  ' "$adapter_for_stop_after" 2>/dev/null || true)"
+  stop_after_days="${stop_after_days:-7}"
+fi
+case "$stop_after_days" in
+  ''|*[!0-9.]*) echo "arm-loop.sh: --stop-after-days must be a positive number (got '$stop_after_days')" >&2; exit 2 ;;
+esac
+
+arming_state_dir="$repo_root/.claude/state"
+mkdir -p "$arming_state_dir"
+arm_now="$(date -u +%FT%TZ)"
+node -e '
+  const fs = require("fs");
+  const now = process.argv[2];
+  const days = parseFloat(process.argv[3]);
+  const expires = new Date(Date.parse(now) + days * 86400000).toISOString();
+  fs.writeFileSync(process.argv[1], JSON.stringify({
+    armed_at: now, expires_at: expires, stop_after_days: days,
+    notified_expired: false, notice_issue: null,
+  }, null, 2) + "\n");
+' "$arming_state_dir/loop-arming.json" "$arm_now" "$stop_after_days"
+echo "arm-loop.sh: armed until $(node -e 'const j=require(process.argv[1]);console.log(j.expires_at)' "$arming_state_dir/loop-arming.json") (stop_after_days=$stop_after_days) -- .claude/state/loop-arming.json"
 
 # Absolute claude path, resolved HERE — this script runs in a real terminal
 # with the user's full environment, while the installed unit runs under
