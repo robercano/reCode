@@ -34,11 +34,13 @@ check() {
 }
 
 # Build one fresh fake "consumer project" per scenario: <fixture>/.claude/scripts/.
-# fake_census / fake_feedback are the exact stdout the corresponding real
-# script would print; notify-poll.sh and merge-ready.sh are stubbed to just
-# print a marker line (their output is passed through, never parsed).
+# fake_census / fake_feedback / fake_cifix are the exact stdout the
+# corresponding real script would print; notify-poll.sh and merge-ready.sh are
+# stubbed to just print a marker line (their output is passed through, never
+# parsed). fake_cifix defaults to empty (no ci-fix candidates) so every
+# existing 3-arg call site keeps working unchanged.
 new_fixture() {
-  local name="$1" fake_census="$2" fake_feedback="$3"
+  local name="$1" fake_census="$2" fake_feedback="$3" fake_cifix="${4:-}"
   local dir="$work/$name/.claude/scripts"
   mkdir -p "$dir" "$work/$name/.claude/state" 2>/dev/null
   rm -rf "$work/$name/.claude/state"   # loop-tick.sh must mkdir -p it itself
@@ -71,6 +73,12 @@ EOF
 cat <<'FEEDBACK'
 $fake_feedback
 FEEDBACK
+EOF
+  cat > "$dir/pr-ci-fix.sh" <<EOF
+#!/usr/bin/env bash
+cat <<'CIFIX'
+$fake_cifix
+CIFIX
 EOF
   chmod +x "$dir"/*.sh
   printf '%s\n' "$dir"
@@ -174,13 +182,14 @@ check "scenario 6: self-heal diagnostic mentions the cleared stale issue=3" bash
 check "scenario 6: lock file now records the NEW issue=9, not the stale 3" grep -q '^issue=9 ts=' "$lock6"
 
 # ---------------------------------------------------------------------------
-# 7. All four step scripts' full output is preserved (never swallowed).
+# 7. All five step scripts' full output is preserved (never swallowed).
 # ---------------------------------------------------------------------------
-check "all four labeled step headers appear in the tick's output" bash -c '
-  printf "%s\n" "$1" | grep -q "1/4 loop-census.sh" &&
-  printf "%s\n" "$1" | grep -q "2/4 notify-poll.sh" &&
-  printf "%s\n" "$1" | grep -q "3/4 merge-ready.sh" &&
-  printf "%s\n" "$1" | grep -q "4/4 pr-feedback.sh"
+check "all five labeled step headers appear in the tick's output" bash -c '
+  printf "%s\n" "$1" | grep -q "1/5 loop-census.sh" &&
+  printf "%s\n" "$1" | grep -q "2/5 notify-poll.sh" &&
+  printf "%s\n" "$1" | grep -q "3/5 merge-ready.sh" &&
+  printf "%s\n" "$1" | grep -q "4/5 pr-feedback.sh" &&
+  printf "%s\n" "$1" | grep -q "5/5 pr-ci-fix.sh"
 ' _ "$out1"
 check "notify-poll.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "fake notify-poll output"' _ "$out1"
 check "merge-ready.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "merge-ready: merged=0 skipped=0"' _ "$out1"

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # loop-tick.sh — one-shot orchestration tick for the autonomous PR loop.
 #
-# Runs the loop's four step scripts, IN ORDER, with their FULL output
+# Runs the loop's five step scripts, IN ORDER, with their FULL output
 # preserved (never swallowed or `tail -1`'d), then emits exactly one
 # machine-readable verdict line as the LAST line of output:
 #   action=none
 #   action=advance issue=N
 #   action=feedback pr=N
+#   action=ci-fix pr=N
 #   action=resume issue=N branch=<name>   (issue #98 -- see STEP 0.5 below)
 #
 # WHY THIS EXISTS (issue #81): the tick used to be a multi-step PROMPT
@@ -15,25 +16,35 @@
 # Haiku-driven tick has been observed to stop invoking the step scripts and
 # fabricate their output, and to double-spawn an orchestrator for the same
 # issue because it misread an in-flight worktree as hung. Collapsing the
-# whole tick to ONE script plus one conditional spawn (of the ADVANCE/FEEDBACK
-# work itself) makes the protocol immune to that drift: the verdict line is
-# computed by shell/node logic, not recalled by the model from a prompt.
+# whole tick to ONE script plus one conditional spawn (of the ADVANCE/FEEDBACK/
+# CI-FIX work itself) makes the protocol immune to that drift: the verdict
+# line is computed by shell/node logic, not recalled by the model from a
+# prompt.
 #
-# This script does NOT reimplement census, polling, merge, or feedback-detection
-# logic — it calls the existing sibling scripts and only adds the verdict
-# arithmetic + the spawn lock (see .claude/state/loop-advance.lock below).
+# This script does NOT reimplement census, polling, merge, feedback-detection,
+# or CI-fix-detection logic — it calls the existing sibling scripts and only
+# adds the verdict arithmetic + the spawn lock (see
+# .claude/state/loop-advance.lock below).
 #
-# Precedence: unaddressed CHANGES_REQUESTED feedback (pr-feedback.sh) always
-# wins over ADVANCE — a human is waiting on a reply. When multiple PRs need
-# feedback addressed, the lowest-numbered PR is picked. ADVANCE additionally
-# requires: census says advance_ready=N (already means zero open PRs + a
-# planned+module issue + no existing branch), N is not census's in_flight=N
-# (a feat/issue-N-* branch with no open PR — someone/something is already
-# mid-flight on it), and the spawn lock (below) is not already held for N.
-# RESUME (issue #98, see STEP 0.5 below) is lowest precedence: it only fires
-# when neither FEEDBACK nor a fresh ADVANCE claimed the tick (advance_ready=
-# none), and picks the lowest-numbered in_flight issue that census's stall
-# clock or debris classifier flags as stuck.
+# Precedence (issue #96): feedback > ci-fix > advance > resume.
+#   - unaddressed CHANGES_REQUESTED feedback (pr-feedback.sh) always wins over
+#     everything else — a human is waiting on a reply. When multiple PRs need
+#     feedback addressed, the lowest-numbered PR is picked.
+#   - CI-FIX (pr-ci-fix.sh) wins over ADVANCE, but never over feedback: a PR
+#     that is BOTH a feedback candidate AND has failing CI is handled as
+#     feedback, never ci-fix (pr-ci-fix.sh itself already excludes feedback
+#     candidates from its own output, so this precedence is enforced twice —
+#     belt and suspenders). When multiple PRs need a CI fix, the
+#     lowest-numbered PR is picked, same tie-break as feedback.
+#   - ADVANCE additionally requires: census says advance_ready=N (already
+#     means zero open PRs + a planned+module issue + no existing branch), N is
+#     not census's in_flight=N (a feat/issue-N-* branch with no open PR —
+#     someone/something is already mid-flight on it), and the spawn lock
+#     (below) is not already held for N.
+#   - RESUME (issue #98, see STEP 0.5 below) is lowest precedence: it only
+#     fires when neither FEEDBACK, CI-FIX, nor a fresh ADVANCE claimed the
+#     tick (advance_ready=none), and picks the lowest-numbered in_flight issue
+#     that census's stall clock or debris classifier flags as stuck.
 #
 # Spawn lock: .claude/state/loop-advance.lock (root-relative; .claude/state/
 # is already gitignored). Written the moment this script emits
@@ -127,6 +138,7 @@ write_tick_record() {
   case "$verdict" in
     "action=advance issue="*) action="advance"; issue="${verdict#action=advance issue=}" ;;
     "action=feedback pr="*) action="feedback"; pr="${verdict#action=feedback pr=}" ;;
+    "action=ci-fix pr="*) action="ci-fix"; pr="${verdict#action=ci-fix pr=}" ;;
     "action=resume issue="*)
       action="resume"
       issue="${verdict#action=resume issue=}"
@@ -191,19 +203,23 @@ write_tick_record() {
   return 0
 }
 
-echo "=== 1/4 loop-census.sh ==="
+echo "=== 1/5 loop-census.sh ==="
 census_out="$(bash "$script_dir/loop-census.sh" "$repo")"
 printf '%s\n' "$census_out"
 
-echo "=== 2/4 notify-poll.sh ==="
+echo "=== 2/5 notify-poll.sh ==="
 bash "$script_dir/notify-poll.sh" "$repo"
 
-echo "=== 3/4 merge-ready.sh ==="
+echo "=== 3/5 merge-ready.sh ==="
 bash "$script_dir/merge-ready.sh" "$repo"
 
-echo "=== 4/4 pr-feedback.sh ==="
+echo "=== 4/5 pr-feedback.sh ==="
 feedback_out="$(bash "$script_dir/pr-feedback.sh" "$repo")"
 printf '%s\n' "$feedback_out"
+
+echo "=== 5/5 pr-ci-fix.sh ==="
+cifix_out="$(bash "$script_dir/pr-ci-fix.sh" "$repo")"
+printf '%s\n' "$cifix_out"
 
 echo "=== verdict ==="
 
@@ -232,6 +248,19 @@ feedback_branch="$(printf '%s\n' "$feedback_line" | awk -F'\t' '{print $2}')"
 # dispatches for the SAME issue share one counter. Falls back to the PR
 # number itself when the branch doesn't follow that convention.
 feedback_issue="$(printf '%s\n' "$feedback_branch" | sed -n 's#.*feat/issue-\([0-9][0-9]*\)-.*#\1#p')"
+
+# --- Parse pr-ci-fix.sh's TSV (num, branch, failing_checks_csv, head_sha) ---
+# Lowest-numbered PR wins when several need a CI fix, same tie-break as
+# feedback above. pr-ci-fix.sh already excludes feedback candidates from its
+# own output (precedence, issue #96), so no additional filtering is needed
+# here beyond the verdict decision below.
+cifix_line="$(printf '%s\n' "$cifix_out" | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}' | sort -t $'\t' -k1,1n | head -1)"
+cifix_pr="$(printf '%s\n' "$cifix_line" | awk -F'\t' '{print $1}')"
+cifix_branch="$(printf '%s\n' "$cifix_line" | awk -F'\t' '{print $2}')"
+# Same #95 per-issue attempt budget key derivation as feedback_issue above —
+# ci-fix dispatches for issue N share the SAME counter as advance/feedback
+# dispatches for issue N (do NOT invent a new counter file).
+cifix_issue="$(printf '%s\n' "$cifix_branch" | sed -n 's#.*feat/issue-\([0-9][0-9]*\)-.*#\1#p')"
 
 # --- Spawn lock: read + self-heal against the FRESH census above -----------
 # TTL rationale: this lock is written the instant a tick emits
@@ -489,19 +518,25 @@ if [ -z "$ceiling_block" ] && [ "$daily_count" -ge "$daily_action_ceiling" ]; th
   fi
 fi
 
-# --- 3) per-issue advance/feedback attempt budget ----------------------------
+# --- 3) per-issue advance/feedback/ci-fix attempt budget ---------------------
 # .claude/state/loop-issue-attempts.json: { "<issue>": {attempts,escalated} }.
-# Keyed by the ORIGINATING issue number (advance_ready directly; feedback via
-# feedback_issue, parsed from the PR's feat/issue-N-* branch) so advance-phase
-# and feedback-phase dispatches for the same issue share one counter -- the
-# candidate mirrors the SAME preconditions the verdict decision below applies
-# (feedback beats advance; in_flight/lock-held candidates are never charged).
+# Keyed by the ORIGINATING issue number (advance_ready directly; feedback/
+# ci-fix via feedback_issue/cifix_issue, parsed from the PR's feat/issue-N-*
+# branch) so advance-phase, feedback-phase, and ci-fix-phase dispatches for the
+# same issue share ONE counter (issue #96 reuses the SAME #95 counter, no new
+# state file) -- the candidate mirrors the SAME precedence the verdict
+# decision below applies (feedback beats ci-fix beats advance; in_flight/
+# lock-held advance candidates are never charged).
 attempts_file="$state_dir/loop-issue-attempts.json"
 attempt_issue="" attempt_escalate_kind="" attempt_escalate_num=""
 if [ -n "$feedback_pr" ]; then
   attempt_issue="${feedback_issue:-$feedback_pr}"
   attempt_escalate_kind="pr"
   attempt_escalate_num="$feedback_pr"
+elif [ -n "$cifix_pr" ]; then
+  attempt_issue="${cifix_issue:-$cifix_pr}"
+  attempt_escalate_kind="pr"
+  attempt_escalate_num="$cifix_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ] \
      && ! printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready" \
      && [ "$lock_issue" != "$advance_ready" ]; then
@@ -704,6 +739,8 @@ if [ -n "$ceiling_block" ]; then
   verdict="action=none"
 elif [ -n "$feedback_pr" ]; then
   verdict="action=feedback pr=$feedback_pr"
+elif [ -n "$cifix_pr" ]; then
+  verdict="action=ci-fix pr=$cifix_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
   if printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready"; then
     # Defensive only: real census can never report the SAME issue as both
@@ -817,7 +854,7 @@ else
 fi
 
 # --- Spend-ceiling bookkeeping: increment counts on an ACTUAL dispatch ------
-# Only runs when the verdict just decided is a genuine advance/feedback
+# Only runs when the verdict just decided is a genuine advance/feedback/ci-fix
 # dispatch (never on action=none, ceiling-blocked or not) -- so a blocked
 # tick never itself grows the very counters that blocked it. action=resume is
 # DELIBERATELY excluded here: resume attempts are tracked in the SIBLING
@@ -832,6 +869,14 @@ case "$verdict" in
     dispatch_pr="${verdict#action=feedback pr=}"
     if [ "$dispatch_pr" = "$feedback_pr" ] && [ -n "${feedback_issue:-}" ]; then
       dispatch_issue="$feedback_issue"
+    else
+      dispatch_issue="$dispatch_pr"
+    fi
+    ;;
+  "action=ci-fix pr="*)
+    dispatch_pr="${verdict#action=ci-fix pr=}"
+    if [ "$dispatch_pr" = "$cifix_pr" ] && [ -n "${cifix_issue:-}" ]; then
+      dispatch_issue="$cifix_issue"
     else
       dispatch_issue="$dispatch_pr"
     fi

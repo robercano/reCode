@@ -9,7 +9,7 @@
 # setsid/timeout/ledger wrapping around the actual `claude -p` spawn, so a
 # broken/garbage verdict here can NEVER result in a driver being spawned — the
 # spawn is a whole separate step the caller only reaches by parsing the
-# `loop-event: action=advance|feedback ...` line below.
+# `loop-event: action=advance|feedback|ci-fix ...` line below.
 #
 # Never re-derives the verdict — issue #81 contract: it is computed ONCE, by
 # loop-tick.sh's shell logic, and passed through byte-identical.
@@ -23,6 +23,7 @@
 #     -> nothing else is printed. NO model/driver process must be spawned.
 #   loop-event: action=advance issue=N
 #   loop-event: action=feedback pr=N
+#   loop-event: action=ci-fix pr=N
 #   loop-event: model=<model>
 #   loop-event: prompt-file=<absolute path to a plain-text file holding the
 #               verdict-obeying prompt for the driver session>
@@ -32,12 +33,12 @@
 #        in setsid + timeout + a run-ledger append) — this script never execs
 #        claude, setsid, or timeout.
 #
-# Exit code: 0 on `action=none` OR a successfully emitted advance/feedback
-# verdict (in which case a prompt-file was written). Non-zero if loop-tick.sh
-# itself failed, or its verdict line failed to parse — in EITHER case a
-# `loop-event: action=none` line is STILL printed last (so a caller doing a
-# blind `sed -n 's/^loop-event: action=//p' | tail -1` never sees a stale or
-# missing action), and no prompt-file is written.
+# Exit code: 0 on `action=none` OR a successfully emitted advance/feedback/
+# ci-fix verdict (in which case a prompt-file was written). Non-zero if
+# loop-tick.sh itself failed, or its verdict line failed to parse — in EITHER
+# case a `loop-event: action=none` line is STILL printed last (so a caller
+# doing a blind `sed -n 's/^loop-event: action=//p' | tail -1` never sees a
+# stale or missing action), and no prompt-file is written.
 #
 # Honors $GATES_FILE: not read directly here beyond quoting it into the
 # self-hosting adapter clause baked into the prompt below (loop-tick.sh and
@@ -84,6 +85,7 @@ case "$verdict" in
     ;;
   "action=advance issue="*) n="${verdict#action=advance issue=}" ;;
   "action=feedback pr="*)   n="${verdict#action=feedback pr=}" ;;
+  "action=ci-fix pr="*)     n="${verdict#action=ci-fix pr=}" ;;
   *)
     echo "loop-event: unexpected verdict line: $verdict" >&2
     echo "loop-event: action=none"
@@ -113,7 +115,7 @@ adapter=""
 if [ -n "${GATES_FILE:-}" ]; then
   adapter="Export GATES_FILE=$GATES_FILE for every gate/orchestration step, and instruct every spawned agent (orchestrator, implementers, reviewers) to read $GATES_FILE — NOT the placeholder root .claude/gates.json — as its adapter (module map, gates, review lenses). Every gate.sh invocation MUST run as: GATES_FILE=$GATES_FILE bash $script_dir/gate.sh <name>. "
 fi
-common="The tick (loop-tick.sh) already ran census/poll/merge/feedback-detection this firing and emitted this verdict — do NOT re-run those scripts and do NOT re-derive the verdict. ${adapter}ALL gh interaction (yours and every agent's) MUST run as the bot via bash $script_dir/bot-gh.sh — never bare gh; only git commits/pushes stay as the owner. Follow docs/USAGE.md and .claude/agents/*; reviewer lenses + consensus per the adapter. YOU ARE A HEADLESS ONE-SHOT SESSION: the moment you end your turn, this session and every background process/agent it spawned are terminated (a background orchestrator gets at most a short grace ceiling, then is killed mid-work — observed 2026-07-10: two drivers exited 'cleanly' leaving half-born local branches that wedged their issues as in_flight). Therefore run the ENTIRE orchestration SYNCHRONOUSLY: spawn the orchestrator and every agent in the FOREGROUND (run_in_background: false), wait for each to finish, and do NOT end your turn until the work product exists on GitHub (the bot PR is open, or the feedback push + marker comment landed) or you are reporting a definite failure — never a 'running in background, will report later' message, which is a self-deception in this mode. If orchestration fails partway, CLEAN UP before exiting: delete any local feat/issue-N-* branch and worktree you created that has no open PR, so census never mistakes your debris for in-flight work. Keep the final report to a few lines — it is telemetry, not documentation."
+common="The tick (loop-tick.sh) already ran census/poll/merge/feedback-detection/ci-fix-detection this firing and emitted this verdict — do NOT re-run those scripts and do NOT re-derive the verdict. ${adapter}ALL gh interaction (yours and every agent's) MUST run as the bot via bash $script_dir/bot-gh.sh — never bare gh; only git commits/pushes stay as the owner. Follow docs/USAGE.md and .claude/agents/*; reviewer lenses + consensus per the adapter. YOU ARE A HEADLESS ONE-SHOT SESSION: the moment you end your turn, this session and every background process/agent it spawned are terminated (a background orchestrator gets at most a short grace ceiling, then is killed mid-work — observed 2026-07-10: two drivers exited 'cleanly' leaving half-born local branches that wedged their issues as in_flight). Therefore run the ENTIRE orchestration SYNCHRONOUSLY: spawn the orchestrator and every agent in the FOREGROUND (run_in_background: false), wait for each to finish, and do NOT end your turn until the work product exists on GitHub (the bot PR is open, or the feedback/ci-fix push + marker comment landed) or you are reporting a definite failure — never a 'running in background, will report later' message, which is a self-deception in this mode. If orchestration fails partway, CLEAN UP before exiting: delete any local feat/issue-N-* branch and worktree you created that has no open PR, so census never mistakes your debris for in-flight work. Keep the final report to a few lines — it is telemetry, not documentation."
 
 case "$verdict" in
   action=advance*)
@@ -148,6 +150,11 @@ This issue is plan-gated and APPROVED (plan.gate). Before implementing, fetch th
 Drive issue #$n through the orchestrator: scope → worktree implementer → gate.sh gates → reviewer lenses → bot PR. One issue in flight at a time — work ONLY issue #$n. \`backlog\` issues are owner-unapproved: if you file an issue yourself, label it backlog — NEVER planned (that label is the owner's formal approval, assigned by the owner alone)."
         ;;
     esac
+    ;;
+  action=ci-fix*)
+    prompt="Run the CI-FIX step of the autonomous PR loop for PR #$n. $common
+PR #$n has a FAILING CI check on its current head (see the \`5/5 pr-ci-fix.sh\` section above for which check(s) and its head SHA). Before starting, label the PR \`claude-ci-fixing\` via bot-gh.sh (create the label with --force if it doesn't exist yet) as an in-flight guard against a second tick double-dispatching this same PR. Address the failure: orchestrator → worktree implementer on the SAME branch (checkout the PR's existing branch, do NOT create a new one) → reviewer lenses per the adapter, push the fix to update the PR in place. After pushing, query the PR's CURRENT head commit SHA (bot-gh.sh pr view $n --json headRefOid) and post a bot comment containing exactly \`<!-- claude-ci-addressed:<that-head-sha> -->\` (substituting the real SHA) — this is the cursor pr-ci-fix.sh checks so an unresolved-but-still-rerunning check isn't re-dispatched every tick, while a genuinely NEW failure on a NEW commit still re-triggers. Do NOT merge, and do NOT force-push."
+    action_line="action=ci-fix pr=$n"
     ;;
   *)
     prompt="Run the ADDRESS FEEDBACK step of the autonomous PR loop for PR #$n. $common

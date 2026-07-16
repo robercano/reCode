@@ -21,7 +21,7 @@
 # so a driver's own bash children can never be orphaned by a bare SIGTERM.
 #
 # RUN LEDGER: one line per driver appended to .claude/state/loop-runs.log:
-#   pid=<pgid> session=<session_id> verdict=<advance issue=N|feedback pr=N> ts=<ISO8601> [result=exit|timeout|phantom rc=N] [pr=N] [debris=empty|publishable|half-done [action=deleted|resumable]] [verify=skipped]
+#   pid=<pgid> session=<session_id> verdict=<advance issue=N|feedback pr=N|ci-fix pr=N> ts=<ISO8601> [result=exit|timeout|phantom rc=N] [pr=N] [debris=empty|publishable|half-done [action=deleted|resumable]] [verify=skipped]
 # session_id is parsed out of the driver's own --output-format json stdout,
 # so a hung/dead driver can be inspected later with
 # `claude --resume <session_id> --fork-session` (safe while it's still
@@ -54,7 +54,8 @@
 # reboot/sleep, or `wsl --shutdown`. Evidence 2026-07-14/15: five of six
 # drivers died ledger-less this way. The fix: when `systemd-run` is on PATH,
 # `run_driver` spawns each driver as its OWN transient `--user` unit
-# (`pr-loop-driver-issue<N>`/`pr-loop-driver-pr<N>`, derived from the verdict)
+# (`pr-loop-driver-issue<N>`/`pr-loop-driver-pr<N>`/`pr-loop-driver-cifix-pr<N>`,
+# derived from the verdict)
 # via `systemd-run --user --wait --collect --unit=... -p RuntimeMaxSec=<LOOP_DRIVER_TIMEOUT>`.
 # The driver's real parent becomes the user manager — it lives in ITS OWN
 # scope, independent of the daemon's cgroup — so a daemon restart/crash kills
@@ -279,7 +280,12 @@ classify_debris() {
 #
 # Only applies to `advance issue=N` verdicts with a non-timeout/non-spawn-error
 # rc (124/137/127 pass $3 straight through unchanged: a killed/never-spawned
-# driver has no work product to verify yet). All GitHub access goes through
+# driver has no work product to verify yet). `feedback pr=N` and `ci-fix
+# pr=N` verdicts are DELIBERATELY excluded too (fall straight into the `*`
+# pass-through arm below) — both push commits onto an EXISTING PR branch
+# rather than creating a new local `feat/issue-N-*` one, so there is no
+# freshly-created branch/worktree for this debris check to classify; the PR
+# itself already existed before the driver ran. All GitHub access goes through
 # bot-gh.sh; a failed/offline/empty query degrades to appending `verify=skipped`
 # — it NEVER falsely declares `result=phantom`, and NEVER deletes anything, on
 # a network hiccup. classify_debris (pure git) still runs regardless of
@@ -367,15 +373,25 @@ verify_and_classify_post_exit() {
   printf '%s' "$out"
 }
 
-# --- transient systemd unit naming (issue #119 pt 1) -------------------------
-# $1=verdict -> "pr-loop-driver-issue<N>" for "advance issue=N", or
-# "pr-loop-driver-pr<N>" for "feedback pr=N". Used both to SPAWN the unit
+# --- transient systemd unit naming (issue #119 pt 1; issue #96 pt ci-fix) ---
+# $1=verdict -> "pr-loop-driver-issue<N>" for "advance issue=N",
+# "pr-loop-driver-pr<N>" for "feedback pr=N", or
+# "pr-loop-driver-cifix-pr<N>" for "ci-fix pr=N". Used both to SPAWN the unit
 # (run_driver) and, in reverse (verdict_from_unit_name below), to recover the
 # verdict from a unit already running when this daemon process starts up
 # (reattach_orphaned_drivers) — the two must stay exact inverses of each other.
+# ci-fix gets its OWN distinct unit name (not "pr-loop-driver-pr<N>") so a
+# feedback driver and a ci-fix driver on the SAME PR can never collide in
+# naming or reattach — the verdict precedence (feedback > ci-fix) makes both
+# firing for the same PR in the same tick impossible, but a feedback driver
+# from a PRIOR tick could still be finishing up while a later tick, after that
+# feedback was addressed, dispatches a ci-fix driver for the identical PR
+# number; distinct unit names keep those two spawns/reattaches from ever being
+# confused with each other.
 driver_unit_name() {
   case "$1" in
     "advance issue="*)  printf 'pr-loop-driver-issue%s' "${1#advance issue=}" ;;
+    "ci-fix pr="*)       printf 'pr-loop-driver-cifix-pr%s' "${1#ci-fix pr=}" ;;
     "feedback pr="*)    printf 'pr-loop-driver-pr%s' "${1#feedback pr=}" ;;
     *)                  printf 'pr-loop-driver-unknown' ;;
   esac
@@ -384,13 +400,19 @@ driver_unit_name() {
 # --- reverse of driver_unit_name: unit name -> verdict (issue #119 pt 3) ----
 # Prints nothing (not an error) for a unit name that doesn't match the
 # expected naming convention — reattach_orphaned_drivers skips those rather
-# than guessing.
+# than guessing. The `pr-loop-driver-cifix-pr*` arm MUST be checked before
+# `pr-loop-driver-pr*` would even matter for disambiguation (it doesn't here —
+# "cifix-pr..." never matches the "pr..." prefix pattern either way — but the
+# ordering keeps the two ci-fix/feedback arms visually adjacent to their
+# distinct name shapes in driver_unit_name above, so the pairing stays obvious
+# on read).
 verdict_from_unit_name() {
   local unit="${1%.service}"
   case "$unit" in
-    pr-loop-driver-issue*) printf 'advance issue=%s' "${unit#pr-loop-driver-issue}" ;;
-    pr-loop-driver-pr*)    printf 'feedback pr=%s' "${unit#pr-loop-driver-pr}" ;;
-    *)                     : ;;
+    pr-loop-driver-issue*)    printf 'advance issue=%s' "${unit#pr-loop-driver-issue}" ;;
+    pr-loop-driver-cifix-pr*) printf 'ci-fix pr=%s' "${unit#pr-loop-driver-cifix-pr}" ;;
+    pr-loop-driver-pr*)       printf 'feedback pr=%s' "${unit#pr-loop-driver-pr}" ;;
+    *)                        : ;;
   esac
 }
 
@@ -448,7 +470,7 @@ reattach_orphaned_drivers() {
     [ -n "$unit" ] || continue
     local verdict; verdict="$(verdict_from_unit_name "$unit")"
     if [ -z "$verdict" ]; then
-      log "startup re-attach: active unit '$unit' doesn't match the pr-loop-driver-<issueN|prN> naming — leaving it to systemd, not re-attaching"
+      log "startup re-attach: active unit '$unit' doesn't match the pr-loop-driver-<issueN|prN|cifix-prN> naming — leaving it to systemd, not re-attaching"
       continue
     fi
     log "startup re-attach: found active driver unit '$unit' from a previous daemon ($verdict) — waiting instead of spawning a new one"
@@ -657,7 +679,7 @@ run_once() {
     none|"")
       : # nothing actionable — no driver spawned
       ;;
-    "advance issue="*|"feedback pr="*)
+    "advance issue="*|"feedback pr="*|"ci-fix pr="*)
       local model prompt_file
       model="$(printf '%s\n' "$out" | sed -n 's/^loop-event: model=//p' | tail -1)"
       model="${model:-${LOOP_MODEL:-sonnet}}"
