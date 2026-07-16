@@ -372,6 +372,39 @@ decide what the loop actually touches:
 labelled it `planned`. Commenting "approved" on an issue does nothing — nothing watches issue text; the
 `planned` label is the only approval signal.
 
+**Optional spec/plan gate (`plan.gate`, issue #100).** By default the ADVANCE step goes straight from a
+`planned` issue to implementation (one driver turn: scope → worktree implementer → gates → reviewers →
+bot PR). `gates.json`'s `plan` block can insert a reviewable **plan artifact** — a structured issue
+comment — before any code is written:
+- **`plan.gate: "off"`** (default) — today's single-pass behavior, unchanged.
+- **`plan.gate: "label"`** — gate only the `planned` candidates that ALSO carry a `plan-first` label.
+- **`plan.gate: "always"`** — gate every `planned` + `module:*` candidate, no extra label needed.
+
+Label lifecycle for a gated issue:
+1. The owner adds `plan-first` (label mode only; `always` mode needs nothing extra).
+2. The loop's next ADVANCE turn is **PLAN-ONLY**: it reads the issue, scopes it (module, expected files,
+   approach, acceptance-criteria mapping), and posts **one** structured comment on the issue beginning with
+   the marker `<!-- plan-gate:plan -->` — implementing nothing, opening no branch, no PR. It then labels the
+   issue `plan-review` (awaiting the owner) and `needs-human` (issue #99's signal — see below).
+3. The owner reviews the plan comment on GitHub. **To approve:** replace `plan-review` with `plan-approved`
+   — the next tick implements the issue, with the plan comment's contents injected verbatim into the
+   implementer's prompt and every reviewer's prompt as the **authoritative scope** (a diff that exceeds the
+   plan's declared files/approach is a valid reviewer reject: "exceeds approved scope"). **To request
+   changes:** remove `plan-review` — the issue drops back to needing a fresh plan, and a later tick re-plans
+   it from scratch.
+
+While an issue sits in `plan-review` (posted, not yet approved), `loop-census.sh` treats it like a `Blocked
+by` dependency: it is skipped for `advance_ready` entirely — the loop will not implement a plan the owner
+hasn't signed off on.
+
+**Owner-only approval, same caveat as `planned`:** the loop only checks whether the `plan-approved` label is
+present, not *who* added it — GitHub identity is not enforced here any more than it is for `planned` itself
+(see the two-label workflow above). Treat `plan-approved` as an owner-only convention, not a
+technically-enforced gate.
+
+This reuses issue #99's `needs-human` signal (label + one-time comment + throttled notification) as the
+"plan is ready for your review" ping, rather than inventing a second escalation channel.
+
 **Model selection.** Drive the loop's tick sessions with **Sonnet**. Ticks are cheap but highly
 repetitive, and repetition is where smaller models degrade: a Haiku-driven tick session has been observed
 to stop invoking the step scripts entirely — fabricating census/merge output from the pattern of earlier

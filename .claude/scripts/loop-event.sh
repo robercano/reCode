@@ -42,6 +42,16 @@
 # Honors $GATES_FILE: not read directly here beyond quoting it into the
 # self-hosting adapter clause baked into the prompt below (loop-tick.sh and
 # loop-census.sh are what actually act on it).
+#
+# Plan gate (issue #100): for action=advance, loop-tick.sh's stdout carries an
+# advance_mode=plan|implement-gated|implement line (present only when
+# plan.gate != "off" — see gates.json) that this script greps out (never
+# tail -1 — that's the verdict) to pick one of three ADVANCE prompt variants:
+# a PLAN-ONLY turn that posts a structured plan comment + plan-review/
+# needs-human labels and writes no code, a normal implement turn with the
+# owner-approved plan comment injected into the implementer/every reviewer as
+# authoritative scope, or (mode absent/"implement") today's unchanged
+# single-pass prompt.
 set -uo pipefail
 
 # Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
@@ -88,6 +98,15 @@ case "$n" in
     ;;
 esac
 
+# Plan-gate mode (issue #100): loop-tick.sh echoes advance_mode=<mode> into
+# its own stdout ONLY alongside a genuine action=advance verdict -- grep the
+# FULL tick output for it (never tail -1; that line is not the verdict).
+# Defaults to "implement" (today's ungated single-pass prompt) whenever the
+# line is absent -- action=feedback verdicts, and every advance verdict when
+# plan.gate=off (the vast majority of ticks).
+mode="$(printf '%s\n' "$tick_out" | sed -n 's/^advance_mode=//p' | tail -1)"
+mode="${mode:-implement}"
+
 # Adapter clause: only when this loop runs against a non-default adapter
 # (self-hosting). Mirrors the wording in .claude/self/pr-loop-self.md.
 adapter=""
@@ -98,9 +117,37 @@ common="The tick (loop-tick.sh) already ran census/poll/merge/feedback-detection
 
 case "$verdict" in
   action=advance*)
-    prompt="Run the ADVANCE step of the autonomous PR loop for issue #$n. $common
-Drive issue #$n through the orchestrator: scope → worktree implementer → gate.sh gates → reviewer lenses → bot PR. One issue in flight at a time — work ONLY issue #$n. \`backlog\` issues are owner-unapproved: if you file an issue yourself, label it backlog — NEVER planned (that label is the owner's formal approval, assigned by the owner alone)."
     action_line="action=advance issue=$n"
+    case "$mode" in
+      # --- plan.gate: needs-plan -> PLAN-ONLY turn (issue #100) -------------
+      # Scope the issue and post ONE structured plan comment; apply the
+      # plan-review + needs-human labels for owner review; then STOP. No
+      # code, no branch, no PR -- the driver's job this turn is the plan
+      # artifact and the labels, nothing else.
+      plan)
+        prompt="Run the PLAN step of the autonomous PR loop for issue #$n (plan.gate). $common
+This is a PLAN ONLY phase (plan.gate). Do NOT implement — write no code, create no feat/issue-$n-* branch, and open no PR. STOP once the plan comment and labels below are posted; do not spawn an implementer or any reviewer this turn.
+1. Read issue #$n (\`bash $script_dir/bot-gh.sh issue view $n\`) and scope it: which module (per gates.json's \`modules[]\`) it belongs to, the files you expect the eventual implementation to touch, the implementation approach, and how each of the issue's acceptance criteria maps to that approach.
+2. Post exactly ONE structured plan comment on issue #$n via \`bash $script_dir/bot-gh.sh issue comment $n --body \"...\"\`. The comment body MUST begin with the literal marker \`<!-- plan-gate:plan -->\` on its own first line, followed by the module, expected files, approach, and acceptance-criteria mapping from step 1 — this is the durable, reviewable plan artifact the owner and the later implement turn both read.
+3. Create the plan-gate labels if they don't already exist (idempotent, mirrors needs-human.sh's own pattern): \`bash $script_dir/bot-gh.sh label create plan-review --color fbca04 --description \"Plan posted, awaiting owner review (plan.gate)\" --force\` and \`bash $script_dir/bot-gh.sh label create needs-human --color b60205 --description \"Loop is blocked on owner judgment\" --force\`.
+4. Apply both labels to issue #$n: \`bash $script_dir/bot-gh.sh issue edit $n --add-label plan-review --add-label needs-human\`.
+5. Report done and STOP. The owner reviews the plan comment on GitHub and either replaces \`plan-review\` with \`plan-approved\` (approve — the next tick implements it, with your plan injected as authoritative scope) or removes \`plan-review\` (request changes — the loop re-plans on a later tick)."
+        ;;
+      # --- plan.gate: gated-approved -> normal implement turn, PLUS the
+      # approved plan is authoritative scope for the implementer AND every
+      # reviewer (issue #100). ----------------------------------------------
+      implement-gated)
+        prompt="Run the ADVANCE step of the autonomous PR loop for issue #$n. $common
+Drive issue #$n through the orchestrator: scope → worktree implementer → gate.sh gates → reviewer lenses → bot PR. One issue in flight at a time — work ONLY issue #$n. \`backlog\` issues are owner-unapproved: if you file an issue yourself, label it backlog — NEVER planned (that label is the owner's formal approval, assigned by the owner alone).
+This issue is plan-gated and APPROVED (plan.gate). Before implementing, fetch the approved plan: \`bash $script_dir/bot-gh.sh issue view $n --json comments\` and locate the comment whose body begins with the marker \`<!-- plan-gate:plan -->\`. Treat that plan as the AUTHORITATIVE scope for this issue. Inject the plan text VERBATIM into the implementer's spawn prompt as its authoritative scope, AND into every reviewer's spawn prompt. Instruct the correctness reviewer explicitly: a diff that exceeds the approved plan's declared files or approach is a valid reject reason under the correctness lens (\"exceeds approved scope\")."
+        ;;
+      # --- ungated (plan.gate=off, or label mode without plan-first) -------
+      # today's single-pass prompt, byte-identical to pre-#100 behavior.
+      *)
+        prompt="Run the ADVANCE step of the autonomous PR loop for issue #$n. $common
+Drive issue #$n through the orchestrator: scope → worktree implementer → gate.sh gates → reviewer lenses → bot PR. One issue in flight at a time — work ONLY issue #$n. \`backlog\` issues are owner-unapproved: if you file an issue yourself, label it backlog — NEVER planned (that label is the owner's formal approval, assigned by the owner alone)."
+        ;;
+    esac
     ;;
   *)
     prompt="Run the ADDRESS FEEDBACK step of the autonomous PR loop for PR #$n. $common
