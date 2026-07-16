@@ -55,6 +55,15 @@
 # appended near the end of <body>; cockpit-serve.sh (serve mode) injects
 # ITS OWN separate SSE/refresh client script by string-replacing </body>,
 # so the live-stream code never ships in this static output.
+#
+# Issue #99 adds a "Needs you" strip at the VERY TOP of <body> (before every
+# other section): anything labeled `needs-human` (issues OR PRs — see
+# needs-human.sh) or awaiting your first/re-review (a PR with passing CI that
+# the owner hasn't approved/rejected yet), grouped by reason, with links. An
+# all-clear message renders when nothing qualifies. Sourced from the SAME
+# issues/prs arrays every other section already fetches (no extra gh call) —
+# the live PR fetch now also asks for `labels` alongside the fields it always
+# fetched, so a needs-human-labeled PR is visible without a second round trip.
 set -uo pipefail
 
 # Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
@@ -169,7 +178,7 @@ prs_unavailable=0
 if [ -n "$fixtures" ]; then
   if [ -f "$fixtures/prs.json" ]; then cp "$fixtures/prs.json" "$tmpdir/prs.json"; else echo "[]" >"$tmpdir/prs.json"; fi
 else
-  if ! gh pr list --state open --limit 200 --json number,title,url,headRefName,reviewDecision,statusCheckRollup >"$tmpdir/prs.json" 2>"$tmpdir/prs.err"; then
+  if ! gh pr list --state open --limit 200 --json number,title,url,headRefName,reviewDecision,statusCheckRollup,labels >"$tmpdir/prs.json" 2>"$tmpdir/prs.err"; then
     prs_unavailable=1
   fi
   if [ "$prs_unavailable" -eq 0 ] && ! valid_json "$tmpdir/prs.json"; then prs_unavailable=1; fi
@@ -383,6 +392,14 @@ function refList(nums) {
 
 function moduleLabelsOf(issue) {
   return (issue.labels || []).map((l) => l.name).filter((n) => typeof n === "string" && n.startsWith("module:"));
+}
+
+// hasLabel: works for both the issues.json and prs.json label shapes (an
+// array of {name} objects — the same `gh ... --json ...,labels` shape both
+// fetches above already use), so the SAME helper serves renderNeedsYou()
+// below for either an issue or a PR object.
+function hasLabel(obj, name) {
+  return (obj.labels || []).some((l) => l && l.name === name);
 }
 
 // ---- Live worker progress section (issue #52, grouped by task in #92) -----
@@ -819,6 +836,73 @@ function renderRouting() {
   return html;
 }
 
+// ---- "Needs you" strip (issue #99) -----------------------------------------
+// The FIRST thing the dashboard answers: does anything need the owner right
+// now? Two reasons, each its own group (grouped/annotated per the issue's
+// acceptance criteria), sourced from the SAME issues/prs arrays every other
+// section already fetched (no extra gh call):
+//   - "needs-human": an issue OR PR carrying the `needs-human` label (see
+//     needs-human.sh — the loop's escalation/PR-review/re-review points all
+//     apply this label through the one shared helper).
+//   - "awaiting your review": a PR with passing CI whose review decision is
+//     neither APPROVED nor CHANGES_REQUESTED (i.e. REVIEW_REQUIRED or no
+//     review yet) — the owner hasn't weighed in yet. CHANGES_REQUESTED is
+//     deliberately excluded here: that PR is in the BOT's court (pr-feedback.sh
+//     dispatches a fix), not the owner's, until it's addressed (which is when
+//     it picks up the `needs-human` label instead — see pr-feedback.sh).
+// Degrades to an empty group set (never a crash) when issues/prs are
+// unavailable, matching every other section's degrade contract; renders a
+// clear all-clear state when the total across both groups is zero.
+function renderNeedsYou() {
+  const groups = new Map(); // reason -> item[]
+  const push = (reason, item) => {
+    if (!groups.has(reason)) groups.set(reason, []);
+    groups.get(reason).push(item);
+  };
+
+  if (!issuesUnavailable) {
+    for (const issue of issues) {
+      if (hasLabel(issue, "needs-human")) {
+        push("needs-human", { num: issue.number, url: issue.url, title: issue.title });
+      }
+    }
+  }
+  if (!prsUnavailable) {
+    for (const pr of prs) {
+      if (hasLabel(pr, "needs-human")) {
+        push("needs-human", { num: pr.number, url: pr.url, title: pr.title });
+        continue;
+      }
+      const ci = ciBadge(pr.statusCheckRollup);
+      const rd = pr.reviewDecision;
+      if (ci.label === "passing" && rd !== "APPROVED" && rd !== "CHANGES_REQUESTED") {
+        push("awaiting your review", { num: pr.number, url: pr.url, title: pr.title });
+      }
+    }
+  }
+
+  const total = [...groups.values()].reduce((acc, list) => acc + list.length, 0);
+  let html = `<section id="needs-you">`;
+  if (total === 0) {
+    html += `<h2>Needs you</h2><p class="badge good needs-you-clear">all clear — nothing needs you right now</p>`;
+  } else {
+    html += `<h2>Needs you (${total})</h2>`;
+    // Stable group order regardless of Map insertion order: needs-human first
+    // (the more urgent/explicit signal), then awaiting-review.
+    for (const reason of ["needs-human", "awaiting your review"]) {
+      const list = groups.get(reason);
+      if (!list || list.length === 0) continue;
+      html += `<h3>${esc(reason)}</h3><ul class="needs-you-list">`;
+      for (const it of list.sort((a, b) => a.num - b.num)) {
+        html += `<li><a href="${esc(it.url || "#")}">#${it.num}</a> ${esc(it.title)}</li>`;
+      }
+      html += `</ul>`;
+    }
+  }
+  html += `</section>`;
+  return html;
+}
+
 // ---- Active worktrees section ---------------------------------------------------
 function renderWorktrees() {
   let html = `<section id="worktrees"><h2>Active worktrees</h2>`;
@@ -882,8 +966,10 @@ const html = `<!doctype html>
   h2 { margin-top: 0; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
   h3 { margin-bottom: 0.3rem; color: var(--text-dim); cursor: pointer; user-select: none; }
   #issues h3:hover { color: var(--link); }
-  ul.issue-list, ul.pr-list { list-style: none; padding-left: 0; }
-  ul.issue-list li, ul.pr-list li { padding: 0.4rem 0; border-bottom: 1px dashed var(--border); }
+  ul.issue-list, ul.pr-list, ul.needs-you-list { list-style: none; padding-left: 0; }
+  ul.issue-list li, ul.pr-list li, ul.needs-you-list li { padding: 0.4rem 0; border-bottom: 1px dashed var(--border); }
+  #needs-you { margin-bottom: 1rem; }
+  .needs-you-clear { font-size: 1rem; padding: 0.3rem 0.8rem; }
   .rel { font-size: 0.85rem; color: var(--text-dim); margin-top: 0.2rem; }
   .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.8rem; margin-left: 0.3rem; }
   .badge.good { background: var(--good-bg); color: var(--good-fg); }
@@ -905,7 +991,8 @@ const html = `<!doctype html>
 </head>
 <body>
 <h1>Cockpit <button id="theme-toggle" type="button">Toggle theme</button></h1>
-<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) + Phase 2 live progress (issue #52) + Phase 3a serve/theme/filter (issue #69) + loop health panel (issue #85) &middot; re-run <code>cockpit.sh</code> to refresh (or run <code>cockpit-serve.sh</code> for live auto-update)</p>
+<p class="meta">Generated ${esc(generatedAt)} &middot; read-only Phase 1 snapshot (issue #51) + Phase 2 live progress (issue #52) + Phase 3a serve/theme/filter (issue #69) + loop health panel (issue #85) + needs-you strip (issue #99) &middot; re-run <code>cockpit.sh</code> to refresh (or run <code>cockpit-serve.sh</code> for live auto-update)</p>
+${renderNeedsYou()}
 ${renderLiveProgress()}
 ${renderLoopHealth()}
 ${renderIssues()}

@@ -376,6 +376,81 @@ check "no spend-ceiling state files: per-issue attempts degrades to 'none tracke
 check "no spend-ceiling state files: today's actions default to 0 / adapter ceiling" grep -qF '<span class="badge muted">0 / 50</span>' "$html_ceilings_missing"
 
 # ---------------------------------------------------------------------------
+# 2e. "Needs you" strip (issue #99): the VERY FIRST section in <body>, sourced
+#     from the SAME issues.json/prs.json every other section already reads
+#     (no extra gh call). Two groups:
+#       - "needs-human": an issue OR PR carrying the `needs-human` label.
+#       - "awaiting your review": a PR with passing CI and a review decision
+#         that is neither APPROVED nor CHANGES_REQUESTED (the latter is the
+#         BOT's court via pr-feedback.sh, not the owner's).
+#     PR 200 (APPROVED, passing) and PR 201 (CHANGES_REQUESTED, failing) must
+#     NOT appear in either group.
+# ---------------------------------------------------------------------------
+mkdir -p "$work/fixtures-needs-you"
+cat > "$work/fixtures-needs-you/issues.json" <<'EOF'
+[
+  {"number":106,"title":"Issue needing a human","url":"https://example.com/106","labels":[{"name":"needs-human"}],"body":""},
+  {"number":100,"title":"Ordinary issue","url":"https://example.com/100","labels":[],"body":""}
+]
+EOF
+cat > "$work/fixtures-needs-you/prs.json" <<'EOF'
+[
+  {"number":200,"title":"Approved PR","url":"https://example.com/pr/200","headRefName":"feat/x","reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[]},
+  {"number":201,"title":"Changes requested PR","url":"https://example.com/pr/201","headRefName":"feat/y","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"conclusion":"FAILURE","status":"COMPLETED","name":"test"}],"labels":[]},
+  {"number":202,"title":"Needs-human PR","url":"https://example.com/pr/202","headRefName":"feat/z","reviewDecision":null,"statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[{"name":"needs-human"}]},
+  {"number":203,"title":"Awaiting review PR","url":"https://example.com/pr/203","headRefName":"feat/w","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[]}
+]
+EOF
+: >"$work/fixtures-needs-you/events.jsonl"
+: >"$work/fixtures-needs-you/loop-ticks.jsonl"
+html_needs_you="$work/cockpit-needs-you.html"
+bash "$cockpit" --fixtures "$work/fixtures-needs-you" "$html_needs_you" >/dev/null 2>"$work/stderr-needs-you.log"
+check "needs-you generator run exits 0" [ -s "$html_needs_you" ]
+check "needs-you section is the FIRST section in <body> (before live/issues/prs)" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const bodyIdx = html.indexOf("<body>");
+  const needsYouIdx = html.indexOf("<section id=\"needs-you\"");
+  const liveIdx = html.indexOf("<section id=\"live\"");
+  const issuesIdx = html.indexOf("<section id=\"issues\"");
+  if (bodyIdx < 0 || needsYouIdx < 0 || liveIdx < 0 || issuesIdx < 0) throw new Error("missing section(s)");
+  if (!(bodyIdx < needsYouIdx && needsYouIdx < liveIdx && needsYouIdx < issuesIdx)) {
+    throw new Error("needs-you is not the first section after <body>");
+  }
+' "$html_needs_you"
+check "needs-you total count is 3 (issue 106 + PR 202 + PR 203)" grep -qF '<h2>Needs you (3)</h2>' "$html_needs_you"
+needs_you_section="$(node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="needs-you">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("needs-you section not found");
+  process.stdout.write(m[0]);
+' "$html_needs_you")"
+check "needs-human group heading present" bash -c 'printf "%s" "$1" | grep -qF "<h3>needs-human</h3>"' _ "$needs_you_section"
+check "awaiting-your-review group heading present" bash -c 'printf "%s" "$1" | grep -qF "<h3>awaiting your review</h3>"' _ "$needs_you_section"
+check "needs-human group lists issue #106" bash -c 'printf "%s" "$1" | grep -qF "<a href=\"https://example.com/106\">#106</a> Issue needing a human"' _ "$needs_you_section"
+check "needs-human group lists PR #202 (not the awaiting-review group)" bash -c 'printf "%s" "$1" | grep -qF "<a href=\"https://example.com/pr/202\">#202</a> Needs-human PR"' _ "$needs_you_section"
+check "awaiting-your-review group lists PR #203" bash -c 'printf "%s" "$1" | grep -qF "<a href=\"https://example.com/pr/203\">#203</a> Awaiting review PR"' _ "$needs_you_section"
+check "approved PR #200 does NOT appear in the needs-you strip" bash -c '! printf "%s" "$1" | grep -qF "#200"' _ "$needs_you_section"
+check "changes-requested PR #201 does NOT appear in the needs-you strip (bot's court, not owner's)" bash -c '! printf "%s" "$1" | grep -qF "#201"' _ "$needs_you_section"
+check "ordinary issue #100 does NOT appear in the needs-you strip" bash -c '! printf "%s" "$1" | grep -qF "#100"' _ "$needs_you_section"
+
+# All-clear state: nothing labeled needs-human, nothing awaiting review.
+mkdir -p "$work/fixtures-needs-you-clear"
+echo "[]" >"$work/fixtures-needs-you-clear/issues.json"
+cat > "$work/fixtures-needs-you-clear/prs.json" <<'EOF'
+[{"number":300,"title":"All good PR","url":"https://example.com/pr/300","headRefName":"feat/all-good","reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED","name":"build"}],"labels":[]}]
+EOF
+: >"$work/fixtures-needs-you-clear/events.jsonl"
+: >"$work/fixtures-needs-you-clear/loop-ticks.jsonl"
+html_needs_you_clear="$work/cockpit-needs-you-clear.html"
+bash "$cockpit" --fixtures "$work/fixtures-needs-you-clear" "$html_needs_you_clear" >/dev/null 2>"$work/stderr-needs-you-clear.log"
+check "all-clear generator run exits 0" [ -s "$html_needs_you_clear" ]
+check "all-clear message rendered when nothing needs the owner" grep -qF 'all clear — nothing needs you right now' "$html_needs_you_clear"
+check "all-clear run: no needs-human group heading" bash -c '! grep -qF "<h3>needs-human</h3>" "$1"' _ "$html_needs_you_clear"
+check "all-clear run: no awaiting-your-review group heading" bash -c '! grep -qF "<h3>awaiting your review</h3>" "$1"' _ "$html_needs_you_clear"
+
+# ---------------------------------------------------------------------------
 # 3. GATES_FILE override is honored (self-host adapter), still with fixtures
 #    (no gh/network either way).
 # ---------------------------------------------------------------------------

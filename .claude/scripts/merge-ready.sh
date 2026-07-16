@@ -32,6 +32,15 @@ export PATH="$HOME/.local/bin:$PATH"
 # Route EVERY gh call (list/view/merge) through the bot identity (see bot-gh.sh).
 gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+
+# needs_human_flag/needs_human_clear (issue #99): the ONE shared label+notify
+# seam for "PR ready-for-review" / "re-approve current head" -- see the
+# per-PR loop below. Sourced AFTER the `gh` wrapper above so both functions
+# call the bot identity; guarded (not a bare `&&`) so a missing file under
+# `set -e` never aborts the script (see needs-human.sh's own header for why
+# every statement in it is written the same defensive way).
+# shellcheck source=needs-human.sh
+if [ -f "$script_dir/needs-human.sh" ]; then . "$script_dir/needs-human.sh"; fi
 owner="${MERGE_APPROVER:-${repo%%/*}}"   # the approver whose APPROVED review authorizes a merge
 gates="$root/.claude/gates.json"
 base="$(node -e "try{const g=require('$gates');process.stdout.write((g.merge&&g.merge.baseBranch)||'main')}catch(e){process.stdout.write('main')}")"
@@ -79,9 +88,48 @@ for n in $(gh pr list -R "$repo" --base "$base" --state open --json number -q '.
   verdict="$(printf '%s' "$data" | decide)"
   title="$(printf '%s' "$data" | node -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(0,"utf8")).title)||"")')"
   head_branch="$(printf '%s' "$data" | node -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(0,"utf8")).headRefName)||"")')"
+
+  # needs-human (issue #99): a PR is genuinely blocked on the OWNER for
+  # exactly two of decide()'s skip reasons -- no review submitted yet, or a
+  # stale approval that no longer covers the current head (new commits
+  # pushed since). Every other reason (draft/base mismatch/conflicts/CI
+  # pending-or-failing, and owner-review=CHANGES_REQUESTED -- that one is
+  # pr-feedback.sh's job to dispatch a bot fix for, not the owner's) is NOT
+  # an owner-blocking wait, so any earlier "ready for review" flag on this PR
+  # is cleared. Both calls are best-effort no-ops when the corresponding
+  # helper function isn't defined (needs-human.sh missing from a fixture).
+  case "$verdict" in
+    SKIP:no-owner-review|SKIP:approval-stale*)
+      if command -v needs_human_flag >/dev/null 2>&1; then
+        needs_human_flag "pr:$n" "pr-review" "low" \
+          "PR #$n ready for your review" "$title (${verdict#SKIP:})"
+      fi
+      ;;
+    *)
+      if command -v needs_human_clear >/dev/null 2>&1; then
+        needs_human_clear "pr:$n" "pr-review"
+      fi
+      ;;
+  esac
+
   if [ "$verdict" = "MERGE" ]; then
     if gh pr merge "$n" -R "$repo" --merge --delete-branch >/dev/null 2>&1; then
       echo "{\"pr\":$n,\"action\":\"merged\",\"title\":\"$title\"}"; merged=$((merged+1))
+      # needs-human (issue #99): the PR just merged -- the clearest possible
+      # "this block-on-owner condition just resolved" signal. Clear any
+      # needs-human flag on the PR itself (belt-and-suspenders; it's about to
+      # be closed anyway) AND on the issue it was cut from (feat/issue-N-* or
+      # fix/issue-N-*), since loop-tick.sh's attempt-budget/stall escalations
+      # both flag the ISSUE, not the PR.
+      if command -v needs_human_clear >/dev/null 2>&1; then
+        needs_human_clear "pr:$n" "pr-review"
+        needs_human_clear "pr:$n" "changes-requested"
+        merged_issue_num="$(printf '%s\n' "$head_branch" | sed -n 's/.*issue-\([0-9][0-9]*\).*/\1/p')"
+        if [ -n "$merged_issue_num" ]; then
+          needs_human_clear "issue:$merged_issue_num" "attempt-budget"
+          needs_human_clear "issue:$merged_issue_num" "stall"
+        fi
+      fi
       # Auto-cleanup (issue #91): the merged branch's local worktree + local
       # branch are now stale. worktree-cleanup.sh applies its OWN safety
       # rails (worker-path naming, clean tree, fully merged into $base) and

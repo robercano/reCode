@@ -24,6 +24,15 @@ repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 bot="${BOT_LOGIN:-robercano-ghbot}"
 marker="<!-- claude-addressed -->"
 
+# needs_human_flag/needs_human_clear (issue #99): the ONE shared label+notify
+# seam for "CHANGES_REQUESTED round-trip done, owner re-review needed" (see
+# the per-PR loop below). Sourced AFTER the `gh` wrapper above; guarded (not
+# a bare `&&`) so a missing file under `set -e` never aborts the script.
+# Bash functions are inherited by the `| while read; do ... done` subshell
+# below, so defining these at top level is enough for the loop to use them.
+# shellcheck source=needs-human.sh
+if [ -f "$script_dir/needs-human.sh" ]; then . "$script_dir/needs-human.sh"; fi
+
 gh pr list -R "$repo" --state open \
   --json number,headRefName,author,labels \
   --jq '.[] | select(.author.login=="'"$bot"'") | [.number, .headRefName, ([.labels[].name]|join(","))] | @tsv' \
@@ -42,6 +51,23 @@ gh pr list -R "$repo" --state open \
           2>/dev/null || true)
 
     if [ -z "$ta" ] || [[ "$tcr" > "$ta" ]]; then
+      # Needs bot action, not owner action -- ball is NOT in the owner's
+      # court right now, so clear any earlier "awaiting re-review" flag
+      # (issue #99). Best-effort no-op when needs-human.sh isn't sourced.
+      if command -v needs_human_clear >/dev/null 2>&1; then
+        needs_human_clear "pr:$num" "changes-requested"
+      fi
       printf '%s\t%s\t%s\t%s\n' "$num" "$branch" "$reviewer" "$tcr"
+    elif command -v needs_human_flag >/dev/null 2>&1; then
+      # Addressed (marker comment is newer than the last CHANGES_REQUESTED
+      # review) but GitHub still reports reviewDecision=CHANGES_REQUESTED
+      # until the owner submits a fresh review (see the file header) -- this
+      # IS the "round-trip done, re-review needed" block-on-owner point
+      # (issue #99). Cleared above the moment a FRESH CHANGES_REQUESTED
+      # arrives (back in the bot's court), or by merge-ready.sh once the PR
+      # merges.
+      needs_human_flag "pr:$num" "changes-requested" "low" \
+        "PR #$num addressed feedback -- ready for re-review" \
+        "$reviewer's changes-requested review was addressed; awaiting re-review."
     fi
   done

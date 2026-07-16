@@ -47,6 +47,12 @@ new_fixture() {
   rm -rf "$work/$name/.claude/state"   # loop-tick.sh must mkdir -p it itself
   cp "$loop_tick_src" "$dir/loop-tick.sh"
   cp "$resolve_roots_src" "$dir/resolve-roots.sh"
+  # needs-human.sh/notify.sh (issue #99): loop-tick.sh sources needs-human.sh
+  # unconditionally when present -- copy the REAL implementations so the
+  # attempt-budget escalation scenarios (5, 6) exercise the real seam, with
+  # gh calls still landing only in this fixture's own logging bot-gh.sh.
+  cp "$script_dir/needs-human.sh" "$dir/needs-human.sh"
+  cp "$script_dir/notify.sh" "$dir/notify.sh"
 
   cat > "$dir/loop-census.sh" <<EOF
 #!/usr/bin/env bash

@@ -92,6 +92,13 @@ set -uo pipefail
 gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 
+# needs_human_flag/needs_human_clear (issue #99) — the ONE shared label+notify
+# seam every block-on-owner point below routes through, instead of hand-rolled
+# `gh label create` + `gh issue/pr edit --add-label` + a raw comment. Sourced
+# AFTER the `gh` wrapper above so both functions call the bot identity.
+# shellcheck source=needs-human.sh
+if [ -f "$script_dir/needs-human.sh" ]; then . "$script_dir/needs-human.sh"; fi
+
 # ---------------------------------------------------------------------------
 # Tick record (issue #85): append ONE record per firing to
 # .claude/state/loop-ticks.jsonl, so the cockpit's "Loop health" panel can
@@ -392,6 +399,15 @@ if [ "$expired" -eq 1 ]; then
   if [ "$notified_expired" != "1" ]; then
     body="The armed loop's stop-after horizon (armed_at + ${stop_after_days}d) expired at $expires_at. It stays disarmed -- no further advance/feedback dispatches -- until re-armed. Re-arm with \`/pr-loop\` or \`bash .claude/scripts/arm-loop.sh\`."
     new_issue="$(budget_notify_issue "$arming_notice_issue" "Loop disarmed: stop-after expired" "$body")"
+    # needs-human (issue #99, deliberately NOT wired here): this ceiling
+    # already files/refreshes its OWN tracking issue (above) as its signal,
+    # and re-arming (the success point that clears it) lives in arm-loop.sh --
+    # templated/managed machinery re-stamped by /orchestrator:setup, out of
+    # this change's scope. Layering the needs-human label on top would need
+    # a matching clear call there and would perturb loop-ceilings.test.sh's
+    # precise gh-call-count assertions for comparatively little signal value
+    # (the tracking issue IS the visible signal). See needs-human.sh + this
+    # issue's PR notes for the fuller reasoning.
     tmp_arm="$(mktemp "$state_dir/.loop-arming.json.XXXXXX")"
     if CLAUDE_NEW_ISSUE="${new_issue:-}" node -e '
       const fs = require("fs");
@@ -442,6 +458,12 @@ if [ -z "$ceiling_block" ] && [ "$daily_count" -ge "$daily_action_ceiling" ]; th
     body="The autonomous loop hit its daily action ceiling (budget.daily_action_ceiling=$daily_action_ceiling) after $daily_count dispatched actions on $today (UTC). It halts for the rest of today and resumes automatically at UTC midnight. Raise budget.daily_action_ceiling in the adapter if this volume is expected."
     new_issue="$(budget_notify_issue "$daily_issue_num" "Loop budget exceeded: daily action ceiling" "$body")"
     [ -n "$new_issue" ] && daily_issue_num="$new_issue"
+    # needs-human (issue #99, deliberately NOT wired here): same reasoning as
+    # the stop-after expiry block above -- this ceiling already files/
+    # refreshes its own tracking issue as its signal and self-resolves at UTC
+    # midnight with no in-tick clear point, so layering the needs-human label
+    # here would only perturb loop-ceilings.test.sh's exact gh-call-count
+    # assertions for comparatively little added signal.
     tmp_daily="$(mktemp "$state_dir/.loop-daily-ceiling.json.XXXXXX")"
     if CLAUDE_TODAY="$today" CLAUDE_COUNT="$daily_count" CLAUDE_ISSUE="${daily_issue_num:-}" node -e '
       const fs = require("fs");
@@ -499,15 +521,9 @@ if [ -z "$ceiling_block" ] && [ -n "$attempt_issue" ]; then
     ceiling_block="1"; ceiling_reason="attempt-budget"
     echo "# pre-flight: attempt budget exceeded for issue=$attempt_issue ($attempts_now >= $per_issue_attempts)"
     if [ "$attempts_escalated" != "1" ]; then
-      gh label create "needs-human" --color b60205 --description "Loop attempt budget exhausted -- needs a human" --force >/dev/null 2>&1 || true
       body="This ${attempt_escalate_kind} has ping-ponged through $attempts_now advance/feedback dispatches for issue #$attempt_issue without landing (budget.per_issue_attempts=$per_issue_attempts). The loop will not retry it automatically -- labeling \`needs-human\`. Address it by hand, then either close it out or clear its entry in .claude/state/loop-issue-attempts.json to let the loop resume."
-      if [ "$attempt_escalate_kind" = "pr" ]; then
-        gh pr edit "$attempt_escalate_num" --add-label needs-human >/dev/null 2>&1 || true
-        gh pr comment "$attempt_escalate_num" --body "$body" >/dev/null 2>&1 || true
-      else
-        gh issue edit "$attempt_escalate_num" --add-label needs-human >/dev/null 2>&1 || true
-        gh issue comment "$attempt_escalate_num" --body "$body" >/dev/null 2>&1 || true
-      fi
+      needs_human_flag "${attempt_escalate_kind}:${attempt_escalate_num}" "attempt-budget" "high" \
+        "Loop attempt budget exhausted for issue #$attempt_issue" "$body"
       tmp_att="$(mktemp "$state_dir/.loop-issue-attempts.json.XXXXXX")"
       if CLAUDE_ATT_KEY="$attempt_issue" CLAUDE_ATT_COUNT="$attempts_now" node -e '
         const fs = require("fs");
@@ -760,10 +776,9 @@ else
       fi
     else
       write_resume_state "$resume_issue" "$resume_count" "1"
-      gh label create "needs-human" --color b60205 --description "Loop attempt budget exhausted -- needs a human" --force >/dev/null 2>&1 || true
       body="Issue #$resume_issue's feat/issue-$resume_issue-* branch has stalled and already been resumed $resume_count times without landing a PR. The loop will not retry it automatically -- labeling \`needs-human\`. Address it by hand, then either close it out or clear its entry in .claude/state/loop-resume-attempts.json to let the loop resume."
-      gh issue edit "$resume_issue" --add-label needs-human >/dev/null 2>&1 || true
-      gh issue comment "$resume_issue" --body "$body" >/dev/null 2>&1 || true
+      needs_human_flag "issue:$resume_issue" "stall" "high" \
+        "Issue #$resume_issue stalled -- resume attempts exhausted" "$body"
       echo "# advance refused: issue=$resume_issue exhausted its 2 resume attempts -- escalated to needs-human"
       log_loop_event "$resume_issue" "escalated-to-needs-human" "issue=$resume_issue escalated to needs-human after $resume_count resumes"
       verdict="action=none"
