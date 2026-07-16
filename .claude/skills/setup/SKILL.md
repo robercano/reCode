@@ -105,9 +105,10 @@ repo-level override elsewhere in `.gitignore` could still un-ignore one).
 
 ## 6. Create the module + approval labels
 For every module `name`: `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh label create "module:<name>" --description "<desc>" --force`.
-Also create the approval-workflow pair (if `gh label create` is unavailable in the installed gh, use `bot-gh.sh api repos/<owner>/<repo>/labels -f name=... -f color=... -f description=...`):
+Also create the approval-workflow pair PLUS the needs-human signal label (if `gh label create` is unavailable in the installed gh, use `bot-gh.sh api repos/<owner>/<repo>/labels -f name=... -f color=... -f description=...`):
 - `backlog` (color `bfd4f2`) — "Filed, not yet approved by the owner — the loop must NOT pick it up"
 - `planned` (color `0e8a16`) — "Owner-approved for the autonomous loop (assigned ONLY by the owner)"
+- `needs-human` (color `b60205`) — "Loop is blocked on owner judgment -- see the issue/PR body/comments" (issue #99: applied/removed by `.claude/scripts/needs-human.sh` at every block-on-owner point — PR ready for review, CHANGES_REQUESTED addressed and awaiting re-review, attempt-budget/stall escalation. Surfaced as a "Needs you" strip at the top of the cockpit dashboard, and optionally pushed via `.claude/scripts/notify.sh` if the adapter's `notify` command is configured.)
 
 Report created vs already-existing. Remind: **an issue is only loop-eligible once the OWNER labels it `planned` and it carries a `module:*` label**; issues agents file must be labelled `backlog`.
 

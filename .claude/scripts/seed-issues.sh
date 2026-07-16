@@ -53,6 +53,13 @@ gh label create "type:infra"   --color b60205 --description "Repo-wide tooling/i
 # is what makes it loop-eligible (together with a module:* label).
 gh label create "backlog" --color bfd4f2 --description "Filed, not yet approved by the owner — the loop must NOT pick it up" --force >/dev/null 2>&1 && echo "  label ✓ backlog" || true
 gh label create "planned" --color 0e8a16 --description "Owner-approved for the autonomous loop (assigned ONLY by the owner)" --force >/dev/null 2>&1 && echo "  label ✓ planned" || true
+# needs-human (issue #99): the loop's push-attention signal — applied by
+# .claude/scripts/needs-human.sh at every block-on-owner point (attempt-
+# budget/stall escalation, PR ready for review, CHANGES_REQUESTED addressed
+# and awaiting re-review, ...) and removed once that condition clears.
+# Seeded here too (idempotent --force) so a fresh repo has it before the loop
+# ever needs it; needs-human.sh ALSO creates it lazily on first use either way.
+gh label create "needs-human" --color b60205 --description "Loop is blocked on owner judgment -- see the issue/PR body/comments" --force >/dev/null 2>&1 && echo "  label ✓ needs-human" || true
 
 # --- helper: create an issue unless an exact-title match already exists -------
 existing="$(gh issue list --state all --limit 500 --json title -q '.[].title' 2>/dev/null)"

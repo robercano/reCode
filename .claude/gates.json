@@ -68,5 +68,8 @@
     "policy": "pr-per-agent",
     "_policy_options": "pr-per-agent | orchestrated-sequential-merge",
     "baseBranch": "main"
-  }
+  },
+
+  "_notify_note": "issue #99 — needs-human push-notification seam, read by .claude/scripts/notify.sh (GATES_FILE-aware; same empty-means-skip convention as `gates`). Empty string = disabled (offline/CI-safe no-op) — the default; fill in a command to enable push notifications when the autonomous loop blocks on YOU (PR ready for review, CHANGES_REQUESTED addressed and awaiting re-review, attempt-budget/stall escalation, ...). Contract: severity/title/body-line reach the command BOTH as positional args ($1/$2/$3) and as NOTIFY_SEVERITY/NOTIFY_TITLE/NOTIFY_BODY env vars; throttled to one notification per (kind,target) per window (default 1800s — see notify.sh). Example commands (uncomment/adapt ONE):\n  ntfy:        curl -s -d \"$NOTIFY_BODY\" -H \"Title: $NOTIFY_TITLE\" -H \"Priority: $NOTIFY_SEVERITY\" ntfy.sh/<your-topic>\n  notify-send: notify-send \"$NOTIFY_TITLE\" \"$NOTIFY_BODY\"\n  webhook:     curl -s -X POST -H 'Content-Type: application/json' -d \"{\\\"severity\\\":\\\"$NOTIFY_SEVERITY\\\",\\\"title\\\":\\\"$NOTIFY_TITLE\\\",\\\"body\\\":\\\"$NOTIFY_BODY\\\"}\" https://example.invalid/hook",
+  "notify": ""
 }

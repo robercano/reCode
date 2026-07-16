@@ -44,6 +44,12 @@ new_fixture() {
   rm -rf "$work/$name/.claude/state"   # loop-tick.sh must mkdir -p it itself
   cp "$loop_tick_src" "$dir/loop-tick.sh"
   cp "$resolve_roots_src" "$dir/resolve-roots.sh"
+  # needs-human.sh/notify.sh (issue #99): loop-tick.sh sources needs-human.sh
+  # unconditionally if present; copy the REAL implementations so escalation
+  # scenarios exercise the real seam (gh calls still land in the fixture's
+  # own fake/logging bot-gh.sh, never real network).
+  cp "$script_dir/needs-human.sh" "$dir/needs-human.sh"
+  cp "$script_dir/notify.sh" "$dir/notify.sh"
 
   cat > "$dir/loop-census.sh" <<EOF
 #!/usr/bin/env bash
@@ -669,6 +675,8 @@ build_real_census_fixture() {
   cp "$script_dir/resolve-roots.sh" "$scripts/resolve-roots.sh"
   cp "$script_dir/loop-daemon.sh" "$scripts/loop-daemon.sh"
   cp "$script_dir/log-event.sh" "$scripts/log-event.sh"
+  cp "$script_dir/needs-human.sh" "$scripts/needs-human.sh"
+  cp "$script_dir/notify.sh" "$scripts/notify.sh"
   cat > "$dir/.claude/gates.json" <<'EOF'
 {
   "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],

@@ -47,5 +47,8 @@
     "stall_minutes": 30
   },
 
-  "merge": { "policy": "pr-per-agent", "baseBranch": "main" }
+  "merge": { "policy": "pr-per-agent", "baseBranch": "main" },
+
+  "_notify_note": "issue #99 — needs-human push-notification seam, read by .claude/scripts/notify.sh (GATES_FILE-aware, same empty-means-skip convention as `gates`/`budget`). Empty string here = disabled (offline/CI-safe no-op); left EMPTY deliberately for this repo's own dogfooding — the owner picks a default later. Contract: severity/title/body-line reach the configured command BOTH as positional args ($1/$2/$3) and as NOTIFY_SEVERITY/NOTIFY_TITLE/NOTIFY_BODY env vars. Called by .claude/scripts/needs-human.sh's needs_human_flag() at every loop block-on-owner point (attempt-budget/stall escalation in loop-tick.sh, PR-ready-for-review/re-approval-needed in merge-ready.sh, CHANGES_REQUESTED-addressed-awaiting-re-review in pr-feedback.sh), throttled to one notification per (kind,target) per window (default 1800s, see notify.sh). Example commands (uncomment/adapt ONE):\n  ntfy:        curl -s -d \"$NOTIFY_BODY\" -H \"Title: $NOTIFY_TITLE\" -H \"Priority: $NOTIFY_SEVERITY\" ntfy.sh/<your-topic>\n  notify-send: notify-send \"$NOTIFY_TITLE\" \"$NOTIFY_BODY\"\n  webhook:     curl -s -X POST -H 'Content-Type: application/json' -d \"{\\\"severity\\\":\\\"$NOTIFY_SEVERITY\\\",\\\"title\\\":\\\"$NOTIFY_TITLE\\\",\\\"body\\\":\\\"$NOTIFY_BODY\\\"}\" https://example.invalid/hook",
+  "notify": ""
 }
