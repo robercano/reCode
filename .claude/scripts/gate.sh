@@ -12,22 +12,6 @@ key="${1:?usage: gate.sh <gate-name>}"
 # shellcheck source=resolve-roots.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 
-# Dependency-freshness preflight (pnpm-gated: no-ops unless the repo uses pnpm).
-# pnpm copies the resolved lockfile to node_modules/.pnpm/lock.yaml on every
-# install, so a byte-diff against the working pnpm-lock.yaml is a fast, offline
-# staleness check. When they differ, node_modules is behind the lockfile (e.g. a
-# merged PR added a dependency) and TS builds fail with opaque "Cannot find
-# module" errors printed to STDOUT — leaving Stop hooks to report an unhelpful
-# "No stderr output". Surface the real cause on STDERR and abort early so the fix
-# ('pnpm install') is obvious. Projects without a root pnpm-lock.yaml skip this.
-if [ -f "$root/pnpm-lock.yaml" ]; then
-  installed_lock="$root/node_modules/.pnpm/lock.yaml"
-  if [ ! -e "$installed_lock" ] || ! cmp -s "$root/pnpm-lock.yaml" "$installed_lock"; then
-    echo "gate.sh: node_modules is out of sync with pnpm-lock.yaml — run 'pnpm install' (gate '$key' aborted)." >&2
-    exit 1
-  fi
-fi
-
 # Which adapter to read. Defaults to the project adapter; set GATES_FILE to run a
 # different one (e.g. GATES_FILE=.claude/self/gates.json for the self-host loop —
 # see .claude/self/README.md). Relative paths resolve from the repo root.
@@ -45,6 +29,26 @@ cmd="$(node -e "try{const g=require('$gates');process.stdout.write((g.gates&&g.g
 
 if [ -z "$cmd" ]; then
   echo "gate.sh: gate '$key' not configured in gates.json — skipping"; exit 0
+fi
+
+# Dependency-freshness preflight (pnpm-gated: no-ops unless the repo uses pnpm).
+# pnpm copies the resolved lockfile to node_modules/.pnpm/lock.yaml on every
+# install, so a byte-diff against the working pnpm-lock.yaml is a fast, offline
+# staleness check. When they differ, node_modules is behind the lockfile (e.g. a
+# merged PR added a dependency) and TS builds fail with opaque "Cannot find
+# module" errors printed to STDOUT — leaving Stop hooks to report an unhelpful
+# "No stderr output". Surface the real cause on STDERR and abort early so the fix
+# ('pnpm install') is obvious. Projects without a root pnpm-lock.yaml skip this.
+# Runs AFTER the empty-gate skip above (issue #129) — a deliberately blanked gate
+# (the documented "not configured" marker) is a no-op and must stay one even when
+# node_modules is momentarily stale; only a gate that's actually about to execute
+# needs a fresh node_modules.
+if [ -f "$root/pnpm-lock.yaml" ]; then
+  installed_lock="$root/node_modules/.pnpm/lock.yaml"
+  if [ ! -e "$installed_lock" ] || ! cmp -s "$root/pnpm-lock.yaml" "$installed_lock"; then
+    echo "gate.sh: node_modules is out of sync with pnpm-lock.yaml — run 'pnpm install' (gate '$key' aborted)." >&2
+    exit 1
+  fi
 fi
 
 echo "▶ gate '$key': $cmd"
