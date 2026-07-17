@@ -85,6 +85,14 @@ STALE_VENDOR_DIRS=(agents commands hooks scripts skills)
 LEGACY_VENDOR_MARKER_REL=".claude/.orchestrator-vendor"
 plugin_root="$(cd "$script_dir/../.." && pwd)"
 
+# self-hosting: this plugin's OWN repo running sync.sh against itself, i.e. plugin_root
+# resolves to $target_root/.claude. In that case .claude/{agents,commands,hooks,scripts,
+# skills} ARE the plugin's own legitimately-tracked canonical source directories, not
+# vendored copies of anything — stale-vendor detection must stay completely silent (no
+# warning, no migration caveat) rather than flag the plugin's own tree as a leftover.
+self_hosting=0
+[ "$plugin_root" = "$target_root/.claude" ] && self_hosting=1
+
 # --- user-owned files: NEVER written by sync, only reported for visibility ---------
 USER_OWNED_FILES=(
   ".claude/gates.json"
@@ -162,12 +170,17 @@ detect_stale_vendor_copies() {
   #     deliberate local override rather than assumed-safe-to-delete — same conservative
   #     philosophy as has_local_edits: a false "conflict" costs a human a glance at a diff,
   #     a false "safe to delete" can silently destroy someone's local fix.
-  #   - present but no distinct plugin root to diff against (self-hosting: this script's own
-  #     plugin_root resolves to $target_root/.claude) -> reported without a diff verdict.
+  # Self-hosting short-circuit: when this plugin's own repo runs sync.sh against itself
+  # ($self_hosting=1, computed above from plugin_root/target_root), .claude/{agents,
+  # commands,hooks,scripts,skills} ARE the plugin's own canonical source, not vendored
+  # copies of anything — skip the whole detect-and-warn body and report "none found" so
+  # self-hosted runs never flag (or suggest deleting) the plugin's own tree.
   # Returns 0 if any stale directory was found (so the caller can print the migration
-  # caveat once), 1 if none were found.
-  local d dst extra any_found=0 self_hosting=0
-  [ "$plugin_root" = "$target_root/.claude" ] && self_hosting=1
+  # caveat once), 1 if none were found (including the self-hosting short-circuit).
+  local d dst extra any_found=0
+  if [ "$self_hosting" -eq 1 ]; then
+    return 1
+  fi
   for d in "${STALE_VENDOR_DIRS[@]}"; do
     dst="$target_root/.claude/$d"
     [ -d "$dst" ] || continue
@@ -179,7 +192,7 @@ detect_stale_vendor_copies() {
       [ -n "$extra" ] || continue
     fi
     any_found=1
-    if [ "$self_hosting" -eq 1 ] || [ ! -d "$plugin_root/$d" ]; then
+    if [ ! -d "$plugin_root/$d" ]; then
       echo "  stale-vendor: .claude/$d — present locally; this repo no longer vendors the runtime harness (issue #134) — verify it's not just a leftover from an old vendored install before relying on it"
     elif diff -rq -x arm-loop.sh "$plugin_root/$d" "$dst" >/dev/null 2>&1; then
       echo "  stale-vendor: .claude/$d — matches the plugin's shipped copy byte-for-byte; this repo no longer vendors the runtime harness (issue #134), so this local copy only shadows the plugin cache — safe to delete (sync will not delete it for you)"
@@ -266,7 +279,18 @@ if detect_stale_vendor_copies; then
   fi
   echo "  stale-vendor: found local .claude/{agents,commands,hooks,scripts,skills} copies — this plugin stopped vendoring these (issue #134); once you've reconciled the flagged directories above (deleted the safe-to-delete ones, kept/upstreamed any genuine local override), also remove $LEGACY_VENDOR_MARKER_REL if present"
   echo "  stale-vendor: MIGRATION CAVEAT — a running pr-loop/claude-rc systemd unit holds its OLD script in memory until its unit restarts; refreshing/deleting files on disk is not enough. After cleaning up, run: systemctl --user restart pr-loop-<repo-slug>.service claude-rc-<repo-slug>.service (cf. the 2026-07-16 reCode deploy-lag incident, issue #131)"
+elif [ "$self_hosting" -eq 1 ]; then
+  # Self-hosting: stay completely silent — no stale-vendor line, no stray-marker check, no
+  # migration caveat. This is the plugin's own tree; there is nothing to reconcile.
+  echo "  stale-vendor: none found — .claude/{agents,commands,hooks,scripts,skills} are not vendored locally (as expected; served from \${CLAUDE_PLUGIN_ROOT})"
 else
+  # No stale vendor DIRECTORIES were found, but a consumer may have deleted those by hand
+  # and left a stray legacy marker file behind — warn about that leftover too (detect and
+  # warn only; sync never deletes it for the operator).
+  legacy_marker="$target_root/$LEGACY_VENDOR_MARKER_REL"
+  if [ -f "$legacy_marker" ]; then
+    echo "  stale-vendor: $LEGACY_VENDOR_MARKER_REL — legacy vendor marker from the old #128 model found, but no stale vendor directories are present; remove this stray marker file"
+  fi
   echo "  stale-vendor: none found — .claude/{agents,commands,hooks,scripts,skills} are not vendored locally (as expected; served from \${CLAUDE_PLUGIN_ROOT})"
 fi
 

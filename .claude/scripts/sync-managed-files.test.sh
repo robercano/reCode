@@ -30,6 +30,16 @@
 #      as a possible deliberate local override ("conflict"), and either way the local
 #      directory is left completely untouched by sync.sh. The legacy marker file and the
 #      systemd-restart migration caveat are both surfaced.
+#   9. self-hosting: sync.sh running from INSIDE the target's own .claude (plugin_root ==
+#      target_root/.claude, as when this plugin's own repo syncs against itself) never
+#      flags its own canonical agents/commands/hooks/scripts/skills as stale-vendor
+#      leftovers — no leftover/conflict line, no "verify it's not a leftover" phrasing, no
+#      migration caveat — even when a stray legacy marker is also present.
+#   10. stray legacy marker with no stale vendor directories present (consumer manually
+#       deleted the vendored dirs but left `.claude/.orchestrator-vendor` behind) still
+#       gets a detect-and-warn line calling out the leftover marker file — it is not
+#       silently ignored just because no directories triggered the main check — and the
+#       marker is left on disk untouched.
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/sync-managed-files.test.sh
@@ -248,6 +258,65 @@ check_output "s8c: migration caveat mentions restarting the unit" "$out8c" "syst
 # 8d. No local vendored dirs at all -> "none found", no false positives.
 out8d="$(bash "$plugin_fixture/skills/sync/sync.sh" "$t1" 2>&1)"
 check_output "s8d: no local vendor leftovers -> none found" "$out8d" "stale-vendor: none found"
+
+# ---------------------------------------------------------------------------
+# Scenario 9: self-hosting — sync.sh running from INSIDE the target's own .claude
+# (plugin_root == target_root/.claude) must never flag the plugin's own canonical
+# agents/commands/hooks/scripts/skills as stale-vendor leftovers (issue #134 review
+# finding: this used to warn on the plugin repo's own tree and tell the operator to
+# reconcile/delete it, plus print the systemd migration caveat — both wrong in self-host
+# mode). Arrange the fixture so sync.sh's own script_dir/../.. resolves back to the
+# target root: copy the plugin fixture straight into $t9/.claude so
+# $t9/.claude/skills/sync/sync.sh's plugin_root is $t9/.claude itself.
+# ---------------------------------------------------------------------------
+t9="$work/consumer9"
+mkdir -p "$t9/.claude"
+for entry in agents commands hooks scripts skills; do
+  cp -a "$plugin_fixture/$entry" "$t9/.claude/$entry"
+done
+
+# 9a. Self-hosting, no legacy marker -> completely silent: no stale-vendor leftover/
+# conflict lines, no migration caveat, just "none found".
+out9a="$(bash "$t9/.claude/skills/sync/sync.sh" "$t9" 2>&1)"
+rc9a=$?
+check "s9a: self-hosting sync exits 0" test "$rc9a" -eq 0
+check_output "s9a: self-hosting reports none found" "$out9a" "stale-vendor: none found"
+check_no_output "s9a: no stale-vendor leftover warning for the plugin's own agents dir" "$out9a" "stale-vendor: .claude/agents"
+check_no_output "s9a: no stale-vendor leftover warning for the plugin's own scripts dir" "$out9a" "stale-vendor: .claude/scripts"
+check_no_output "s9a: no stale-vendor conflict warning" "$out9a" "stale-vendor conflict"
+check_no_output "s9a: no 'verify it's not just a leftover' phrasing" "$out9a" "verify it's not just a leftover"
+check_no_output "s9a: no migration caveat" "$out9a" "MIGRATION CAVEAT"
+check_no_output "s9a: no reconcile-and-remove-marker instruction" "$out9a" "reconciled the flagged directories"
+
+# 9b. Self-hosting WITH a stray legacy marker present -> still completely silent (the
+# self-hosting short-circuit takes priority over the stray-marker check from scenario 10).
+printf '# @orchestrator-managed runtime-vendor v1\n' > "$t9/.claude/.orchestrator-vendor"
+out9b="$(bash "$t9/.claude/skills/sync/sync.sh" "$t9" 2>&1)"
+check_output "s9b: self-hosting + stray marker still reports none found" "$out9b" "stale-vendor: none found"
+check_no_output "s9b: self-hosting + stray marker emits no legacy-marker warning" "$out9b" "legacy vendor marker"
+check_no_output "s9b: self-hosting + stray marker emits no migration caveat" "$out9b" "MIGRATION CAVEAT"
+rm -f "$t9/.claude/.orchestrator-vendor"
+
+# ---------------------------------------------------------------------------
+# Scenario 10: stray legacy marker with NO stale vendor directories present (a consumer
+# who deleted the vendored dirs by hand but left `.claude/.orchestrator-vendor` behind).
+# Previously this got no warning at all since the legacy-marker check only ran when a
+# stale directory was also found; it must now warn about the stray marker on its own,
+# while never deleting it and never printing the full-leftover migration caveat (that
+# caveat is reserved for when there's actually something to migrate away from).
+# ---------------------------------------------------------------------------
+t10="$work/consumer10"
+mkdir -p "$t10"
+bash "$scaffold_sh" "$t10" >/dev/null 2>&1
+printf '# @orchestrator-managed runtime-vendor v1\n' > "$t10/.claude/.orchestrator-vendor"
+out10="$(bash "$sync_sh" "$t10" 2>&1)"
+rc10=$?
+check "s10: sync exits 0" test "$rc10" -eq 0
+check_output "s10: stray marker warns even with no stale dirs present" "$out10" \
+  "legacy vendor marker from the old #128 model found, but no stale vendor directories are present"
+check_output "s10: still reports none found for the directories themselves" "$out10" "stale-vendor: none found"
+check_no_output "s10: no migration caveat for a bare stray marker (nothing to migrate)" "$out10" "MIGRATION CAVEAT"
+check "s10: marker file left untouched — sync never deletes it" test -f "$t10/.claude/.orchestrator-vendor"
 
 echo
 if [ "$fail" -ne 0 ]; then
