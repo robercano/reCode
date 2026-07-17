@@ -138,21 +138,40 @@ vendor_marker_dst="$target_root/.claude/.orchestrator-vendor"
 vendor_label="runtime harness vendor (.claude/{agents,commands,hooks,scripts,skills})"
 
 copy_vendor_dirs() {
-  # Copies each VENDOR_DIRS subtree from the plugin root into target_root/.claude,
-  # preserving executable bits (cp -a), skipping arm-loop.sh (see EXCEPTION above), then
-  # stamps the marker file last so a failure mid-copy never leaves a stamped-but-partial tree.
-  local d entry base
+  # Prune-then-copy of each VENDOR_DIRS subtree's CONTENTS (not the subtree itself) from
+  # the plugin root into target_root/.claude, preserving executable bits (cp -a). This must
+  # be idempotent AND pruning: a plain `cp -a src dst` when dst already EXISTS nests the
+  # source dir inside it (src becomes dst/src) instead of refreshing it in place — that's
+  # exactly the bug this replaced (a restamp/upgrade run used to leave duplicate nests like
+  # .claude/skills/setup/setup and never actually update changed files). Removing the
+  # destination subtree first and then copying the source's CONTENTS (`src/.` -> `dst/`)
+  # both fixes the nesting and prunes files removed upstream, so a later `diff -rq` never
+  # trips on stale leftovers.
+  #
+  # EXCEPTION: `.claude/scripts/arm-loop.sh` must survive this — it already has its own
+  # dedicated MANAGED_FILES row (canonical template: templates/arm-loop.sh) and must NOT be
+  # vendored/overwritten from this plugin repo's own live copy. Back it up before pruning
+  # `scripts/`, then restore it (or remove whatever the plugin copy dropped in its place if
+  # there was nothing to restore) after the copy.
+  local d arm_backup=""
   for d in "${VENDOR_DIRS[@]}"; do
     [ -d "$plugin_root/$d" ] || continue
+    if [ "$d" = "scripts" ] && [ -f "$target_root/.claude/scripts/arm-loop.sh" ]; then
+      arm_backup="$(mktemp "${TMPDIR:-/tmp}/arm-loop.sh.XXXXXX")"
+      cp -a "$target_root/.claude/scripts/arm-loop.sh" "$arm_backup"
+    fi
+    rm -rf "$target_root/.claude/$d"
     mkdir -p "$target_root/.claude/$d"
-    for entry in "$plugin_root/$d"/* "$plugin_root/$d"/.[!.]*; do
-      [ -e "$entry" ] || continue
-      base="$(basename "$entry")"
-      if [ "$d" = "scripts" ] && [ "$base" = "arm-loop.sh" ]; then
-        continue
+    cp -a "$plugin_root/$d/." "$target_root/.claude/$d/"
+    if [ "$d" = "scripts" ]; then
+      if [ -n "$arm_backup" ]; then
+        cp -a "$arm_backup" "$target_root/.claude/scripts/arm-loop.sh"
+        rm -f "$arm_backup"
+        arm_backup=""
+      else
+        rm -f "$target_root/.claude/scripts/arm-loop.sh"
       fi
-      cp -a "$entry" "$target_root/.claude/$d/$base"
-    done
+    fi
   done
   cp "$vendor_marker_src" "$vendor_marker_dst"
 }
