@@ -59,7 +59,14 @@ Collect, confirming back as you go:
 3. **Gates** — exact shell commands (run from repo root) for `install`, `build`, `lint`, `typecheck`, `test`,
    `test_affected`, `coverage`, `e2e`, `security`. Empty = "skip" (fine, and the right default when a gate
    doesn't exist yet). Warn that a gate pointed at a command that can't pass will block the Stop hook. Ask
-   `coverage_threshold` (default 80). If unsure on `test_affected`, default it to the full `test` command.
+   `coverage_threshold` (default 80). **`test_affected` runs on the `Stop` hook after every single turn, so it
+   must be cheap** — steer towards a changed-scope filter (`turbo run test --filter='...[origin/main]'`, `nx
+   affected -t test`, `pnpm --filter '...[origin/main]' test`, etc. — see `docs/GETTING_STARTED.md` →
+   "Choosing `test_affected` per stack" for the full per-stack table) rather than defaulting straight to the
+   full `test` command. If the stack has no cheap affected-scoped option (e.g. Foundry, a slow monolithic
+   suite), the full command is an acceptable fallback ONLY if it's already fast enough to run every turn —
+   confirm that with the user rather than assuming it, and otherwise leave `test_affected` empty (skipped)
+   until a cheap filter exists.
 4. **Review** — `review.lenses` (default `["correctness","tests","security","performance"]`) and
    `review.consensus` (`all`, or an integer).
 5. **Budget/routing** — `orchestrator_model`/`worker_model`/`explorer_model`/`reviewer_model`
@@ -106,11 +113,16 @@ idempotently:
   `$CLAUDE_PROJECT_DIR/.claude/scripts/...`, plus baseline `permissions`/`sandbox`. Deliberately carries no
   `enabledPlugins`/`extraKnownMarketplaces` — keep those only in a settings.json you maintain yourself while
   installing/updating the plugin (e.g. the block from Step 1 of `docs/GETTING_STARTED.md`), not in the
-  runtime file, which must keep working with the plugin disabled. **If you already have a `settings.json`**
-  (likely, since you needed `enabledPlugins` to install the plugin in the first place), scaffold.sh reports it
-  "kept" and leaves it completely untouched — merge the four hooks above and the `permissions`/`sandbox`
-  blocks from `.claude/skills/setup/templates/settings.json` into your existing file by hand, then it's safe
-  to drop `enabledPlugins`/`extraKnownMarketplaces` from it once you don't need the plugin loaded anymore.
+  runtime file, which must keep working with the plugin disabled. **Single-owner rule (issue #129):** the
+  plugin's `hooks/hooks.json` and this file's `hooks` block fire the SAME hooks — while both are active
+  (plugin enabled AND this file wired), every gate runs TWICE per turn (the expensive `Stop` `test_affected`
+  is the costly one). Only one may own the hooks at a time; this file is the intended steady-state owner,
+  the plugin's copy is only needed transiently to run `/orchestrator:setup`/`/orchestrator:sync`. **If you
+  already have a `settings.json`** (likely, since you needed `enabledPlugins` to install the plugin in the
+  first place), scaffold.sh reports it "kept" and leaves it completely untouched — merge the four hooks above
+  and the `permissions`/`sandbox` blocks from `.claude/skills/setup/templates/settings.json` into your
+  existing file by hand. Either way, **drop `enabledPlugins`/`extraKnownMarketplaces` for `orchestrator@recode`
+  as part of finishing this setup run** (see step 11) — don't leave both registrations active "for later."
 - `.github/workflows/gates.yml` + `.github/actions/setup/action.yml` — the CI gate. Created if absent, left
   untouched if present.
 - `.gitignore` entries (append-if-missing, never duplicated): `.env`, `.env.*`, `!.env.example`,
@@ -242,6 +254,11 @@ gitignore entries, labels created, bot status, CI status, loop armed?, hardened?
 points in one line each: **label an issue `module:*` to queue it; approve the bot's PR to ship it.** Finish
 with an ordered checklist of everything only the human can complete, e.g.:
 - add `GH_BOT_TOKEN` to `.env` / add the bot as a write collaborator (if step 7 flagged it),
+- **disable the `orchestrator` plugin for everyday sessions now that `.claude/settings.json` owns the hooks
+  locally** — drop (or comment out) `enabledPlugins`/`extraKnownMarketplaces` for `orchestrator@recode`
+  wherever you set them (step 1's block). Until you do, the plugin's `hooks/hooks.json` and your local
+  `.claude/settings.json` both fire on every turn — double gate execution (issue #129). Re-enable only when
+  you next need to run `/orchestrator:setup` or `/orchestrator:sync`.
 - set branch protection / required status checks (if wanted),
 - OS-level isolation from `docs/HARDENING.md` Step 2 (sudo / VM / WSL interop) if hardening,
 - if the daemon path was chosen: run `bash .claude/scripts/arm-loop.sh` in a real terminal outside Claude

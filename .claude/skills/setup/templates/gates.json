@@ -18,6 +18,7 @@
 
   "gates": {
     "_note": "Exact shell commands for this repo. Run from repo root. Empty string = skip.",
+    "_test_affected_note": "test_affected runs on the Stop hook after EVERY turn — keep it cheap (a changed-scope filter, not the full suite) or leave it empty until one exists. See docs/GETTING_STARTED.md -> 'Choosing test_affected per stack'.",
     "install": "",
     "build": "",
     "lint": "",

@@ -21,7 +21,10 @@
 This repo is set up for orchestrated multi-agent development. See `docs/USAGE.md`.
 - **Agents:** `.claude/agents/` — orchestrator, implementer (worktree-isolated), reviewer, test-runner.
 - **Adapter:** `.claude/gates.json` — module map, gate commands, model routing. **This is the file to keep current.**
-- **Gates run via** `.claude/scripts/gate.sh <name>` and the hooks in `.claude/settings.json`.
+- **Gates run via** `.claude/scripts/gate.sh <name>` and the hooks in `.claude/settings.json`. Keep the
+  `orchestrator` plugin **disabled** outside of running `/orchestrator:setup`/`/orchestrator:sync` — its own
+  `hooks/hooks.json` registers the same hooks, and if both the plugin and this file are active at once every
+  gate (notably the `Stop` `test_affected` check) runs twice per turn.
 - **Workflow:** `.claude/workflows/feature-fanout.js` for deterministic fan-out.
 
 ### Module boundaries (hard rule)
