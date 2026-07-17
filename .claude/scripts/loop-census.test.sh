@@ -147,6 +147,26 @@ chmod +x "$scripts_dir"/*.sh
 git -C "$fixture" init -q -b main
 git -C "$fixture" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
 
+# Commit the fixture scaffolding written above (.claude/scripts/*, gates.json,
+# ...) plus a real tracked file — used further below to exercise
+# main_dirty=yes (issue #106) via an actual uncommitted modification. Without
+# this commit the scaffolding itself would sit untracked and main_dirty would
+# always read "yes", breaking the "clean fixture" checks that run first.
+#
+# Also seed TRACKED baseline files under the read-only-mounted
+# .claude/agents/ and .claude/skills/setup/templates/ trees, mirroring a real
+# repo where those paths are checked in. Used further below to exercise the
+# "can legitimately lag behind HEAD" exclusion (issue #106, acceptance
+# criterion 3) via an in-place modification to an EXISTING tracked file —
+# the real shape of a stale bind-mount, as opposed to a brand-new untracked
+# path (which git would collapse into a single directory-level status line).
+echo "tracked" > "$fixture/tracked.txt"
+mkdir -p "$fixture/.claude/agents" "$fixture/.claude/skills/setup/templates"
+echo "implementer baseline" > "$fixture/.claude/agents/implementer.md"
+echo "template baseline" > "$fixture/.claude/skills/setup/templates/CLAUDE.md"
+git -C "$fixture" add .claude tracked.txt
+git -C "$fixture" -c user.email=t@e.st -c user.name=t commit -q -m "add fixture scaffolding + tracked file"
+
 # Bare "remote" so `git branch -a` prints genuine "remotes/origin/..." lines.
 remote="$work/remote.git"
 git init -q --bare "$remote"
@@ -624,6 +644,55 @@ check "stall: age_min on the stalled line is at least the 2-minute threshold" ba
   age="$(printf "%s\n" "$1" | sed -n "s/^stalled=80 age_min=\([0-9]*\)/\1/p")"
   [ -n "$age" ] && [ "$age" -ge 2 ]
 ' _ "$outStall"
+
+# ---------------------------------------------------------------------------
+# main_dirty (issue #106): git-state-mutation guard's companion telemetry.
+# ---------------------------------------------------------------------------
+check "clean fixture: main_dirty=no" bash -c 'printf "%s\n" "$1" | grep -qx "main_dirty=no"' _ "$out"
+
+# A real uncommitted modification to a tracked file -> main_dirty=yes.
+echo "modified" >> "$fixture/tracked.txt"
+out_dirty="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "fixture with a real tracked-file modification: main_dirty=yes" bash -c 'printf "%s\n" "$1" | grep -qx "main_dirty=yes"' _ "$out_dirty"
+git -C "$fixture" checkout -q -- tracked.txt
+
+# The ONLY dirt is a sandbox-mask phantom path — a symlink to /dev/null
+# satisfies the same `[ -c path ]` test a real bind-mounted device-node mask
+# would (unprivileged test code can't mknod a real character device, but a
+# symlink to one passes the exact same `test -c`, since `[ -c ]` follows
+# symlinks). Must still report main_dirty=no: the exclusion works.
+ln -sf /dev/null "$fixture/.mcp.json"
+out_mask="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "fixture whose only dirt is a sandbox-mask phantom path: main_dirty=no" bash -c 'printf "%s\n" "$1" | grep -qx "main_dirty=no"' _ "$out_mask"
+rm -f "$fixture/.mcp.json"
+
+# A modification to the EXISTING tracked .claude/agents/ baseline file can
+# legitimately lag behind HEAD in sandboxed sessions — must NOT flip
+# main_dirty (issue #106, acceptance criterion 3).
+echo "stale mount content" >> "$fixture/.claude/agents/implementer.md"
+out_agents="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "fixture with only a .claude/agents/ modification: main_dirty=no" bash -c 'printf "%s\n" "$1" | grep -qx "main_dirty=no"' _ "$out_agents"
+git -C "$fixture" checkout -q -- .claude/agents/implementer.md
+
+# Same for the read-only-mounted .claude/skills/setup/templates/ tree.
+echo "stale mount content" >> "$fixture/.claude/skills/setup/templates/CLAUDE.md"
+out_templates="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "fixture with only a .claude/skills/setup/templates/ modification: main_dirty=no" bash -c 'printf "%s\n" "$1" | grep -qx "main_dirty=no"' _ "$out_templates"
+git -C "$fixture" checkout -q -- .claude/skills/setup/templates/CLAUDE.md
+
+# ---------------------------------------------------------------------------
+# main_head (issue #106): detects a DETACHED HEAD in the main checkout — the
+# 2026-07-16 incident (a failed mid-op `git checkout` left main detached on
+# an unmerged commit for ~12h, with a CLEAN working tree throughout, i.e.
+# main_dirty=no the whole time; only main_head would have caught it).
+# ---------------------------------------------------------------------------
+check "clean fixture on its named branch: main_head=main" bash -c 'printf "%s\n" "$1" | grep -qx "main_head=main"' _ "$out"
+
+git -C "$fixture" checkout -q --detach HEAD
+out_detached="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "fixture with HEAD detached: main_head=detached" bash -c 'printf "%s\n" "$1" | grep -qx "main_head=detached"' _ "$out_detached"
+check "fixture with HEAD detached: main_dirty still no (working tree itself is clean)" bash -c 'printf "%s\n" "$1" | grep -qx "main_dirty=no"' _ "$out_detached"
+git -C "$fixture" checkout -q main
 
 echo ""
 if [ "$fail" -eq 0 ]; then

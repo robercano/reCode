@@ -43,6 +43,24 @@
 #                               non-"none" advance_ready when plan.gate !=
 #                               "off" (issue #100) — tells the tick which
 #                               driver prompt variant to build.
+#   main_dirty=yes|no           `git -C $root status --porcelain` is non-empty
+#                               AFTER excluding (a) sandbox-mask phantom paths
+#                               (device-node masks, see below) and (b) the
+#                               read-only-mounted `.claude/agents/` and
+#                               `.claude/skills/setup/templates/` paths, which
+#                               can legitimately lag behind HEAD in sandboxed
+#                               sessions — i.e. the MAIN checkout has real
+#                               uncommitted state. Surfaces issue #106's failure
+#                               mode: a worker mutated the shared main checkout
+#                               instead of its own worktree.
+#   main_head=<branch>|detached   the MAIN checkout's current HEAD: the branch
+#                               name, or literally `detached` when HEAD isn't
+#                               on any branch. Surfaces the 2026-07-16 incident
+#                               where a driver's `git checkout` failed mid-op
+#                               on a read-only-mounted agent file and left main
+#                               in a DETACHED HEAD on an unmerged commit for
+#                               ~12h — a state a clean working tree alone
+#                               (main_dirty=no) would NOT reveal.
 #   cadence=FAST|WATCH|IDLE cron=<expr>   desired cadence per the loop policy
 #
 # --- PLAN GATE (issue #100) -------------------------------------------------
@@ -127,6 +145,53 @@ repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 
 gates_rel="${GATES_FILE:-.claude/gates.json}"
 case "$gates_rel" in /*) gates="$gates_rel" ;; *) gates="$root/$gates_rel" ;; esac
+
+# main_dirty (issue #106): is the MAIN checkout ($root) dirty? A `git status
+# --porcelain` line is only real dirt if its path is NOT one of:
+#   (a) one of the sandbox's `/dev/null` character-device masks (`.mcp.json`,
+#       `.claude/routines`, `.idea`, `.vscode`, `.gitmodules`,
+#       `.claude/launch.json` — see docs/HARDENING.md -> Caveats), or
+#   (b) under the read-only-mounted `.claude/agents/` or
+#       `.claude/skills/setup/templates/` trees, which can legitimately lag
+#       behind HEAD in sandboxed sessions (the bind-mount, not a real edit).
+# Those are expected artifacts, not a worker's or owner's real uncommitted
+# work, so they must never flip main_dirty to "yes".
+main_dirty="no"
+status_lines=$(git -C "$root" status --porcelain 2>/dev/null || true)
+if [ -n "$status_lines" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    path="${line:3}"
+    case "$path" in
+      *" -> "*) path="${path##* -> }" ;;  # rename: "old -> new" -> take new
+    esac
+    # git quotes paths containing unusual characters in double quotes; strip
+    # a matched leading/trailing quote pair if present.
+    case "$path" in
+      \"*\") path="${path#\"}"; path="${path%\"}" ;;
+    esac
+    if [ -c "$root/$path" ]; then
+      continue  # sandbox-mask phantom path — not real dirt, skip
+    fi
+    case "$path" in
+      .claude/agents/*|.claude/skills/setup/templates/*)
+        continue  # read-only-mount path that can legitimately lag HEAD, skip
+        ;;
+    esac
+    main_dirty="yes"
+    break
+  done <<< "$status_lines"
+fi
+echo "main_dirty=$main_dirty"
+
+# main_head (issue #106): the MAIN checkout's current HEAD — the branch name,
+# or literally "detached" when HEAD isn't on any branch. Companion signal to
+# main_dirty: the 2026-07-16 incident left main on a DETACHED HEAD with a
+# CLEAN working tree (main_dirty=no would have missed it entirely), so this
+# must be reported independently rather than folded into main_dirty.
+main_head=$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[ -n "$main_head" ] || main_head="detached"
+echo "main_head=$main_head"
 
 # Adapter-derived facts: base branch + the module:* label set.
 base=$(node -e 'const g=require(process.argv[1]); console.log((g.merge&&g.merge.baseBranch)||"main")' "$gates")

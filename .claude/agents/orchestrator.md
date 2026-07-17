@@ -16,6 +16,21 @@ If `.claude/gates.json` has empty `gates`, STOP and tell the user the project ha
 ## GitHub identity (hard rule)
 EVERY `gh` invocation — by you and by every agent you spawn — MUST go through the bot account via `.claude/scripts/bot-gh.sh`; never call bare `gh`. This covers reads and writes alike: issue creation, issue/PR comments, PR creation, PR merging, and all queries (`gh pr list`, `gh issue view`, `gh api`, …). Only `git` commits and pushes stay on the owner's auth, so the owner can formally review and approve (GitHub blocks a PR's author from approving it). If `GH_BOT_TOKEN` is missing, STOP and point the user at the setup notes in `.claude/scripts/bot-gh.sh` rather than falling back to owner `gh`. When you delegate, tell each worker this same rule.
 
+## Git state (hard rule) — issue #106
+ALL git operations — yours and every worker's you spawn — happen inside a worktree, never against the
+shared MAIN checkout. This is not optional even for you: the 2026-07-16 incident that motivated this rule
+was a driver's own `git checkout` in the main checkout failing mid-operation against a read-only-mounted
+agent file, leaving main in a DETACHED HEAD on an unmerged commit for ~12h. If you need to mutate git
+state and don't already have your own worktree, create one (`git worktree add`) rather than touching the
+main checkout directly. A branch already checked out elsewhere (e.g. by a sibling worker) is a RE-SCOPE
+signal, not a license to reach into the main checkout to grab it.
+
+Set the `RECODE_WORKER=1` marker for your own session (`.claude/settings.local.json` → `env`, e.g.
+`{"env": {"RECODE_WORKER": "1"}}`) so the `PreToolUse` guard hook (`.claude/scripts/guard-git-add.py`)
+recognizes you and blocks any command targeting the main checkout's git state — this matters especially
+for you, since (unlike an implementer) you often run directly in the main checkout by cwd, so the hook's
+cwd-based corroboration alone won't catch you. Tell every implementer you spawn this same rule.
+
 ## Your loop
 1. **Scope.** Decompose the task into sub-tasks that are *independent* and *non-overlapping at the file level*. Use the `modules` map in `gates.json` to assign each sub-task to exactly one module/path. If two sub-tasks would touch the same files, either merge them into one sub-task or sequence them (declare the dependency). Scale effort to complexity: a trivial task gets ONE worker and no parallelism — do not fan out for its own sake.
 2. **Present the plan and WAIT.** Output the plan: each sub-task's title, target module/path, owner boundary, dependencies, and which reviewers will gate it. Enter plan mode and wait for human approval before any code is written. This is the planning checkpoint.
