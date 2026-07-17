@@ -15,9 +15,7 @@ materializes them into the consumer repo on first run.
 | `arm-loop.sh`       | `.claude/scripts/arm-loop.sh`         | managed   | (issue #102) installs both systemd units above (with placeholders substituted for THIS checkout) + `loginctl enable-linger` + starts the remote-control tmux session. MUST be run in a real terminal outside Claude Code (sandbox caveat — see `docs/HARDENING.md`). Marker `@orchestrator-managed arm-loop vN`; copied with the executable bit preserved. |
 | `gates.yml`         | `.github/workflows/gates.yml`         | ci        | created only if absent; never overwritten |
 | `action.yml`        | `.github/actions/setup/action.yml`    | ci        | created only if absent; never overwritten |
-| *(live plugin tree, not a template file)* `agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` | `.claude/agents/`, `.claude/commands/`, `.claude/hooks/`, `.claude/scripts/`, `.claude/skills/` | managed (whole-tree, issue #128) | Vendored wholesale from the plugin ROOT (not from `templates/` — this is the only vendored row that copies the plugin's own live directories) so consumer sessions read the runtime harness off local disk without the plugin loaded. Gated as ONE unit by the top-level marker `.claude/.orchestrator-vendor` (`@orchestrator-managed runtime-vendor vN`), re-stamped/re-vendored on the same behind/never-downgrade ladder as every other managed row. **Exception:** `.claude/scripts/arm-loop.sh` is skipped by this copy — it is already its own row below with a different canonical source (`templates/arm-loop.sh`), and double-managing the same destination path from two pristine sources would make the two mechanisms disagree about what "up to date" means for that one file. |
-| `.orchestrator-vendor` | `.claude/.orchestrator-vendor`      | managed (marker only) | The single version-stamp file that governs the whole-tree row above. Copied last, after the tree copy succeeds, so a failure mid-copy never leaves a stamped-but-partial vendor tree. |
-| `settings.json`     | `.claude/settings.json`               | user      | created only if absent; never overwritten. Wires the runtime hooks (`PostToolUse` lint + log-worker-tool, `Stop` test_affected, `PreToolUse` guard-git-add) to `$CLAUDE_PROJECT_DIR/.claude/scripts/...`, plus baseline `permissions`/`sandbox`. Deliberately carries **no** `enabledPlugins`/`extraKnownMarketplaces` — those belong only in a settings.json the user maintains themselves while installing/updating the plugin. If a settings.json already exists, setup leaves it untouched and the setup SKILL instructs merging the runtime hooks in by hand. |
+| `settings.json`     | `.claude/settings.json`               | user      | created only if absent; never overwritten. Wires the runtime hooks (`PostToolUse` lint + log-worker-tool, `Stop` test_affected, `PreToolUse` guard-git-add) to `${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR/.claude}/scripts/...`, plus baseline `permissions`/`sandbox`. Deliberately carries **no** `enabledPlugins`/`extraKnownMarketplaces` — those belong only in a settings.json the user maintains themselves while installing/updating the plugin. If a settings.json already exists, setup leaves it untouched and the setup SKILL instructs merging the runtime hooks in by hand. |
 
 The three `managed` rows added by issue #102 (`pr-loop.service`, `claude-rc.service`, `arm-loop.sh`)
 follow exactly the same ownership class and marker convention as `feature-fanout.js` — `scaffold.sh`
@@ -26,12 +24,34 @@ behind, `sync.sh` re-stamps them going forward, and neither ever touches a copy 
 locally diverged from the last pristine version it was stamped from (that's a `conflict`, left for a
 human — see `.claude/skills/sync/SKILL.md`).
 
-The runtime-vendor row added by issue #128 reuses this exact same marker ladder, just applied to a
-directory-tree copy instead of a single `cp` — see `.claude/scripts/arm-loop.sh` above for why it's
-carved out as an exception rather than folded into the tree copy. Once vendored, the `orchestrator`
-plugin only needs to stay **enabled** to run `/orchestrator:setup`/`/orchestrator:sync` (the
-install/update channel) — not for everyday sessions, which is what removes the plugin's session-start
-load cost from time-sensitive paths like headless `claude remote-control` spawns.
+## Stopped vendoring the runtime harness (issue #134)
+Issue #128 used to vendor the plugin's own `agents/`, `commands/`, `hooks/`, `scripts/`, `skills/`
+subtrees wholesale into a consumer's `.claude/`, gated by a single top-level marker
+`.claude/.orchestrator-vendor`, so a session could read them off local disk with the plugin disabled.
+That model was reverted by issue #134: consumer repos no longer carry local copies of these
+directories at all. `agents/commands/hooks/scripts/skills` are read straight from the plugin cache
+(`${CLAUDE_PLUGIN_ROOT}`) instead — **the `orchestrator` plugin must now stay enabled for everyday
+sessions**, not just to run `/orchestrator:setup`/`/orchestrator:sync`. Reasoning: nothing kept the
+old vendored copy updated outside of `/orchestrator:sync`, and `resolve-roots.sh` deliberately makes a
+repo-tracked `.claude/scripts` layout win over `${CLAUDE_PLUGIN_ROOT}` (correct for the self-hosting
+and worktree-gate-run cases) — so a consumer who forgot to `sync` regularly ended up permanently
+shadowing a fresh plugin install with a stale vendored copy (see the reDeploy incident that prompted
+#134).
+
+`sync.sh` does **not** delete a repo's leftover vendored copy from before this change (a local copy
+might be a deliberate override, not just staleness) — it only **detects and warns**: for each of
+`agents/commands/hooks/scripts/skills` still present locally, it diffs against the plugin's own
+shipped copy and reports either `stale-vendor: ... safe to delete` (content identical — just shadowing
+the plugin cache) or `stale-vendor conflict: ...` (content diverges — treat as a possible deliberate
+override and review the diff before deleting). It also calls out a leftover
+`.claude/.orchestrator-vendor` marker file specifically. See `.claude/skills/sync/sync.sh`'s
+`detect_stale_vendor_copies` and `.claude/skills/sync/SKILL.md`.
+
+**Migration caveat:** deleting/refreshing files on disk is not enough for a repo with the loop already
+armed — a running `pr-loop`/`claude-rc` systemd unit holds its OLD script **in memory** until its unit
+restarts. After cleaning up a stale vendored copy, restart the units:
+`systemctl --user restart pr-loop-<repo-slug>.service claude-rc-<repo-slug>.service` (cf. the
+2026-07-16 reCode deploy-lag incident, issue #131).
 
 See `.claude/skills/setup/scaffold.sh` for the implementation, and `.claude/skills/setup/SKILL.md`
 for the full onboarding flow this scaffold step is one part of.

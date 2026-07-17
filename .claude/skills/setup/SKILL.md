@@ -13,13 +13,14 @@ version-controlled inside the consumer's own repo: the project-specific adapter,
 workflow file, and GitHub Actions YAML. This skill's job is to scaffold exactly that non-distributable residue,
 on top of the interview below.
 
-**Also (issue #128): this skill vendors the plugin's own runtime harness** — `agents/`, `commands/`, `hooks/`,
-`scripts/`, `skills/` — wholesale into the consumer's local `.claude/`, plus a `.claude/settings.json` that
-wires the runtime hooks locally. A plugin loads (and pays its load cost) on every session start while it's
-enabled, no matter how its hooks are wired, so the only way to remove that cost from the runtime path is to
-stop depending on the plugin being loaded at all once setup is done. **The `orchestrator` plugin only needs to
-stay enabled to RUN `/orchestrator:setup`/`/orchestrator:sync`** (the install/update channel) — not for
-everyday sessions. See step 4 below.
+**This skill does NOT vendor the plugin's runtime harness into the consumer repo** (issue #134 reverted issue
+#128's vendoring model): `agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` are read straight from the
+plugin cache (`${CLAUDE_PLUGIN_ROOT}`), never copied into the consumer's local `.claude/`. **The `orchestrator`
+plugin must stay enabled for everyday sessions**, not just to run `/orchestrator:setup`/`/orchestrator:sync` —
+its own `hooks/hooks.json` (and, if wired, this repo's own `.claude/settings.json` `hooks` block, see step 4)
+only resolve while it's loaded. This also creates a `.claude/settings.json` from a template (step 4) that
+wires the same hooks locally via the same `${CLAUDE_PLUGIN_ROOT}` resolution, with a local-`.claude/` fallback
+for the self-hosting case.
 
 Be conversational but efficient. Use the `AskUserQuestion` tool for discrete choices; ask for free-text
 (names, paths, shell commands) in plain prose. **Never invent values** — if you don't know a command or path,
@@ -100,29 +101,21 @@ idempotently:
   the same way as `feature-fanout.js` (own `@orchestrator-managed <name> vN` marker, re-stamped on upgrade).
   These carry `__WORKDIR__`/`__REPO_SLUG__`/etc. placeholders that `arm-loop.sh` substitutes at ARM time, not
   at scaffold time — scaffolding them here does NOT install or start anything. See step 9 below for arming.
-- **`.claude/{agents,commands,hooks,scripts,skills}/`** (issue #128) — the runtime harness itself, vendored
-  wholesale from the plugin root, managed as ONE unit via a single top-level marker file
-  (`.claude/.orchestrator-vendor`, `@orchestrator-managed runtime-vendor vN`), restamped/re-vendored on the
-  same behind/never-downgrade ladder as every other managed row. **`.claude/scripts/arm-loop.sh` is excluded**
-  from this copy — it's already managed by its own row above with a different canonical source, so
-  double-vendoring it would create two disagreeing sources of truth for the same file. Once this tree is
-  vendored, the plugin's own `agents/commands/hooks/scripts/skills` are no longer on the runtime critical
-  path — a session reads the local `.claude/` copies instead, whether or not the plugin is enabled.
 - **`.claude/settings.json`** — **user-owned, created only if absent.** Wires the runtime hooks
   (`PostToolUse` lint + log-worker-tool, `Stop` test_affected, `PreToolUse` guard-git-add) to
-  `$CLAUDE_PROJECT_DIR/.claude/scripts/...`, plus baseline `permissions`/`sandbox`. Deliberately carries no
-  `enabledPlugins`/`extraKnownMarketplaces` — keep those only in a settings.json you maintain yourself while
-  installing/updating the plugin (e.g. the block from Step 1 of `docs/GETTING_STARTED.md`), not in the
-  runtime file, which must keep working with the plugin disabled. **Single-owner rule (issue #129):** the
-  plugin's `hooks/hooks.json` and this file's `hooks` block fire the SAME hooks — while both are active
-  (plugin enabled AND this file wired), every gate runs TWICE per turn (the expensive `Stop` `test_affected`
-  is the costly one). Only one may own the hooks at a time; this file is the intended steady-state owner,
-  the plugin's copy is only needed transiently to run `/orchestrator:setup`/`/orchestrator:sync`. **If you
-  already have a `settings.json`** (likely, since you needed `enabledPlugins` to install the plugin in the
-  first place), scaffold.sh reports it "kept" and leaves it completely untouched — merge the four hooks above
-  and the `permissions`/`sandbox` blocks from `.claude/skills/setup/templates/settings.json` into your
-  existing file by hand. Either way, **drop `enabledPlugins`/`extraKnownMarketplaces` for `orchestrator@recode`
-  as part of finishing this setup run** (see step 11) — don't leave both registrations active "for later."
+  `${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR/.claude}/scripts/...` (issue #134 — this plugin no longer vendors
+  `agents/commands/hooks/scripts/skills` locally, so the fallback resolves to the plugin cache whenever the
+  plugin is enabled, and only degrades to the local `.claude/` copy for the self-hosting case), plus baseline
+  `permissions`/`sandbox`. Deliberately carries no `enabledPlugins`/`extraKnownMarketplaces` — keep those only
+  in a settings.json you maintain yourself while installing/updating the plugin (e.g. the block from Step 1 of
+  `docs/GETTING_STARTED.md`). **Double-hook caveat (issue #129):** the plugin's `hooks/hooks.json` and this
+  file's `hooks` block fire the SAME hooks — since the plugin must now stay enabled for this file's hooks to
+  resolve at all, both fire on every turn (double gate execution; harmless but wasteful, notably the `Stop`
+  `test_affected` check). Tell the user they can drop this file's `hooks` block and rely solely on the
+  plugin's `hooks/hooks.json` if that matters to them. **If you already have a `settings.json`** (likely,
+  since you needed `enabledPlugins` to install the plugin in the first place), scaffold.sh reports it "kept"
+  and leaves it completely untouched — merge the four hooks above and the `permissions`/`sandbox` blocks from
+  `.claude/skills/setup/templates/settings.json` into your existing file by hand.
 - `.github/workflows/gates.yml` + `.github/actions/setup/action.yml` — the CI gate. Created if absent, left
   untouched if present.
 - `.gitignore` entries (append-if-missing, never duplicated): `.env`, `.env.*`, `!.env.example`,
@@ -133,11 +126,10 @@ Report the script's per-file summary (created / kept / restamped / up to date / 
 write the interview answers into `.claude/gates.json` (validate with `node -e "require('./.claude/gates.json')"`)
 and fill `CLAUDE.md` from its template sections (What this project is / Stack & layout mirroring the module map /
 Conventions / Merge policy mirroring `gates.json` / Don'ts) — propose both files and get an explicit "yes"
-before writing. Beyond that, **you (the interview) should not hand-edit `.claude/settings.json` or any vendored
-agent/script/hook** — `scaffold.sh` already handled those mechanically (settings.json created-if-absent,
-the runtime harness vendored); only the adapter and `CLAUDE.md` need YOUR project-specific answers written in.
-If scaffold.sh reported settings.json "kept" because one already existed, tell the user to merge the runtime
-hooks in by hand (see step 4 above) — don't do it for them silently.
+before writing. Beyond that, **you (the interview) should not hand-edit `.claude/settings.json`** —
+`scaffold.sh` already handled it mechanically (created-if-absent); only the adapter and `CLAUDE.md` need YOUR
+project-specific answers written in. If scaffold.sh reported settings.json "kept" because one already existed,
+tell the user to merge the runtime hooks in by hand (see above) — don't do it for them silently.
 
 ## 5. Gitignore verification
 `scaffold.sh` already appended the required entries in step 4. Spot-check with `git check-ignore <path>` for
@@ -254,11 +246,11 @@ gitignore entries, labels created, bot status, CI status, loop armed?, hardened?
 points in one line each: **label an issue `module:*` to queue it; approve the bot's PR to ship it.** Finish
 with an ordered checklist of everything only the human can complete, e.g.:
 - add `GH_BOT_TOKEN` to `.env` / add the bot as a write collaborator (if step 7 flagged it),
-- **disable the `orchestrator` plugin for everyday sessions now that `.claude/settings.json` owns the hooks
-  locally** — drop (or comment out) `enabledPlugins`/`extraKnownMarketplaces` for `orchestrator@recode`
-  wherever you set them (step 1's block). Until you do, the plugin's `hooks/hooks.json` and your local
-  `.claude/settings.json` both fire on every turn — double gate execution (issue #129). Re-enable only when
-  you next need to run `/orchestrator:setup` or `/orchestrator:sync`.
+- **keep the `orchestrator` plugin enabled** (issue #134 — this repo no longer vendors the runtime harness
+  locally, so agents/commands/hooks/scripts/skills only resolve while the plugin is loaded). If you'd rather
+  avoid the double-hook-execution caveat above (issue #129), drop the `hooks` block from `.claude/settings.json`
+  instead of disabling the plugin — disabling the plugin breaks everyday sessions now, not just
+  `/orchestrator:setup`/`/orchestrator:sync`.
 - set branch protection / required status checks (if wanted),
 - OS-level isolation from `docs/HARDENING.md` Step 2 (sudo / VM / WSL interop) if hardening,
 - if the daemon path was chosen: run `bash .claude/scripts/arm-loop.sh` in a real terminal outside Claude

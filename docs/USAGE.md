@@ -436,26 +436,37 @@ marketplace listing and let Claude Code update the installed plugin:
 /plugin marketplace update recode
 ```
 Then re-stamp the files `/orchestrator:setup` scaffolded into **your** repo (`gates.json`, `CLAUDE.md`, the
-fan-out workflow, the CI gate workflow, and — issue #128 — the vendored runtime harness: `agents/`,
-`commands/`, `hooks/`, `scripts/`, `skills/`) so they pick up any changes shipped in the update:
+fan-out workflow, the loop-daemon systemd unit templates + `arm-loop.sh`, the CI gate workflow) so they pick
+up any changes shipped in the update:
 ```
 /orchestrator:sync
 ```
 This compares the version markers `/orchestrator:setup` already scaffolded against what the current plugin
 ships and re-stamps anything behind — flagging local edits instead of clobbering them (see
-`.claude/skills/sync/SKILL.md`) — so an update refreshes managed files (e.g. `feature-fanout.js`, or the whole
-vendored runtime harness as one unit via its `.claude/.orchestrator-vendor` marker) without re-running the
-whole interview, and never touches your own `gates.json`/`CLAUDE.md`/`settings.json` (those are created once
-and left alone on every re-run).
+`.claude/skills/sync/SKILL.md`) — so an update refreshes managed files (e.g. `feature-fanout.js`) without
+re-running the whole interview, and never touches your own `gates.json`/`CLAUDE.md`/`settings.json` (those are
+created once and left alone on every re-run). It also detects and warns about local leftovers from an old
+vendored install (issue #134, see below) instead of silently deleting or restamping them.
 
-**The plugin only needs to be *enabled* to run `/orchestrator:setup`/`/orchestrator:sync`** — once the runtime
-harness is vendored, everyday sessions read `agents/commands/hooks/scripts/skills` straight out of your local
-`.claude/`, so the plugin doesn't need to load at session start at all. This matters because a loaded plugin
-pays its load cost (~18s for this one) on **every** session start regardless of how its hooks are wired; for
-anything time-sensitive — e.g. `claude remote-control` spawning a headless driver under a ~20-30s spawn-ack
-window — that cost can be the difference between the parent seeing the child come up and declaring it dead
-(see issue #128). Re-enable the plugin (or just leave it enabled — it's harmless, only slower) whenever you
-next want to run setup/sync for an update.
+**The `orchestrator` plugin must stay *enabled* for everyday sessions**, not just to run
+`/orchestrator:setup`/`/orchestrator:sync` — this repo does **not** vendor a local copy of `agents/`,
+`commands/`, `hooks/`, `scripts/`, `skills/` into your `.claude/` (issue #134 reverted issue #128's vendoring
+model). `agents/commands/hooks/scripts/skills` are read straight from the plugin cache
+(`${CLAUDE_PLUGIN_ROOT}`) on every session; disabling the plugin between updates now breaks everyday sessions,
+not just setup/sync. (Vendoring was reverted because nothing kept an unmanaged vendored copy updated outside
+`/orchestrator:sync`, and `resolve-roots.sh` deliberately makes a repo-tracked `.claude/scripts` layout win
+over `${CLAUDE_PLUGIN_ROOT}` — correct for self-hosting/worktree gate runs, but it meant a stale vendored copy
+permanently shadowed a fresh plugin install; see the reDeploy incident that prompted #134.)
+
+**If your repo was onboarded before #134 and still carries a local `.claude/{agents,commands,hooks,scripts,skills}`
+copy** (and possibly a `.claude/.orchestrator-vendor` marker), `/orchestrator:sync` flags it —
+`stale-vendor: ... safe to delete` if it's byte-identical to the plugin's shipped copy (just shadowing the
+plugin cache), or `stale-vendor conflict: ...` if it diverges (review before deleting — it may be a deliberate
+local override). Sync never deletes it for you. **Migration caveat:** if you've already armed the loop,
+deleting/refreshing files on disk is not enough — a running `pr-loop`/`claude-rc` systemd unit holds its OLD
+script in memory until its unit restarts, so restart both after cleaning up:
+`systemctl --user restart pr-loop-<repo-slug>.service claude-rc-<repo-slug>.service` (cf. the 2026-07-16
+reCode deploy-lag incident, issue #131).
 
 > **Maintainer note: bump `plugin.json`'s `version` on every real change.** `/plugin marketplace update` only
 > re-fetches plugin content when the plugin's version string actually changes (`.claude/.claude-plugin/plugin.json`

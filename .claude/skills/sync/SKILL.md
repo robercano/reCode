@@ -12,28 +12,44 @@ upgrade reach into repos that already onboarded, without a human re-running the 
 
 ## Ownership model (reuse the setup MANIFEST — do not invent a new scheme)
 See `.claude/skills/setup/templates/MANIFEST.md` for the authoritative ownership classes. Sync only acts on
-the **managed** rows — today: `feature-fanout.js` -> `.claude/workflows/feature-fanout.js`, (issue #102)
+the **managed** rows — today: `feature-fanout.js` -> `.claude/workflows/feature-fanout.js`, and (issue #102)
 the cron-less loop daemon's systemd unit templates + installer:
 `pr-loop.service` -> `.claude/systemd/pr-loop.service`, `claude-rc.service` -> `.claude/systemd/claude-rc.service`,
-and `arm-loop.sh` -> `.claude/scripts/arm-loop.sh`, and (issue #128) **the vendored runtime harness tree**:
-`agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` -> `.claude/agents/`, `.claude/commands/`,
-`.claude/hooks/`, `.claude/scripts/`, `.claude/skills/`, gated as ONE unit by a single top-level marker file,
-`.claude/.orchestrator-vendor`. All of these are reconciled by the exact same marker-version ladder below —
-the loop-daemon files and the runtime-vendor tree are ordinary managed rows, not a special case. It is
-designed so adding a new managed file later is a one-line addition to `sync.sh`'s managed-file table, not a
-rewrite. The one deliberate exception: `.claude/scripts/arm-loop.sh` is excluded from the runtime-vendor
-tree's copy/diff because it's already its own row with a different canonical source — see the comment on
-`VENDOR_DIRS` in `sync.sh`.
+and `arm-loop.sh` -> `.claude/scripts/arm-loop.sh`. All of these are reconciled by the exact same
+marker-version ladder below. It is designed so adding a new managed file later is a one-line addition to
+`sync.sh`'s managed-file table, not a rewrite.
 
 Re-stamping the loop-daemon templates only updates the checked-in files in the repo — it never touches an
 already-installed unit under `~/.config/systemd/user/` or restarts a running daemon. Tell the user to re-run
 `bash .claude/scripts/arm-loop.sh` (in a real terminal, per the sandbox caveat) after a restamp if they want
 the installed units to pick up the change.
 
-**The runtime-vendor tree is what lets the `orchestrator` plugin stay disabled between updates** (issue #128)
-— once vendored, a session reads agents/commands/hooks/scripts/skills off local disk, so the plugin only
-needs to be enabled to run this very skill (or `/orchestrator:setup`). Re-run this skill any time after
-updating the plugin marketplace listing to pull the latest runtime harness in.
+**This plugin does NOT vendor `agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` into the consumer repo**
+(issue #134 reverted issue #128's vendoring model) — those are read straight from the plugin cache
+(`${CLAUDE_PLUGIN_ROOT}`), so **the `orchestrator` plugin must stay enabled for everyday sessions**, not just
+to run this skill or `/orchestrator:setup`. Sync instead **detects and warns** about local leftovers of the
+old vendored tree (e.g. a repo onboarded before #134, or one that legitimately kept a local override) — see
+"Stale-vendor detection" below. It never deletes or restamps those directories itself.
+
+### Stale-vendor detection (issue #134)
+For each of `agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` still present locally under `.claude/`,
+`sync.sh`'s `detect_stale_vendor_copies` diffs it against the plugin's own shipped copy (excluding
+`arm-loop.sh`, separately managed above) and reports one of:
+- `stale-vendor: ... matches the plugin's shipped copy ... safe to delete` — a leftover from before #134 that
+  now only shadows the plugin cache (`resolve-roots.sh` deliberately makes a repo-tracked `.claude/scripts`
+  layout win over `${CLAUDE_PLUGIN_ROOT}`, which is exactly the failure mode that motivated #134 — see the
+  reDeploy incident it references). Sync does **not** delete it; tell the user it's safe to.
+- `stale-vendor conflict: ... diverges from the plugin's shipped copy` — treat this as a **possible deliberate
+  local override**, not assumed-safe-to-delete. Show the user the diff (`diff -rq <plugin copy> <local copy>`)
+  and let them decide whether it's a stale relic or a fix worth upstreaming (same "It's a generic improvement
+  → upstream it" guidance as `docs/MIGRATION.md`).
+- A leftover `.claude/.orchestrator-vendor` marker file (the old #128 vendor-version stamp) is called out
+  separately, once you've reconciled the flagged directories above.
+- **Migration caveat, always repeat when any stale-vendor line appears:** deleting/refreshing files on disk is
+  not enough for a repo whose loop is already armed — a running `pr-loop`/`claude-rc` systemd unit holds its
+  OLD script **in memory** until its unit restarts. Tell the user to run
+  `systemctl --user restart pr-loop-<repo-slug>.service claude-rc-<repo-slug>.service` after cleaning up (cf.
+  the 2026-07-16 reCode deploy-lag incident, issue #131).
 
 Sync **never** touches user-owned files, under any circumstance:
 - `.claude/gates.json`
@@ -82,6 +98,10 @@ version-marked managed files, not the "create if absent" ci files.
      normal per-file verdicts that still exit 0. Surface `error` lines to the user prominently and suggest
      reinstalling/updating the plugin rather than treating it as something to fix in the consumer repo.
 
+   Separately (not a per-file managed-row verdict), it also prints `stale-vendor:` / `stale-vendor conflict:`
+   lines — see "Stale-vendor detection" above — for any leftover local copy of the pre-#134 vendored tree,
+   or `stale-vendor: none found` if there is none.
+
 3. **Report a diff summary.** Relay the script's per-file summary verbatim to the user (it's already in the
    created/up-to-date/restamped/conflict/kept/skipped/error vocabulary above). Call out clearly which line, if
    any, changed on disk (`restamped`) versus which are informational only, and call out `error` lines as a
@@ -102,7 +122,9 @@ version-marked managed files, not the "create if absent" ci files.
 5. **Hand off.** Summarize: which managed files were checked, which were restamped, which need a human
    merge decision (and what you did about it, if anything), and which are already current. Remind the user
    that user-owned files (`gates.json`, `CLAUDE.md`, `settings.local.json`, `.claude/state/`) are never
-   touched by sync — those stay exactly as the human left them.
+   touched by sync — those stay exactly as the human left them. If any `stale-vendor` line was printed,
+   surface it prominently (don't bury it in the managed-file summary) along with the migration caveat about
+   restarting the armed systemd units after the human cleans up a stale local copy.
 
 ## Reference
 - `.claude/skills/setup/templates/MANIFEST.md` — the template -> destination map and ownership classes this
