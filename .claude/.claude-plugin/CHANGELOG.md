@@ -4,6 +4,39 @@ All notable changes to the `orchestrator` plugin are documented in this file. Fo
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions track `plugin.json` /
 `marketplace.json`.
 
+## [0.2.2] - 2026-07-17
+
+### Changed
+- **Stopped vendoring the runtime harness (issue #134, reverting issue #128).** `/orchestrator:setup`/
+  `/orchestrator:sync` no longer copy the plugin's own `agents/`, `commands/`, `hooks/`, `scripts/`,
+  `skills/` into a consumer repo's local `.claude/` — those now resolve at runtime via
+  `${CLAUDE_PLUGIN_ROOT}`, so **the plugin must stay enabled for everyday sessions**, not just to run
+  setup/sync. Nothing kept an unmanaged vendored copy updated, and `resolve-roots.sh` deliberately makes
+  a repo-tracked `.claude/scripts` layout win over `${CLAUDE_PLUGIN_ROOT}`, so a stale vendored copy
+  permanently shadowed a fresh plugin install (the reDeploy incident that prompted this issue). The
+  `.claude/.orchestrator-vendor` marker and the vendor copy machinery are removed.
+- **`pr-loop.service` → v2**: `ExecStart` now resolves `loop-daemon.sh` at unit-start time — prefers a
+  repo-tracked `.claude/scripts/loop-daemon.sh` (self-hosting), else the newest
+  `~/.claude/plugins/cache/*/orchestrator/*/scripts/loop-daemon.sh` — instead of assuming a vendored
+  repo-local copy.
+- **`.claude/settings.json` template**: hook commands now resolve via
+  `${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR/.claude}/scripts/...` instead of a hardcoded
+  `$CLAUDE_PROJECT_DIR/.claude/scripts/...` path, matching the no-longer-vendored layout.
+
+### Added
+- **`/orchestrator:sync` detects and warns about stale/unmanaged local copies** of the
+  now-unvendored `agents/commands/hooks/scripts/skills` directories instead of silently deleting or
+  restamping them — flags byte-identical leftovers as safe to delete, diverging copies as a possible
+  deliberate override, and calls out a leftover `.claude/.orchestrator-vendor` marker.
+
+### Notes for downstream installs
+- If your repo onboarded while vendoring was active (between #128 and #134), run `/orchestrator:sync`
+  to get the stale-vendor report, then see `docs/MIGRATION.md` → "If you onboarded between issues #128
+  and #134" for cleanup steps. **Keep the plugin enabled** after cleaning up.
+- **Migration caveat:** deleting/refreshing files on disk is not enough for a repo with the loop already
+  armed — a running `pr-loop`/`claude-rc` systemd unit holds its OLD script in memory until its unit
+  restarts: `systemctl --user restart pr-loop-<repo-slug>.service claude-rc-<repo-slug>.service`.
+
 ## [0.2.1] - 2026-07-15
 
 Everything shipped since 0.2.0. Headline: the driver now enforces a one-shot contract (no turn
