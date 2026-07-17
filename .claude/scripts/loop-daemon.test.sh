@@ -154,6 +154,29 @@ check "verify_and_classify_post_exit: timeout rc=124 passes extra through unchan
 vp_spawnerr="$(verify_and_classify_post_exit 'advance issue=5' 127 'result=spawn-error rc=127')"
 check "verify_and_classify_post_exit: spawn-error rc=127 passes extra through unchanged" [ "$vp_spawnerr" = "result=spawn-error rc=127" ]
 
+vp_cifix="$(verify_and_classify_post_exit 'ci-fix pr=23' 0 'result=exit rc=0')"
+check "verify_and_classify_post_exit: ci-fix verdict passes extra through unchanged (issue #96 -- no fresh branch/worktree to classify)" [ "$vp_cifix" = "result=exit rc=0" ]
+
+# --- driver_unit_name / verdict_from_unit_name (issue #119 pt 1; issue #96) --
+# ci-fix gets its OWN distinct unit name (pr-loop-driver-cifix-pr<N>, not the
+# feedback shape pr-loop-driver-pr<N>) so a feedback driver and a ci-fix driver
+# on the same PR number can never collide in naming or reattach -- and the
+# reverse mapping must be an exact inverse.
+un_advance="$(driver_unit_name 'advance issue=42')"
+check "driver_unit_name: advance issue=42 -> pr-loop-driver-issue42" [ "$un_advance" = "pr-loop-driver-issue42" ]
+un_feedback="$(driver_unit_name 'feedback pr=9')"
+check "driver_unit_name: feedback pr=9 -> pr-loop-driver-pr9" [ "$un_feedback" = "pr-loop-driver-pr9" ]
+un_cifix="$(driver_unit_name 'ci-fix pr=9')"
+check "driver_unit_name: ci-fix pr=9 -> pr-loop-driver-cifix-pr9 (distinct from feedback's same PR number)" [ "$un_cifix" = "pr-loop-driver-cifix-pr9" ]
+check "driver_unit_name: ci-fix and feedback unit names for the SAME PR number never collide" bash -c '[ "$1" != "$2" ]' _ "$un_cifix" "$un_feedback"
+
+vun_advance="$(verdict_from_unit_name 'pr-loop-driver-issue42.service')"
+check "verdict_from_unit_name: pr-loop-driver-issue42.service -> advance issue=42 (exact inverse)" [ "$vun_advance" = "advance issue=42" ]
+vun_feedback="$(verdict_from_unit_name 'pr-loop-driver-pr9.service')"
+check "verdict_from_unit_name: pr-loop-driver-pr9.service -> feedback pr=9 (exact inverse)" [ "$vun_feedback" = "feedback pr=9" ]
+vun_cifix="$(verdict_from_unit_name 'pr-loop-driver-cifix-pr9.service')"
+check "verdict_from_unit_name: pr-loop-driver-cifix-pr9.service -> ci-fix pr=9 (exact inverse)" [ "$vun_cifix" = "ci-fix pr=9" ]
+
 # =============================================================================
 # (B) Integration checks: real subprocess, fake loop-event.sh + fake claude.
 # =============================================================================
@@ -326,6 +349,37 @@ ledger4="$dir4/.claude/state/loop-runs.log"
 check "scenario 4 (feedback, no parseable session_id): ledger records session=unknown" bash -c '
   grep -Eq "^pid=[0-9]+ session=unknown verdict=feedback pr=9 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"
 ' _ "$ledger4"
+
+# ---------------------------------------------------------------------------
+# 4b. action=ci-fix pr=N (issue #96): same driver path as feedback, a distinct
+#     verdict text, and its own transient unit name
+#     (pr-loop-driver-cifix-pr<N>, not pr-loop-driver-pr<N>) so it can never
+#     collide with a feedback driver on the same PR number.
+# ---------------------------------------------------------------------------
+prompt4b_dir="$work/scenario4b-support"
+mkdir -p "$prompt4b_dir"
+printf 'Run the CI-FIX step for PR #23.
+' > "$prompt4b_dir/prompt.txt"
+dir4b="$(new_fixture scenario4b "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=ci-fix pr=23'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt4b_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir4b" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir4b" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir4b" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-cifix-23\"}"
+exit 0'
+run_daemon_once "$dir4b" >/dev/null 2>&1
+ledger4b="$dir4b/.claude/state/loop-runs.log"
+check "scenario 4b (ci-fix): ledger records verdict=ci-fix pr=23" bash -c '
+  grep -Eq "^pid=[0-9]+ session=sess-cifix-23 verdict=ci-fix pr=23 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"
+' _ "$ledger4b"
+check "scenario 4b: prompt file was cleaned up after the driver ran" [ ! -f "$prompt4b_dir/prompt.txt" ]
 
 # ---------------------------------------------------------------------------
 # 5. Driver timeout: fake timeout stub exits 124 (as GNU timeout does on a

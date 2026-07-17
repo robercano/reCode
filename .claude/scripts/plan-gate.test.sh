@@ -69,6 +69,10 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
+  cat > "$scripts/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
   cat > "$scripts/bot-gh.sh" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
@@ -135,6 +139,7 @@ cat > "$dirNoPlanKey/.claude/gates.json" <<'EOF'
 }
 EOF
 cp "$dirOff/.claude/scripts/pr-feedback.sh" "$scriptsNoPlanKey/pr-feedback.sh"
+cp "$dirOff/.claude/scripts/pr-ci-fix.sh" "$scriptsNoPlanKey/pr-ci-fix.sh"
 cp "$dirOff/.claude/scripts/bot-gh.sh" "$scriptsNoPlanKey/bot-gh.sh"
 chmod +x "$scriptsNoPlanKey"/*.sh
 git -C "$dirNoPlanKey" init -q -b main

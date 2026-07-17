@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # loop-tick.test.sh — offline smoke test for loop-tick.sh (issue #81).
 #
-# loop-tick.sh's own logic is just: run its four sibling step scripts, parse
-# census/pr-feedback output, and emit one verdict line (plus the spawn lock).
-# So this test doesn't touch real gh/network — it builds a throwaway
-# .claude/scripts/ directory containing the REAL loop-tick.sh + resolve-roots.sh
-# next to FAKE loop-census.sh / notify-poll.sh / merge-ready.sh / pr-feedback.sh
-# that print canned, scripted output, then asserts the final verdict line and
-# the spawn-lock file behavior for each scenario.
+# loop-tick.sh's own logic is just: run its five sibling step scripts, parse
+# census/pr-feedback/pr-ci-fix output, and emit one verdict line (plus the
+# spawn lock). So this test doesn't touch real gh/network — it builds a
+# throwaway .claude/scripts/ directory containing the REAL loop-tick.sh +
+# resolve-roots.sh next to FAKE loop-census.sh / notify-poll.sh /
+# merge-ready.sh / pr-feedback.sh / pr-ci-fix.sh (issue #96) that print
+# canned, scripted output, then asserts the final verdict line and the
+# spawn-lock file behavior for each scenario.
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/loop-tick.test.sh
@@ -313,6 +314,55 @@ check "scenario 12: action=feedback tick record captures pr number and cadence" 
   if (obj.pr !== "3") throw new Error("pr mismatch: " + JSON.stringify(obj));
   if (obj.cadence !== "WATCH") throw new Error("cadence mismatch: " + JSON.stringify(obj));
 ' "$ticks12"
+
+# ---------------------------------------------------------------------------
+# 12b. CI-fix candidate present, no feedback, nothing advance_ready -> picked
+#      as action=ci-fix pr=N, and (mirroring scenario 4's "no spawn lock" for
+#      feedback) never writes the advance spawn lock (issue #96).
+# ---------------------------------------------------------------------------
+dir12b="$(new_fixture scenario12b 'open_prs=1
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '' "$(printf '9	feat/issue-9-x	build	sha9
+4	feat/issue-4-y	build	sha4')")"
+out12b="$(run_tick "$dir12b")"
+check "scenario 12b (ci-fix, lowest-numbered PR wins): verdict is action=ci-fix pr=4" bash -c '[ "$(printf "%s
+" "$1" | tail -1)" = "action=ci-fix pr=4" ]' _ "$out12b"
+check "scenario 12b: no spawn lock written (advance never attempted)" [ ! -e "$dir12b/../state/loop-advance.lock" ]
+
+# ---------------------------------------------------------------------------
+# 12c. CI-fix wins over an ALSO-ready advance (issue #96 precedence: ci-fix >
+#      advance), same shape as scenario 4's feedback-beats-advance check.
+# ---------------------------------------------------------------------------
+dir12c="$(new_fixture scenario12c 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=7 branch=none title=Some issue
+advance_ready=7
+cadence=FAST cron=* * * * *' '' "$(printf '11	feat/issue-11-x	build	sha11')")"
+out12c="$(run_tick "$dir12c")"
+check "scenario 12c (ci-fix beats an also-ready advance): verdict is action=ci-fix pr=11" bash -c '[ "$(printf "%s
+" "$1" | tail -1)" = "action=ci-fix pr=11" ]' _ "$out12c"
+check "scenario 12c: no spawn lock written (advance never attempted)" [ ! -e "$dir12c/../state/loop-advance.lock" ]
+
+# action=ci-fix tick record: pr number captured, cadence round-trips.
+dir12d="$(new_fixture scenario12d 'open_prs=1
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '' "$(printf '5	feat/issue-5-x	build	sha5')")"
+ticks12d="$work/scenario12d-ticks.jsonl"
+out12d="$(CLAUDE_TICKS_FILE="$ticks12d" run_tick "$dir12d")"
+check "scenario 12d: verdict is still the LAST stdout line for action=ci-fix" bash -c '[ "$(printf "%s
+" "$1" | tail -1)" = "action=ci-fix pr=5" ]' _ "$out12d"
+check "scenario 12d: action=ci-fix tick record captures pr number and cadence" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.action !== "ci-fix") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (obj.pr !== "5") throw new Error("pr mismatch: " + JSON.stringify(obj));
+  if (obj.cadence !== "WATCH") throw new Error("cadence mismatch: " + JSON.stringify(obj));
+' "$ticks12d"
 
 # ---------------------------------------------------------------------------
 # 11. Rotation: LOOP_TICKS_MAX_LINES caps the tick log to the last N lines
@@ -693,6 +743,10 @@ build_real_census_fixture() {
 }
 EOF
   cat > "$scripts/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/pr-ci-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF

@@ -121,6 +121,30 @@ check "scenario 3: prompt file forbids ending the turn before the work product e
 check "scenario 3: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3"
 
 # ---------------------------------------------------------------------------
+# 3b. action=ci-fix pr=N (issue #96) -> same one-shot contract, CI-FIX
+#     wording, in-flight-guard/marker-comment instructions, LOOP_MODEL honored.
+# ---------------------------------------------------------------------------
+dir3b="$(new_fixture scenario3b 'cadence=FAST cron=* * * * *
+action=ci-fix pr=11')"
+out3b="$(cd "$dir3b" && PATH="/usr/bin:/bin" LOOP_MODEL=opus bash .claude/scripts/loop-event.sh)"; rc3b=$?
+check "scenario 3b (ci-fix): exits 0" [ "$rc3b" -eq 0 ]
+check "scenario 3b: emits loop-event: action=ci-fix pr=11" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: action=ci-fix pr=11"' _ "$out3b"
+check "scenario 3b: LOOP_MODEL is honored (model=opus)" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: model=opus"' _ "$out3b"
+pf3b="$(printf '%s
+' "$out3b" | sed -n 's/^loop-event: prompt-file=//p')"
+check "scenario 3b: prompt file mentions PR #11" bash -c 'grep -q "PR #11" "$1"' _ "$pf3b"
+check "scenario 3b: prompt file says CI-FIX step, and Do NOT merge" bash -c 'grep -q "CI-FIX step" "$1" && grep -q "Do NOT merge" "$1"' _ "$pf3b"
+check "scenario 3b: prompt file mandates the claude-ci-fixing in-flight guard label" bash -c 'grep -q "claude-ci-fixing" "$1"' _ "$pf3b"
+check "scenario 3b: prompt file mandates the claude-ci-addressed marker comment with the head SHA" bash -c 'grep -q "claude-ci-addressed" "$1"' _ "$pf3b"
+
+# Same one-shot contract clauses, on the CI-FIX prompt this time.
+check "scenario 3b: prompt file mandates FOREGROUND-only spawn (run_in_background: false)" bash -c 'grep -qi "FOREGROUND" "$1" && grep -q "run_in_background: false" "$1"' _ "$pf3b"
+check "scenario 3b: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf3b"
+check "scenario 3b: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3b"
+
+# ---------------------------------------------------------------------------
 # 4. Garbage verdict line -> non-zero exit, action=none fallback line, no
 #    prompt-file (never spawns on a verdict it can't parse).
 # ---------------------------------------------------------------------------
