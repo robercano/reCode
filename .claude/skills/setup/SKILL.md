@@ -13,6 +13,14 @@ version-controlled inside the consumer's own repo: the project-specific adapter,
 workflow file, and GitHub Actions YAML. This skill's job is to scaffold exactly that non-distributable residue,
 on top of the interview below.
 
+**Also (issue #128): this skill vendors the plugin's own runtime harness** — `agents/`, `commands/`, `hooks/`,
+`scripts/`, `skills/` — wholesale into the consumer's local `.claude/`, plus a `.claude/settings.json` that
+wires the runtime hooks locally. A plugin loads (and pays its load cost) on every session start while it's
+enabled, no matter how its hooks are wired, so the only way to remove that cost from the runtime path is to
+stop depending on the plugin being loaded at all once setup is done. **The `orchestrator` plugin only needs to
+stay enabled to RUN `/orchestrator:setup`/`/orchestrator:sync`** (the install/update channel) — not for
+everyday sessions. See step 4 below.
+
 Be conversational but efficient. Use the `AskUserQuestion` tool for discrete choices; ask for free-text
 (names, paths, shell commands) in plain prose. **Never invent values** — if you don't know a command or path,
 ask. **Propose the final files and get an explicit "yes" before writing.** All `gh` runs through
@@ -85,6 +93,24 @@ idempotently:
   the same way as `feature-fanout.js` (own `@orchestrator-managed <name> vN` marker, re-stamped on upgrade).
   These carry `__WORKDIR__`/`__REPO_SLUG__`/etc. placeholders that `arm-loop.sh` substitutes at ARM time, not
   at scaffold time — scaffolding them here does NOT install or start anything. See step 9 below for arming.
+- **`.claude/{agents,commands,hooks,scripts,skills}/`** (issue #128) — the runtime harness itself, vendored
+  wholesale from the plugin root, managed as ONE unit via a single top-level marker file
+  (`.claude/.orchestrator-vendor`, `@orchestrator-managed runtime-vendor vN`), restamped/re-vendored on the
+  same behind/never-downgrade ladder as every other managed row. **`.claude/scripts/arm-loop.sh` is excluded**
+  from this copy — it's already managed by its own row above with a different canonical source, so
+  double-vendoring it would create two disagreeing sources of truth for the same file. Once this tree is
+  vendored, the plugin's own `agents/commands/hooks/scripts/skills` are no longer on the runtime critical
+  path — a session reads the local `.claude/` copies instead, whether or not the plugin is enabled.
+- **`.claude/settings.json`** — **user-owned, created only if absent.** Wires the runtime hooks
+  (`PostToolUse` lint + log-worker-tool, `Stop` test_affected, `PreToolUse` guard-git-add) to
+  `$CLAUDE_PROJECT_DIR/.claude/scripts/...`, plus baseline `permissions`/`sandbox`. Deliberately carries no
+  `enabledPlugins`/`extraKnownMarketplaces` — keep those only in a settings.json you maintain yourself while
+  installing/updating the plugin (e.g. the block from Step 1 of `docs/GETTING_STARTED.md`), not in the
+  runtime file, which must keep working with the plugin disabled. **If you already have a `settings.json`**
+  (likely, since you needed `enabledPlugins` to install the plugin in the first place), scaffold.sh reports it
+  "kept" and leaves it completely untouched — merge the four hooks above and the `permissions`/`sandbox`
+  blocks from `.claude/skills/setup/templates/settings.json` into your existing file by hand, then it's safe
+  to drop `enabledPlugins`/`extraKnownMarketplaces` from it once you don't need the plugin loaded anymore.
 - `.github/workflows/gates.yml` + `.github/actions/setup/action.yml` — the CI gate. Created if absent, left
   untouched if present.
 - `.gitignore` entries (append-if-missing, never duplicated): `.env`, `.env.*`, `!.env.example`,
@@ -95,8 +121,11 @@ Report the script's per-file summary (created / kept / restamped / up to date / 
 write the interview answers into `.claude/gates.json` (validate with `node -e "require('./.claude/gates.json')"`)
 and fill `CLAUDE.md` from its template sections (What this project is / Stack & layout mirroring the module map /
 Conventions / Merge policy mirroring `gates.json` / Don'ts) — propose both files and get an explicit "yes"
-before writing. Do **not** touch `.claude/settings.json` or any generic agent/script — only the adapter and
-`CLAUDE.md` are project-specific here.
+before writing. Beyond that, **you (the interview) should not hand-edit `.claude/settings.json` or any vendored
+agent/script/hook** — `scaffold.sh` already handled those mechanically (settings.json created-if-absent,
+the runtime harness vendored); only the adapter and `CLAUDE.md` need YOUR project-specific answers written in.
+If scaffold.sh reported settings.json "kept" because one already existed, tell the user to merge the runtime
+hooks in by hand (see step 4 above) — don't do it for them silently.
 
 ## 5. Gitignore verification
 `scaffold.sh` already appended the required entries in step 4. Spot-check with `git check-ignore <path>` for

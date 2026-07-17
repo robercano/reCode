@@ -70,10 +70,34 @@ MANAGED_FILES=(
   "arm-loop.sh|.claude/scripts/arm-loop.sh|@orchestrator-managed arm-loop v"
 )
 
+# --- runtime harness vendor: ONE managed unit, not a row in MANAGED_FILES (issue #128) --
+# Unlike everything in MANAGED_FILES above (a single template file -> single destination
+# file), the runtime harness vendor is a whole-TREE copy — the plugin's own `agents/`,
+# `commands/`, `hooks/`, `scripts/`, `skills/` subtrees, copied wholesale from the plugin
+# root (not from templates_dir) into the consumer's `.claude/`. It is gated by ONE
+# top-level marker file, `.claude/.orchestrator-vendor`, reusing the exact same
+# managed_version_of ladder as MANAGED_FILES, just applied to a directory-tree copy
+# instead of a single `cp`. See scaffold.sh's matching "runtime harness vendor" section
+# and `.claude/skills/setup/templates/MANIFEST.md` for the full rationale.
+#
+# EXCEPTION: `.claude/scripts/arm-loop.sh` is excluded from this tree copy/diff — it is
+# already a MANAGED_FILES row above with its own canonical template (`templates/arm-loop.sh`,
+# placeholder-substituted at ARM time), which can legitimately differ from this plugin
+# repo's own live self-hosting copy of arm-loop.sh. Double-managing the same destination
+# path from two different pristine sources would make the two mechanisms disagree about
+# what "up to date" even means for that one file.
+VENDOR_DIRS=(agents commands hooks scripts skills)
+VENDOR_MARKER_PREFIX="@orchestrator-managed runtime-vendor v"
+plugin_root="$(cd "$script_dir/../.." && pwd)"
+vendor_marker_src="$plugin_root/.orchestrator-vendor"
+vendor_marker_dst="$target_root/.claude/.orchestrator-vendor"
+vendor_dest_rel=".claude/{agents,commands,hooks,scripts,skills}"
+
 # --- user-owned files: NEVER written by sync, only reported for visibility ---------
 USER_OWNED_FILES=(
   ".claude/gates.json"
   "CLAUDE.md"
+  ".claude/settings.json"
   ".claude/settings.local.json"
   ".claude/state/"
 )
@@ -130,6 +154,44 @@ has_local_edits() {
   a="$(strip_marker_line "$installed" "$prefix")"
   b="$(strip_marker_line "$template" "$prefix")"
   [ "$a" != "$b" ]
+}
+
+has_local_edits_vendor() {
+  # Directory-tree analog of has_local_edits, used only for the runtime harness vendor
+  # (issue #128): recursively diffs each VENDOR_DIRS subtree between the installed
+  # .claude/ and the plugin root's own .claude/, excluding arm-loop.sh (separately
+  # managed — see the EXCEPTION comment on VENDOR_DIRS above). Any residual difference —
+  # including an extra locally-added file — counts as a local edit, same conservative
+  # philosophy as has_local_edits.
+  local installed_claude="$1" plugin_claude="$2" d
+  for d in "${VENDOR_DIRS[@]}"; do
+    [ -d "$plugin_claude/$d" ] || continue
+    if ! diff -rq -x arm-loop.sh "$plugin_claude/$d" "$installed_claude/$d" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+copy_vendor_dirs() {
+  # Copies each VENDOR_DIRS subtree from the plugin root into $target_root/.claude,
+  # preserving executable bits (cp -a), skipping arm-loop.sh, then stamps the marker file
+  # last so a failure mid-copy never leaves a stamped-but-partial tree. Mirrors
+  # scaffold.sh's copy_vendor_dirs exactly.
+  local d entry base
+  for d in "${VENDOR_DIRS[@]}"; do
+    [ -d "$plugin_root/$d" ] || continue
+    mkdir -p "$target_root/.claude/$d"
+    for entry in "$plugin_root/$d"/* "$plugin_root/$d"/.[!.]*; do
+      [ -e "$entry" ] || continue
+      base="$(basename "$entry")"
+      if [ "$d" = "scripts" ] && [ "$base" = "arm-loop.sh" ]; then
+        continue
+      fi
+      cp -a "$entry" "$target_root/.claude/$d/$base"
+    done
+  done
+  cp "$vendor_marker_src" "$vendor_marker_dst"
 }
 
 # --- 1. managed files: compare marker version + content, act per the ladder below --
@@ -199,6 +261,53 @@ for entry in "${MANAGED_FILES[@]}"; do
     echo "  restamped:  $dest_rel v$installed_version -> v$shipped_version"
   fi
 done
+
+# --- 1b. runtime harness vendor: same ladder, applied to a whole tree via ONE marker ---
+if [ ! -d "$plugin_root/agents" ]; then
+  echo "  error:      $vendor_dest_rel — no shipped plugin root at $plugin_root; plugin install looks broken" >&2
+  had_broken_install=1
+elif [ "$plugin_root" = "$target_root/.claude" ]; then
+  # Running the vendored copy of sync.sh directly (CLAUDE_PLUGIN_ROOT unset, so the
+  # ${CLAUDE_PLUGIN_ROOT:-.claude} fallback resolved to this repo's own .claude) — there is
+  # no distinct plugin root to re-vendor FROM.
+  echo "  kept:       $vendor_dest_rel — running from an already-vendored copy, no distinct plugin root to re-vendor from; enable the plugin and re-run to pull updates"
+else
+  vendor_shipped_version="$(managed_version_of "$vendor_marker_src" "$VENDOR_MARKER_PREFIX")"
+  if ! is_sane_version "$vendor_shipped_version"; then
+    echo "  error:      $vendor_dest_rel — shipped marker $vendor_marker_src has no valid @orchestrator-managed marker (got \"$vendor_shipped_version\"); plugin install looks broken" >&2
+    had_broken_install=1
+  elif [ ! -f "$vendor_marker_dst" ]; then
+    echo "  missing:    $vendor_dest_rel — not present; run /orchestrator:setup to create it"
+  else
+    vendor_installed_version="$(managed_version_of "$vendor_marker_dst" "$VENDOR_MARKER_PREFIX")"
+    if [ -z "$vendor_installed_version" ]; then
+      vendor_installed_version=0
+    elif ! is_sane_version "$vendor_installed_version"; then
+      echo "  conflict:   $vendor_dest_rel has a malformed or out-of-range version marker (\"$vendor_installed_version\") — needs-merge, left untouched"
+      vendor_installed_version=""
+    fi
+
+    if [ -n "$vendor_installed_version" ]; then
+      if [ "$vendor_installed_version" -gt "$vendor_shipped_version" ]; then
+        echo "  kept:       $vendor_dest_rel is v$vendor_installed_version, newer than this plugin's v$vendor_shipped_version — left untouched"
+      elif [ "$vendor_installed_version" -eq "$vendor_shipped_version" ]; then
+        if has_local_edits_vendor "$target_root/.claude" "$plugin_root"; then
+          echo "  conflict:   $vendor_dest_rel is marked v$vendor_installed_version but content diverges from the pristine v$vendor_shipped_version tree — needs-merge, left untouched"
+        else
+          echo "  up to date: $vendor_dest_rel already v$vendor_shipped_version"
+        fi
+      else
+        # vendor_installed_version < vendor_shipped_version
+        if has_local_edits_vendor "$target_root/.claude" "$plugin_root"; then
+          echo "  conflict:   $vendor_dest_rel is v$vendor_installed_version (behind v$vendor_shipped_version) AND has local edits — needs-merge, left untouched"
+        else
+          copy_vendor_dirs
+          echo "  restamped:  $vendor_dest_rel v$vendor_installed_version -> v$vendor_shipped_version"
+        fi
+      fi
+    fi
+  fi
+fi
 
 # --- 2. user-owned files: report only, never write ----------------------------------
 for f in "${USER_OWNED_FILES[@]}"; do

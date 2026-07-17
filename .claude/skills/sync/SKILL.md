@@ -12,21 +12,33 @@ upgrade reach into repos that already onboarded, without a human re-running the 
 
 ## Ownership model (reuse the setup MANIFEST — do not invent a new scheme)
 See `.claude/skills/setup/templates/MANIFEST.md` for the authoritative ownership classes. Sync only acts on
-the **managed** rows — today: `feature-fanout.js` -> `.claude/workflows/feature-fanout.js`, and (issue #102)
+the **managed** rows — today: `feature-fanout.js` -> `.claude/workflows/feature-fanout.js`, (issue #102)
 the cron-less loop daemon's systemd unit templates + installer:
 `pr-loop.service` -> `.claude/systemd/pr-loop.service`, `claude-rc.service` -> `.claude/systemd/claude-rc.service`,
-and `arm-loop.sh` -> `.claude/scripts/arm-loop.sh`. All four are reconciled by the exact same marker-version
-ladder below — the loop-daemon files are ordinary managed files, not a special case. It is designed so adding
-a new managed file later is a one-line addition to `sync.sh`'s managed-file table, not a rewrite.
+and `arm-loop.sh` -> `.claude/scripts/arm-loop.sh`, and (issue #128) **the vendored runtime harness tree**:
+`agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` -> `.claude/agents/`, `.claude/commands/`,
+`.claude/hooks/`, `.claude/scripts/`, `.claude/skills/`, gated as ONE unit by a single top-level marker file,
+`.claude/.orchestrator-vendor`. All of these are reconciled by the exact same marker-version ladder below —
+the loop-daemon files and the runtime-vendor tree are ordinary managed rows, not a special case. It is
+designed so adding a new managed file later is a one-line addition to `sync.sh`'s managed-file table, not a
+rewrite. The one deliberate exception: `.claude/scripts/arm-loop.sh` is excluded from the runtime-vendor
+tree's copy/diff because it's already its own row with a different canonical source — see the comment on
+`VENDOR_DIRS` in `sync.sh`.
 
 Re-stamping the loop-daemon templates only updates the checked-in files in the repo — it never touches an
 already-installed unit under `~/.config/systemd/user/` or restarts a running daemon. Tell the user to re-run
 `bash .claude/scripts/arm-loop.sh` (in a real terminal, per the sandbox caveat) after a restamp if they want
 the installed units to pick up the change.
 
+**The runtime-vendor tree is what lets the `orchestrator` plugin stay disabled between updates** (issue #128)
+— once vendored, a session reads agents/commands/hooks/scripts/skills off local disk, so the plugin only
+needs to be enabled to run this very skill (or `/orchestrator:setup`). Re-run this skill any time after
+updating the plugin marketplace listing to pull the latest runtime harness in.
+
 Sync **never** touches user-owned files, under any circumstance:
 - `.claude/gates.json`
 - `CLAUDE.md`
+- `.claude/settings.json`
 - `.claude/settings.local.json`
 - `.claude/state/`
 

@@ -1,0 +1,173 @@
+{
+  "_README": "Generic harness settings. Hooks call .claude/scripts/gate.sh (commands live in .claude/gates.json) — you usually edit gates.json, not this file. The 'allow' list pre-approves the agent command surface so PARALLEL workers never block on permission prompts (an unapproved command in one subagent stalls the fan-out) and so the harness never has to persist a grant into this tracked file mid-run. Build/lint/test are covered generically via the gate.sh wildcard; if your agents run package-manager/build tools DIRECTLY (not via gate.sh), add those prefixes too — e.g. 'Bash(pnpm -r:*)', 'Bash(forge test:*)', 'Bash(cargo test:*)', 'Bash(go test:*)'. NOTE: the harness OWNS this file at runtime — it may rewrite the working-tree copy with its own session grant list, so the COMMITTED version is the source of truth and hand-edits won't persist mid-session. To commit a clean version despite that rewrite, stage via the git index: `sha=$(git hash-object -w .claude/settings.json) && git update-index --cacheinfo 100644,$sha,.claude/settings.json`. See docs/USAGE.md and the project's notes on concurrent config writes (anthropics/claude-code#29217). NOTE (issue #128): this file is deliberately created ONLY if you don't already have one, and it deliberately does NOT set enabledPlugins/extraKnownMarketplaces — those belong only in a settings.json you maintain yourself while installing/updating the orchestrator plugin, never in the runtime file that must work with the plugin disabled.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh\" lint"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/log-worker-tool.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh\" test_affected"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/guard-git-add.py\""
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read(//**)",
+      "Bash(bash .claude/scripts/gate.sh:*)",
+      "Bash(bash .claude/scripts/notify-poll.sh:*)",
+      "Bash(bash .claude/scripts/pr-feedback.sh:*)",
+      "Bash(bash .claude/scripts/merge-ready.sh:*)",
+      "Bash(bash .claude/scripts/loop-tick.sh:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git add:*)",
+      "Bash(git restore:*)",
+      "Bash(git stash:*)",
+      "Bash(git commit:*)",
+      "Bash(git merge:*)",
+      "Bash(git rebase:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(git push:*)",
+      "Bash(git worktree:*)",
+      "Bash(git remote:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git hash-object:*)",
+      "Bash(git update-index:*)",
+      "Bash(gh issue:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh label:*)",
+      "Bash(gh repo view:*)",
+      "Bash(gh auth status)",
+      "Bash(ls:*)",
+      "Bash(pwd)",
+      "Bash(mkdir:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(wc:*)",
+      "Bash(chmod:*)"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(doas:*)",
+      "Bash(su:*)",
+      "Bash(docker:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ncat:*)",
+      "Bash(telnet:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(powershell:*)",
+      "Bash(pwsh:*)",
+      "Bash(explorer.exe:*)",
+      "Bash(wsl.exe:*)",
+      "Bash(/mnt:*)",
+      "Bash(npm publish:*)",
+      "Bash(pnpm publish:*)",
+      "Bash(yarn publish:*)",
+      "Bash(gh auth token:*)",
+      "Bash(gh auth token)",
+      "Bash(gh secret:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(rm -rf:*)",
+      "Read(//**/.env)",
+      "Read(//**/.env.*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/gcloud/**)",
+      "Read(~/.kube/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.npmrc)",
+      "Read(~/.docker/config.json)",
+      "Read(//mnt/**)",
+      "Edit(//mnt/**)",
+      "Write(//mnt/**)",
+      "Edit(//etc/**)",
+      "Write(//etc/**)"
+    ]
+  },
+  "sandbox": {
+    "_README": "OS sandbox (bubblewrap on Linux/WSL2) confines Bash writes to the repo + temp dirs and blocks reading Windows /mnt + credential dirs, so commands run contained. Needs `bwrap` (+ `socat`) installed; with allowUnsandboxedCommands the harness falls back to unsandboxed when bwrap is absent. Pairs with the permissions deny list (always enforced) as defense-in-depth. NOTE: .env is intentionally NOT denied at the shell level here — the loop scripts source it for GH_BOT_TOKEN; it is denied only to the Read tool in permissions above.",
+    "enabled": true,
+    "allowUnsandboxedCommands": true,
+    "filesystem": {
+      "denyRead": [
+        "/mnt"
+      ]
+    },
+    "credentials": {
+      "files": [
+        {
+          "path": "~/.ssh",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.aws",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.config/gcloud",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.kube",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.gnupg",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.npmrc",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.docker/config.json",
+          "mode": "deny"
+        }
+      ]
+    }
+  }
+}

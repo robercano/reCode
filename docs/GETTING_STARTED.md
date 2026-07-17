@@ -48,13 +48,25 @@ Then, in Claude Code, inside **your own project**:
 (`/plugin` alone opens an interactive picker if you'd rather browse marketplaces/plugins than type the
 commands above.)
 
+Enabling the plugin here is what lets you run `/orchestrator:setup` in Step 2 — that step also **vendors the
+plugin's own runtime harness into your repo's local `.claude/`**, so afterward the plugin only needs to stay
+enabled to run `/orchestrator:setup`/`/orchestrator:sync` again later (the install/update channel), not for
+day-to-day sessions. See Step 2.
+
 ## Step 2 — Onboard: run `/orchestrator:setup`
 With the plugin enabled, run:
 ```
 /orchestrator:setup
 ```
-It interviews you, then writes the files a plugin **cannot** carry into your repo — agents, commands, hooks,
-and scripts ship *with* the plugin, so there's nothing to copy or wire by hand for those. What the interview
+It interviews you, then writes the files a plugin **cannot** carry into your repo, and **vendors the plugin's
+runtime harness — `agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` — wholesale into your local
+`.claude/`** so a session reads them off disk without the plugin loaded (issue #128: an enabled plugin loads,
+and pays its ~18s load cost, on every session start regardless of how its hooks are wired — vendoring is what
+removes that cost from anything time-sensitive, e.g. headless `claude remote-control` spawns). It also creates
+a **`.claude/settings.json`** from a template *if you don't already have one*, wiring the runtime hooks to
+`$CLAUDE_PROJECT_DIR/.claude/scripts/...` instead of the plugin's `hooks/hooks.json` (which only fires while
+the plugin is loaded). **Once this is done, the plugin only needs to stay enabled to run
+`/orchestrator:setup`/`/orchestrator:sync`** — feel free to disable it between updates. What the interview
 collects and scaffolds:
 
 - **`.claude/gates.json`** (the adapter — the *only* file that makes the generic agents work on YOUR stack). Set:
@@ -97,9 +109,11 @@ Each should run the right command (or say "not configured — skipping").
 > `Stop` hook and every agent's "done".
 
 ### Choosing `test_affected` per stack
-`test_affected` runs on the `Stop` hook (shipped by the plugin's `hooks/hooks.json`, no `settings.json` edits
-needed) after every change, so it should be *fast* — ideally only the tests touched by the diff. But "test
-only what changed" isn't free in every stack. Sensible options:
+`test_affected` runs on the `Stop` hook — wired by the `.claude/settings.json` `/orchestrator:setup` scaffolds
+(Step 2 above; it calls `$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh test_affected`), not the plugin's
+`hooks/hooks.json` (that only fires while the plugin is loaded) — after every change, so it should be *fast*
+— ideally only the tests touched by the diff. But "test only what changed" isn't free in every stack. Sensible
+options:
 
 | Stack | Cheap `test_affected` | Notes |
 |---|---|---|

@@ -436,15 +436,26 @@ marketplace listing and let Claude Code update the installed plugin:
 /plugin marketplace update recode
 ```
 Then re-stamp the files `/orchestrator:setup` scaffolded into **your** repo (`gates.json`, `CLAUDE.md`, the
-fan-out workflow, the CI gate workflow) so they pick up any changes shipped in the update:
+fan-out workflow, the CI gate workflow, and — issue #128 — the vendored runtime harness: `agents/`,
+`commands/`, `hooks/`, `scripts/`, `skills/`) so they pick up any changes shipped in the update:
 ```
 /orchestrator:sync
 ```
 This compares the version markers `/orchestrator:setup` already scaffolded against what the current plugin
 ships and re-stamps anything behind — flagging local edits instead of clobbering them (see
-`.claude/skills/sync/SKILL.md`) — so an update refreshes managed files (e.g. `feature-fanout.js`) without
-re-running the whole interview, and never touches your own `gates.json`/`CLAUDE.md` (those are created once
+`.claude/skills/sync/SKILL.md`) — so an update refreshes managed files (e.g. `feature-fanout.js`, or the whole
+vendored runtime harness as one unit via its `.claude/.orchestrator-vendor` marker) without re-running the
+whole interview, and never touches your own `gates.json`/`CLAUDE.md`/`settings.json` (those are created once
 and left alone on every re-run).
+
+**The plugin only needs to be *enabled* to run `/orchestrator:setup`/`/orchestrator:sync`** — once the runtime
+harness is vendored, everyday sessions read `agents/commands/hooks/scripts/skills` straight out of your local
+`.claude/`, so the plugin doesn't need to load at session start at all. This matters because a loaded plugin
+pays its load cost (~18s for this one) on **every** session start regardless of how its hooks are wired; for
+anything time-sensitive — e.g. `claude remote-control` spawning a headless driver under a ~20-30s spawn-ack
+window — that cost can be the difference between the parent seeing the child come up and declaring it dead
+(see issue #128). Re-enable the plugin (or just leave it enabled — it's harmless, only slower) whenever you
+next want to run setup/sync for an update.
 
 > **Maintainer note: bump `plugin.json`'s `version` on every real change.** `/plugin marketplace update` only
 > re-fetches plugin content when the plugin's version string actually changes (`.claude/.claude-plugin/plugin.json`
