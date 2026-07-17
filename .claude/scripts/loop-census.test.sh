@@ -217,6 +217,15 @@ cat > "$scripts_dir/pr-ci-fix.sh" <<'EOF'
 printf '10\tfeat/issue-10-a\tbuild\tsha10\n'
 printf '11\tfeat/issue-11-a\tbuild\tsha11\n'
 EOF
+# Commit this swap into fixture1's git history — fixture1 is reused for the
+# main_dirty checks much further below, which assume the fixture is otherwise
+# clean; leaving this rewrite uncommitted made `git status --porcelain` show
+# a real ` M .claude/scripts/pr-ci-fix.sh` line for the rest of the fixture's
+# life, permanently tripping main_dirty=yes regardless of which exclusion was
+# actually under test (unrelated pre-existing gap, not part of what's being
+# tested here).
+git -C "$fixture" add .claude/scripts/pr-ci-fix.sh
+git -C "$fixture" -c user.email=t@e.st -c user.name=t commit -q -m "swap in ci_fix_prs stub (test fixture)"
 outCiFix="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
 check "ci_fix_prs=2 counted when pr-ci-fix.sh reports two candidates" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=2"' _ "$outCiFix"
 

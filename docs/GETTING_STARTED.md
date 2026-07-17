@@ -48,25 +48,27 @@ Then, in Claude Code, inside **your own project**:
 (`/plugin` alone opens an interactive picker if you'd rather browse marketplaces/plugins than type the
 commands above.)
 
-Enabling the plugin here is what lets you run `/orchestrator:setup` in Step 2 — that step also **vendors the
-plugin's own runtime harness into your repo's local `.claude/`**, so afterward the plugin only needs to stay
-enabled to run `/orchestrator:setup`/`/orchestrator:sync` again later (the install/update channel), not for
-day-to-day sessions. See Step 2.
+Enabling the plugin here is what lets you run `/orchestrator:setup` in Step 2, and — unlike an earlier version
+of this template (issue #128) — **keep the plugin enabled afterward too**: this repo does not vendor a local
+copy of its own runtime harness into your repo (issue #134), so `agents/`, `commands/`, `hooks/`, `scripts/`,
+`skills/` are read straight from the plugin cache on every session, not just during
+`/orchestrator:setup`/`/orchestrator:sync`. See Step 2.
 
 ## Step 2 — Onboard: run `/orchestrator:setup`
 With the plugin enabled, run:
 ```
 /orchestrator:setup
 ```
-It interviews you, then writes the files a plugin **cannot** carry into your repo, and **vendors the plugin's
-runtime harness — `agents/`, `commands/`, `hooks/`, `scripts/`, `skills/` — wholesale into your local
-`.claude/`** so a session reads them off disk without the plugin loaded (issue #128: an enabled plugin loads,
-and pays its ~18s load cost, on every session start regardless of how its hooks are wired — vendoring is what
-removes that cost from anything time-sensitive, e.g. headless `claude remote-control` spawns). It also creates
-a **`.claude/settings.json`** from a template *if you don't already have one*, wiring the runtime hooks to
-`$CLAUDE_PROJECT_DIR/.claude/scripts/...` instead of the plugin's `hooks/hooks.json` (which only fires while
-the plugin is loaded). **Once this is done, the plugin only needs to stay enabled to run
-`/orchestrator:setup`/`/orchestrator:sync`** — feel free to disable it between updates. What the interview
+It interviews you, then writes the files a plugin **cannot** carry into your repo — it does **not** copy the
+plugin's own `agents/commands/hooks/scripts/skills` into your repo (issue #134: an earlier version of this
+template vendored those wholesale into your local `.claude/` so a session could read them off disk with the
+plugin disabled, issue #128 — that model was reverted because nothing kept an unmanaged vendored copy updated,
+and a stale local copy permanently shadows a fresh plugin install; see `resolve-roots.sh`). It also creates a
+**`.claude/settings.json`** from a template *if you don't already have one*, wiring the runtime hooks to
+`${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR/.claude}/scripts/...` — the plugin cache while the plugin is
+enabled, falling back to a local `.claude/scripts/` only if you're self-hosting this template directly (no
+distinct plugin install). **Keep the `orchestrator` plugin enabled for everyday sessions** — its own
+`hooks/hooks.json` and, unless you drop the block, this file's `hooks` both need it loaded. What the interview
 collects and scaffolds:
 
 - **`.claude/gates.json`** (the adapter — the *only* file that makes the generic agents work on YOUR stack). Set:
@@ -109,11 +111,11 @@ Each should run the right command (or say "not configured — skipping").
 > `Stop` hook and every agent's "done".
 
 ### Choosing `test_affected` per stack
-`test_affected` runs on the `Stop` hook — wired by the `.claude/settings.json` `/orchestrator:setup` scaffolds
-(Step 2 above; it calls `$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh test_affected`), not the plugin's
-`hooks/hooks.json` (that only fires while the plugin is loaded) — after every change, so it should be *fast*
-— ideally only the tests touched by the diff. But "test only what changed" isn't free in every stack. Sensible
-options:
+`test_affected` runs on the `Stop` hook — wired both by the plugin's own `hooks/hooks.json` and by the
+`.claude/settings.json` `/orchestrator:setup` scaffolds (Step 2 above; it calls
+`${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR/.claude}/scripts/gate.sh test_affected`) — after every change, so it
+should be *fast* — ideally only the tests touched by the diff. But "test only what changed" isn't free in every
+stack. Sensible options:
 
 | Stack | Cheap `test_affected` | Notes |
 |---|---|---|

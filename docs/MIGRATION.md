@@ -26,6 +26,23 @@ The project was renamed **reCode**. What this means for an existing install:
   existing downstream install keeps working untouched; renaming the marketplace alias to `recode` is optional
   tidiness, not a requirement.
 
+## If you onboarded between issues #128 and #134 (vendored runtime harness)
+For a window, `/orchestrator:setup`/`/orchestrator:sync` vendored the plugin's own
+`agents/commands/hooks/scripts/skills` wholesale into your `.claude/` (issue #128), gated by a
+`.claude/.orchestrator-vendor` marker file, so a session could read them off disk with the plugin disabled.
+That model was reverted (issue #134) for exactly the reason this whole document exists: nothing kept an
+unmanaged copy updated, and a stale local copy permanently shadows a fresh plugin install (`resolve-roots.sh`
+deliberately makes a repo-tracked `.claude/scripts` layout win over `${CLAUDE_PLUGIN_ROOT}`). If your repo went
+through that window, treat it exactly like the hand-copied case below — the same "What to delete" / "Before
+you delete: check for local patches" guidance applies, and `.claude/.orchestrator-vendor` is one more file to
+delete alongside the vendored directories. Running `/orchestrator:sync` will flag any leftover copy for you
+(`stale-vendor: ... safe to delete` vs. `stale-vendor conflict: ...` if it diverges from the plugin's shipped
+copy) instead of silently deleting or restamping it — see `.claude/skills/sync/SKILL.md`. **Keep the plugin
+enabled after cleaning up** — issue #134 also means the plugin must stay enabled for everyday sessions now, not
+just to run setup/sync. **Migration caveat:** if you've already armed the loop, deleting files on disk is not
+enough — a running `pr-loop`/`claude-rc` systemd unit holds its OLD script in memory until its unit restarts:
+`systemctl --user restart pr-loop-<repo-slug>.service claude-rc-<repo-slug>.service`.
+
 ## What to delete
 Remove the copied harness that the plugin now carries — it's generic, not project-specific, and staying on a
 frozen copy means you never get fixes/improvements:

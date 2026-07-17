@@ -70,28 +70,28 @@ MANAGED_FILES=(
   "arm-loop.sh|.claude/scripts/arm-loop.sh|@orchestrator-managed arm-loop v"
 )
 
-# --- runtime harness vendor: ONE managed unit, not a row in MANAGED_FILES (issue #128) --
-# Unlike everything in MANAGED_FILES above (a single template file -> single destination
-# file), the runtime harness vendor is a whole-TREE copy — the plugin's own `agents/`,
-# `commands/`, `hooks/`, `scripts/`, `skills/` subtrees, copied wholesale from the plugin
-# root (not from templates_dir) into the consumer's `.claude/`. It is gated by ONE
-# top-level marker file, `.claude/.orchestrator-vendor`, reusing the exact same
-# managed_version_of ladder as MANAGED_FILES, just applied to a directory-tree copy
-# instead of a single `cp`. See scaffold.sh's matching "runtime harness vendor" section
-# and `.claude/skills/setup/templates/MANIFEST.md` for the full rationale.
-#
-# EXCEPTION: `.claude/scripts/arm-loop.sh` is excluded from this tree copy/diff — it is
-# already a MANAGED_FILES row above with its own canonical template (`templates/arm-loop.sh`,
-# placeholder-substituted at ARM time), which can legitimately differ from this plugin
-# repo's own live self-hosting copy of arm-loop.sh. Double-managing the same destination
-# path from two different pristine sources would make the two mechanisms disagree about
-# what "up to date" even means for that one file.
-VENDOR_DIRS=(agents commands hooks scripts skills)
-VENDOR_MARKER_PREFIX="@orchestrator-managed runtime-vendor v"
+# --- stale-vendor detection (issue #134) --------------------------------------------
+# Prior to issue #134, this plugin vendored its own runtime subtrees — `agents/`,
+# `commands/`, `hooks/`, `scripts/`, `skills/` — wholesale into a consumer's local
+# `.claude/` (issue #128), gated by a single marker file `.claude/.orchestrator-vendor`.
+# That model was reverted: consumer repos no longer carry local copies of these
+# directories at all — agents/commands/hooks/scripts/skills are read straight from the
+# plugin cache (`${CLAUDE_PLUGIN_ROOT}`), which stays the single source of truth. Sync
+# does NOT delete anything on a consumer's behalf (a local copy might be a deliberate,
+# legitimate override, not just stale leftovers) — it only DETECTS AND WARNS, see
+# `detect_stale_vendor_copies` below. This also covers a repo that was vendored under
+# the old #128 model and never cleaned up (e.g. reDeploy, the motivating case for #134).
+STALE_VENDOR_DIRS=(agents commands hooks scripts skills)
+LEGACY_VENDOR_MARKER_REL=".claude/.orchestrator-vendor"
 plugin_root="$(cd "$script_dir/../.." && pwd)"
-vendor_marker_src="$plugin_root/.orchestrator-vendor"
-vendor_marker_dst="$target_root/.claude/.orchestrator-vendor"
-vendor_dest_rel=".claude/{agents,commands,hooks,scripts,skills}"
+
+# self-hosting: this plugin's OWN repo running sync.sh against itself, i.e. plugin_root
+# resolves to $target_root/.claude. In that case .claude/{agents,commands,hooks,scripts,
+# skills} ARE the plugin's own legitimately-tracked canonical source directories, not
+# vendored copies of anything — stale-vendor detection must stay completely silent (no
+# warning, no migration caveat) rather than flag the plugin's own tree as a leftover.
+self_hosting=0
+[ "$plugin_root" = "$target_root/.claude" ] && self_hosting=1
 
 # --- user-owned files: NEVER written by sync, only reported for visibility ---------
 USER_OWNED_FILES=(
@@ -156,58 +156,51 @@ has_local_edits() {
   [ "$a" != "$b" ]
 }
 
-has_local_edits_vendor() {
-  # Directory-tree analog of has_local_edits, used only for the runtime harness vendor
-  # (issue #128): recursively diffs each VENDOR_DIRS subtree between the installed
-  # .claude/ and the plugin root's own .claude/, excluding arm-loop.sh (separately
-  # managed — see the EXCEPTION comment on VENDOR_DIRS above). Any residual difference —
-  # including an extra locally-added file — counts as a local edit, same conservative
-  # philosophy as has_local_edits.
-  local installed_claude="$1" plugin_claude="$2" d
-  for d in "${VENDOR_DIRS[@]}"; do
-    [ -d "$plugin_claude/$d" ] || continue
-    if ! diff -rq -x arm-loop.sh "$plugin_claude/$d" "$installed_claude/$d" >/dev/null 2>&1; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-copy_vendor_dirs() {
-  # Prune-then-copy of each VENDOR_DIRS subtree's CONTENTS (not the subtree itself) from
-  # the plugin root into $target_root/.claude, preserving executable bits (cp -a). Mirrors
-  # scaffold.sh's copy_vendor_dirs exactly — see that function's comment for why a plain
-  # `cp -a src dst` on an already-existing dst nests instead of refreshing (the bug this
-  # replaced: a restamp used to leave duplicate nests like .claude/skills/sync/sync and
-  # never actually update changed files), and why removing the destination subtree first
-  # then copying the source's CONTENTS (`src/.` -> `dst/`) both fixes the nesting and prunes
-  # files removed upstream.
-  #
-  # EXCEPTION: `.claude/scripts/arm-loop.sh` must survive this — it already has its own
-  # dedicated MANAGED_FILES row and must NOT be vendored/overwritten from this plugin
-  # repo's own live copy. Back it up before pruning `scripts/`, then restore it (or remove
-  # whatever the plugin copy dropped in its place if there was nothing to restore) after.
-  local d arm_backup=""
-  for d in "${VENDOR_DIRS[@]}"; do
-    [ -d "$plugin_root/$d" ] || continue
-    if [ "$d" = "scripts" ] && [ -f "$target_root/.claude/scripts/arm-loop.sh" ]; then
-      arm_backup="$(mktemp "${TMPDIR:-/tmp}/arm-loop.sh.XXXXXX")"
-      cp -a "$target_root/.claude/scripts/arm-loop.sh" "$arm_backup"
-    fi
-    rm -rf "$target_root/.claude/$d"
-    mkdir -p "$target_root/.claude/$d"
-    cp -a "$plugin_root/$d/." "$target_root/.claude/$d/"
+detect_stale_vendor_copies() {
+  # Issue #134: detect (never delete) local copies of the directories this plugin used to
+  # vendor (issue #128). For each STALE_VENDOR_DIRS entry present under $target_root/.claude,
+  # classify it:
+  #   - identical to the plugin's own shipped copy (diff -rq, excluding arm-loop.sh — see
+  #     the MANAGED_FILES row for why that one file is separately managed and can
+  #     legitimately differ) -> "stale", almost certainly safe to delete: it just shadows
+  #     the plugin cache (resolve-roots.sh deliberately makes a repo-tracked
+  #     `.claude/scripts` layout win over `${CLAUDE_PLUGIN_ROOT}`, so a stale copy silently
+  #     wins over a freshly-updated plugin install).
+  #   - diverges from the plugin's shipped copy -> "conflict", flagged as a POSSIBLE
+  #     deliberate local override rather than assumed-safe-to-delete — same conservative
+  #     philosophy as has_local_edits: a false "conflict" costs a human a glance at a diff,
+  #     a false "safe to delete" can silently destroy someone's local fix.
+  # Self-hosting short-circuit: when this plugin's own repo runs sync.sh against itself
+  # ($self_hosting=1, computed above from plugin_root/target_root), .claude/{agents,
+  # commands,hooks,scripts,skills} ARE the plugin's own canonical source, not vendored
+  # copies of anything — skip the whole detect-and-warn body and report "none found" so
+  # self-hosted runs never flag (or suggest deleting) the plugin's own tree.
+  # Returns 0 if any stale directory was found (so the caller can print the migration
+  # caveat once), 1 if none were found (including the self-hosting short-circuit).
+  local d dst extra any_found=0
+  if [ "$self_hosting" -eq 1 ]; then
+    return 1
+  fi
+  for d in "${STALE_VENDOR_DIRS[@]}"; do
+    dst="$target_root/.claude/$d"
+    [ -d "$dst" ] || continue
     if [ "$d" = "scripts" ]; then
-      if [ -n "$arm_backup" ]; then
-        cp -a "$arm_backup" "$target_root/.claude/scripts/arm-loop.sh"
-        rm -f "$arm_backup"
-        arm_backup=""
-      else
-        rm -f "$target_root/.claude/scripts/arm-loop.sh"
-      fi
+      # .claude/scripts/arm-loop.sh is its OWN managed row (see MANAGED_FILES) and is
+      # expected to exist here even with vendoring stopped — only flag scripts/ as a
+      # stale-vendor leftover if it holds anything ELSE.
+      extra="$(find "$dst" -mindepth 1 -maxdepth 1 ! -name arm-loop.sh -print -quit 2>/dev/null)"
+      [ -n "$extra" ] || continue
+    fi
+    any_found=1
+    if [ ! -d "$plugin_root/$d" ]; then
+      echo "  stale-vendor: .claude/$d — present locally; this repo no longer vendors the runtime harness (issue #134) — verify it's not just a leftover from an old vendored install before relying on it"
+    elif diff -rq -x arm-loop.sh "$plugin_root/$d" "$dst" >/dev/null 2>&1; then
+      echo "  stale-vendor: .claude/$d — matches the plugin's shipped copy byte-for-byte; this repo no longer vendors the runtime harness (issue #134), so this local copy only shadows the plugin cache — safe to delete (sync will not delete it for you)"
+    else
+      echo "  stale-vendor conflict: .claude/$d — diverges from the plugin's shipped copy — this MAY be a deliberate local override rather than a stale leftover; review the diff yourself (e.g. diff -rq \"$plugin_root/$d\" \"$dst\") before deciding whether to delete it — sync will never delete it for you"
     fi
   done
-  cp "$vendor_marker_src" "$vendor_marker_dst"
+  return $((1 - any_found))
 }
 
 # --- 1. managed files: compare marker version + content, act per the ladder below --
@@ -278,51 +271,27 @@ for entry in "${MANAGED_FILES[@]}"; do
   fi
 done
 
-# --- 1b. runtime harness vendor: same ladder, applied to a whole tree via ONE marker ---
-if [ ! -d "$plugin_root/agents" ]; then
-  echo "  error:      $vendor_dest_rel — no shipped plugin root at $plugin_root; plugin install looks broken" >&2
-  had_broken_install=1
-elif [ "$plugin_root" = "$target_root/.claude" ]; then
-  # Running the vendored copy of sync.sh directly (CLAUDE_PLUGIN_ROOT unset, so the
-  # ${CLAUDE_PLUGIN_ROOT:-.claude} fallback resolved to this repo's own .claude) — there is
-  # no distinct plugin root to re-vendor FROM.
-  echo "  kept:       $vendor_dest_rel — running from an already-vendored copy, no distinct plugin root to re-vendor from; enable the plugin and re-run to pull updates"
-else
-  vendor_shipped_version="$(managed_version_of "$vendor_marker_src" "$VENDOR_MARKER_PREFIX")"
-  if ! is_sane_version "$vendor_shipped_version"; then
-    echo "  error:      $vendor_dest_rel — shipped marker $vendor_marker_src has no valid @orchestrator-managed marker (got \"$vendor_shipped_version\"); plugin install looks broken" >&2
-    had_broken_install=1
-  elif [ ! -f "$vendor_marker_dst" ]; then
-    echo "  missing:    $vendor_dest_rel — not present; run /orchestrator:setup to create it"
-  else
-    vendor_installed_version="$(managed_version_of "$vendor_marker_dst" "$VENDOR_MARKER_PREFIX")"
-    if [ -z "$vendor_installed_version" ]; then
-      vendor_installed_version=0
-    elif ! is_sane_version "$vendor_installed_version"; then
-      echo "  conflict:   $vendor_dest_rel has a malformed or out-of-range version marker (\"$vendor_installed_version\") — needs-merge, left untouched"
-      vendor_installed_version=""
-    fi
-
-    if [ -n "$vendor_installed_version" ]; then
-      if [ "$vendor_installed_version" -gt "$vendor_shipped_version" ]; then
-        echo "  kept:       $vendor_dest_rel is v$vendor_installed_version, newer than this plugin's v$vendor_shipped_version — left untouched"
-      elif [ "$vendor_installed_version" -eq "$vendor_shipped_version" ]; then
-        if has_local_edits_vendor "$target_root/.claude" "$plugin_root"; then
-          echo "  conflict:   $vendor_dest_rel is marked v$vendor_installed_version but content diverges from the pristine v$vendor_shipped_version tree — needs-merge, left untouched"
-        else
-          echo "  up to date: $vendor_dest_rel already v$vendor_shipped_version"
-        fi
-      else
-        # vendor_installed_version < vendor_shipped_version
-        if has_local_edits_vendor "$target_root/.claude" "$plugin_root"; then
-          echo "  conflict:   $vendor_dest_rel is v$vendor_installed_version (behind v$vendor_shipped_version) AND has local edits — needs-merge, left untouched"
-        else
-          copy_vendor_dirs
-          echo "  restamped:  $vendor_dest_rel v$vendor_installed_version -> v$vendor_shipped_version"
-        fi
-      fi
-    fi
+# --- 1b. stale-vendor detection: never restamp/delete, only detect + warn (issue #134) --
+if detect_stale_vendor_copies; then
+  legacy_marker="$target_root/$LEGACY_VENDOR_MARKER_REL"
+  if [ -f "$legacy_marker" ]; then
+    echo "  stale-vendor: $LEGACY_VENDOR_MARKER_REL — legacy vendor marker from the old #128 model found; this repo is a leftover of a vendored install"
   fi
+  echo "  stale-vendor: found local .claude/{agents,commands,hooks,scripts,skills} copies — this plugin stopped vendoring these (issue #134); once you've reconciled the flagged directories above (deleted the safe-to-delete ones, kept/upstreamed any genuine local override), also remove $LEGACY_VENDOR_MARKER_REL if present"
+  echo "  stale-vendor: MIGRATION CAVEAT — a running pr-loop/claude-rc systemd unit holds its OLD script in memory until its unit restarts; refreshing/deleting files on disk is not enough. After cleaning up, run: systemctl --user restart pr-loop-<repo-slug>.service claude-rc-<repo-slug>.service (cf. the 2026-07-16 reCode deploy-lag incident, issue #131)"
+elif [ "$self_hosting" -eq 1 ]; then
+  # Self-hosting: stay completely silent — no stale-vendor line, no stray-marker check, no
+  # migration caveat. This is the plugin's own tree; there is nothing to reconcile.
+  echo "  stale-vendor: none found — .claude/{agents,commands,hooks,scripts,skills} are not vendored locally (as expected; served from \${CLAUDE_PLUGIN_ROOT})"
+else
+  # No stale vendor DIRECTORIES were found, but a consumer may have deleted those by hand
+  # and left a stray legacy marker file behind — warn about that leftover too (detect and
+  # warn only; sync never deletes it for the operator).
+  legacy_marker="$target_root/$LEGACY_VENDOR_MARKER_REL"
+  if [ -f "$legacy_marker" ]; then
+    echo "  stale-vendor: $LEGACY_VENDOR_MARKER_REL — legacy vendor marker from the old #128 model found, but no stale vendor directories are present; remove this stray marker file"
+  fi
+  echo "  stale-vendor: none found — .claude/{agents,commands,hooks,scripts,skills} are not vendored locally (as expected; served from \${CLAUDE_PLUGIN_ROOT})"
 fi
 
 # --- 2. user-owned files: report only, never write ----------------------------------

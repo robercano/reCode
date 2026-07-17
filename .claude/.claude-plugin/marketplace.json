@@ -4,13 +4,13 @@
     "name": "Roberto Cano"
   },
   "description": "reCode: multi-agent orchestration harness — fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "plugins": [
     {
       "name": "orchestrator",
       "source": "./",
       "description": "reCode: multi-agent orchestration harness — fan out sub-tasks to isolated worktree implementers, gate them, and route results through reviewers.",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "author": {
         "name": "Roberto Cano"
       }
