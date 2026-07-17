@@ -6,6 +6,10 @@
 #
 #   open_prs=N                  open PRs against the adapter's base branch
 #   feedback_prs=N              bot PRs with unaddressed CHANGES_REQUESTED (pr-feedback.sh)
+#   ci_fix_prs=N                 bot PRs with a failing CI check on the current
+#                               head, not already a feedback candidate, not
+#                               already addressed for that head (pr-ci-fix.sh,
+#                               issue #96)
 #   planned_issues=N            open issues labelled `planned` AND one of the
 #                               adapter's module:* labels, one detail line each:
 #     issue=<n> branch=<feat/issue-n-* or none> title=<title>
@@ -238,6 +242,9 @@ open_issue_set=$(gh issue list -R "$repo" --state open --json number --jq '.[].n
 feedback_prs=$(PR_FEEDBACK_COUNT_ONLY=1 bash "$script_dir/pr-feedback.sh" "$repo" | grep -c . || true)
 echo "feedback_prs=$feedback_prs"
 
+ci_fix_prs=$(bash "$script_dir/pr-ci-fix.sh" "$repo" | grep -c . || true)
+echo "ci_fix_prs=$ci_fix_prs"
+
 # Open `planned` issues carrying any of the adapter's module labels, ascending.
 planned=$(gh issue list -R "$repo" --state open --label planned --json number,title,labels \
   --jq '.[] | [.number, ([.labels[].name]|join(",")), .title] | @tsv' | sort -n)
@@ -389,7 +396,7 @@ fi
 echo "advance_ready=$advance_ready"
 
 # Desired cadence per the loop policy: FAST only when the loop can ACT now.
-if [ "$feedback_prs" -ge 1 ] || { [ "$open_prs" -eq 0 ] && [ "$planned_count" -ge 1 ]; }; then
+if [ "$feedback_prs" -ge 1 ] || [ "$ci_fix_prs" -ge 1 ] || { [ "$open_prs" -eq 0 ] && [ "$planned_count" -ge 1 ]; }; then
   echo 'cadence=FAST cron=* * * * *'
 elif [ "$open_prs" -ge 1 ]; then
   echo 'cadence=WATCH cron=*/5 * * * *'

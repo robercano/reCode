@@ -107,6 +107,10 @@ cat > "$scripts_dir/pr-feedback.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat > "$scripts_dir/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
 
 # Fake bot-gh.sh: no network, no real `gh` — dispatches on the subcommand and
 # a `--json` marker to canned, fixture-appropriate output.
@@ -179,6 +183,22 @@ check "issue 100 (local branch, already has an open PR, exact-match control) is 
 check "exactly one in_flight line total (only issue 42 qualifies)" bash -c '[ "$(printf "%s\n" "$1" | grep -c "^in_flight=")" -eq 1 ]' _ "$out"
 check "planned_issues=4 counted" bash -c 'printf "%s\n" "$1" | grep -qx "planned_issues=4"' _ "$out"
 check "issue=42 branch line shows the origin-prefixed remote-tracking name" bash -c 'printf "%s\n" "$1" | grep -q "^issue=42 branch=origin/feat/issue-42-y"' _ "$out"
+check "ci_fix_prs=0 counted (no-op pr-ci-fix.sh stub, issue #96)" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=0"' _ "$out"
+
+# ---------------------------------------------------------------------------
+# ci_fix_prs (issue #96): loop-census.sh must surface pr-ci-fix.sh's own
+# candidate count verbatim as `ci_fix_prs=N`, exactly mirroring how
+# feedback_prs already wraps pr-feedback.sh (`grep -c .` over its TSV output)
+# -- reusing fixture1's real git repo/adapter, just swapping in a pr-ci-fix.sh
+# stub that prints two candidate lines instead of the no-op above.
+# ---------------------------------------------------------------------------
+cat > "$scripts_dir/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '10\tfeat/issue-10-a\tbuild\tsha10\n'
+printf '11\tfeat/issue-11-a\tbuild\tsha11\n'
+EOF
+outCiFix="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "ci_fix_prs=2 counted when pr-ci-fix.sh reports two candidates" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=2"' _ "$outCiFix"
 
 # ---------------------------------------------------------------------------
 # driver_unit_active guard (issue #119 post-review finding #5): loop-census.sh
@@ -208,6 +228,10 @@ build_guard_fixture() {
 }
 EOF
   cat > "$scripts/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/pr-ci-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
@@ -297,7 +321,11 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  chmod +x "$scripts/pr-feedback.sh" "$scripts/cockpit.sh" "$scripts/loop-census.sh"
+  cat > "$scripts/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$scripts/pr-feedback.sh" "$scripts/pr-ci-fix.sh" "$scripts/cockpit.sh" "$scripts/loop-census.sh"
   git -C "$dir" init -q -b main
   git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
 }
@@ -534,6 +562,10 @@ cat > "$dirStall/.claude/gates.json" <<'EOF'
 }
 EOF
 cat > "$scriptsStall/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsStall/pr-ci-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF

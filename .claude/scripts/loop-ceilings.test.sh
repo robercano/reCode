@@ -39,9 +39,11 @@ check() {
 # $1=name $2=fake_census $3=fake_feedback (TSV body, may be empty)
 # $4=1 to also install a call-logging fake bot-gh.sh (default: no bot-gh.sh at
 # all, matching loop-tick.test.sh's own "gh must never be invoked" contract
-# for scenarios that expect zero gh side effects).
+# for scenarios that expect zero gh side effects). $5=fake_cifix (TSV body,
+# issue #96 -- defaults to empty, i.e. no ci-fix candidates, so every existing
+# 3/4-arg call site keeps working unchanged).
 new_fixture() {
-  local name="$1" fake_census="$2" fake_feedback="$3" with_gh="${4:-0}"
+  local name="$1" fake_census="$2" fake_feedback="$3" with_gh="${4:-0}" fake_cifix="${5:-}"
   local dir="$work/$name/.claude/scripts"
   mkdir -p "$dir" "$work/$name/.claude/state" 2>/dev/null
   rm -rf "$work/$name/.claude/state"   # loop-tick.sh must mkdir -p it itself
@@ -73,6 +75,12 @@ EOF
 cat <<'FEEDBACK'
 $fake_feedback
 FEEDBACK
+EOF
+  cat > "$dir/pr-ci-fix.sh" <<EOF
+#!/usr/bin/env bash
+cat <<'CIFIX'
+$fake_cifix
+CIFIX
 EOF
   chmod +x "$dir"/*.sh
 
@@ -393,6 +401,44 @@ check "scenario 10c: a SECOND 'issue create' fires (closed tracked issue is not 
   [ "$(gh_calls "$1" | grep -c "^issue create")" -eq 2 ] &&
   [ "$(gh_calls "$1" | grep -c "^issue comment")" -eq 1 ]
 ' _ "$dir10"
+
+# ---------------------------------------------------------------------------
+# 11. Per-issue attempt budget applies across advance, feedback, AND ci-fix
+#     phases of the SAME issue (issue #96): a PR (23) cut from
+#     feat/issue-42-x, needing a CI fix rather than feedback, ALSO inherits
+#     issue 42's existing (exhausted) attempt count and is refused/escalated
+#     as PR 23 (not issue 42) -- mirrors scenario 6 above, but through the
+#     cifix_pr/cifix_issue path instead of feedback_pr/feedback_issue.
+# ---------------------------------------------------------------------------
+CIFIX_PR_23='23	feat/issue-42-x	build	deadbeef'
+dir11="$(new_fixture scenario11 "$CENSUS_READY_42" "" 1 "$CIFIX_PR_23")"
+node -e '
+  const fs = require("fs");
+  const dir = process.argv[1] + "/../state";
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(dir + "/loop-issue-attempts.json", JSON.stringify({ "42": { attempts: 5, escalated: false } }));
+' "$dir11"
+out11="$(run_tick "$dir11")"
+check "scenario 11 (ci-fix for issue 42's PR, budget already exhausted): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out11"
+check "scenario 11: diagnostic cites the attempt budget for issue=42, not PR 23" bash -c 'printf "%s\n" "$1" | grep -q "attempt budget exceeded for issue=42"' _ "$out11"
+check "scenario 11: the PR (23), not the issue, was labeled/commented needs-human" bash -c 'gh_calls "$1" | grep -q "^pr edit 23 --add-label needs-human" && gh_calls "$1" | grep -q "^pr comment 23"' _ "$dir11"
+
+# ---------------------------------------------------------------------------
+# 12. Precedence (issue #96): a ci-fix candidate wins over an ALSO-ready
+#     advance, but a feedback candidate still wins over ci-fix -- exercised
+#     end-to-end through loop-tick.sh's own verdict decision (not just
+#     pr-ci-fix.sh's own exclusion logic, covered separately in
+#     pr-ci-fix.test.sh).
+# ---------------------------------------------------------------------------
+CIFIX_PR_9='9	feat/issue-7-x	build	cafef00d'
+dir12="$(new_fixture scenario12 "$CENSUS_READY_42" "" 0 "$CIFIX_PR_9")"
+out12="$(run_tick "$dir12")"
+check "scenario 12 (ci-fix beats an also-ready advance): verdict is action=ci-fix pr=9" bash -c '[ "$(verdict_of "$1")" = "action=ci-fix pr=9" ]' _ "$out12"
+check "scenario 12: no spawn lock written (advance never attempted)" [ ! -e "$dir12/../state/loop-advance.lock" ]
+
+dir13="$(new_fixture scenario13 "$CENSUS_READY_42" "$FEEDBACK_PR_17" 0 "$CIFIX_PR_9")"
+out13="$(run_tick "$dir13")"
+check "scenario 13 (feedback beats an also-ready ci-fix): verdict is action=feedback pr=17, not ci-fix" bash -c '[ "$(verdict_of "$1")" = "action=feedback pr=17" ]' _ "$out13"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
