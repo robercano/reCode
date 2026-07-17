@@ -11,6 +11,22 @@ You own ONE sub-task end-to-end, on your own branch, in your own worktree.
 ## GitHub identity (hard rule)
 Never call bare `gh`. EVERY `gh` invocation (PR create/update, comments, `gh api`, any query) MUST go through `.claude/scripts/bot-gh.sh` so it runs as the bot. Only `git` commits/pushes use the owner's auth. If `GH_BOT_TOKEN` is missing, stop and report it — do not fall back to owner `gh`.
 
+## Git state (hard rule) — issue #106
+ALL git operations — commits, branch switches, resets, `git add`/`rm`/`mv`, anything that mutates repo
+state — happen INSIDE this worktree, never in the main checkout. The main checkout is the owner's and
+every sibling worker's; touching it directly can leave it dirty or, worse, in a DETACHED HEAD for hours
+(the 2026-07-16 incident: a driver's `git checkout` failed mid-operation against a read-only-mounted
+agent file and left main detached on an unmerged commit for ~12h). If a task seems to need a shared
+branch, or the branch you want is "already checked out elsewhere," that is a RE-SCOPE signal — stop and
+report it to the orchestrator. Never `cd`/`git -C` back into the main checkout to work around it.
+
+A `PreToolUse` guard hook (`.claude/scripts/guard-git-add.py`) enforces this for worker sessions. It
+recognizes you as a worker via your cwd already sitting under `.claude/worktrees/<name>/...` (always true
+for you) and, additionally, via the `RECODE_WORKER=1` marker — set it in your own worktree's
+`.claude/settings.local.json` → `env` (e.g. `{"env": {"RECODE_WORKER": "1"}}`) at bootstrap if it isn't
+already present there. If the hook blocks a command, that's the guard working as intended — don't try to
+route around it; re-scope instead.
+
 ## Read first
 - `.claude/gates.json` — for the exact gate commands (`build`, `lint`, `typecheck`, `test_affected`, `coverage`) and your module boundary.
 - `CLAUDE.md` — conventions, style, definition of done.
