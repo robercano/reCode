@@ -41,9 +41,11 @@ check() {
 # all, matching loop-tick.test.sh's own "gh must never be invoked" contract
 # for scenarios that expect zero gh side effects). $5=fake_cifix (TSV body,
 # issue #96 -- defaults to empty, i.e. no ci-fix candidates, so every existing
-# 3/4-arg call site keeps working unchanged).
+# 3/4-arg call site keeps working unchanged). $6=fake_commentfix (TSV body,
+# issue #96 part 2 -- defaults to empty, i.e. no comment-fix candidates, so
+# every existing 3/4/5-arg call site keeps working unchanged).
 new_fixture() {
-  local name="$1" fake_census="$2" fake_feedback="$3" with_gh="${4:-0}" fake_cifix="${5:-}"
+  local name="$1" fake_census="$2" fake_feedback="$3" with_gh="${4:-0}" fake_cifix="${5:-}" fake_commentfix="${6:-}"
   local dir="$work/$name/.claude/scripts"
   mkdir -p "$dir" "$work/$name/.claude/state" 2>/dev/null
   rm -rf "$work/$name/.claude/state"   # loop-tick.sh must mkdir -p it itself
@@ -81,6 +83,12 @@ EOF
 cat <<'CIFIX'
 $fake_cifix
 CIFIX
+EOF
+  cat > "$dir/pr-comment-fix.sh" <<EOF
+#!/usr/bin/env bash
+cat <<'COMMENTFIX'
+$fake_commentfix
+COMMENTFIX
 EOF
   chmod +x "$dir"/*.sh
 

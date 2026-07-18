@@ -17,12 +17,16 @@
 #     EXACT parse merge-ready.sh's `decide()` uses for the same rollup shape.
 #     PENDING/in-progress checks do NOT qualify (a re-run in flight means
 #     "wait", not "fix");
-#   - it is NOT ALSO a pr-feedback.sh candidate. VERDICT PRECEDENCE (issue
-#     #96): feedback > ci-fix > advance — owner CHANGES_REQUESTED always
-#     outranks a CI fix, so a PR that is both red-CI and awaiting an
-#     unaddressed review is left entirely to pr-feedback.sh here (excluded,
-#     not merely deprioritized) and the caller (loop-tick.sh) additionally
-#     enforces the same precedence at the verdict level;
+#   - it is NOT ALSO a pr-feedback.sh candidate, and NOT ALSO a
+#     pr-comment-fix.sh candidate. VERDICT PRECEDENCE (issue #96, part 2):
+#     feedback > comment-fix > ci-fix > advance — owner CHANGES_REQUESTED
+#     always outranks a CI fix, and an unresolved qualifying review-comment
+#     thread outranks a CI fix too (the reopened conversation is addressed
+#     before chasing a possibly-unrelated CI failure), so a PR that is both
+#     red-CI and awaiting EITHER kind of review action is left entirely to
+#     pr-feedback.sh/pr-comment-fix.sh here (excluded, not merely
+#     deprioritized) and the caller (loop-tick.sh) additionally enforces the
+#     same precedence at the verdict level;
 #   - not labeled `needs-human` (the loop's #95 attempt-budget escalation
 #     already gave up on this PR/issue — see loop-tick.sh's per-issue attempt
 #     budget) and not labeled `claude-ci-fixing` (an in-flight guard, mirroring
@@ -62,13 +66,23 @@ gates_rel="${GATES_FILE:-.claude/gates.json}"
 case "$gates_rel" in /*) gates="$gates_rel" ;; *) gates="$root/$gates_rel" ;; esac
 base="$(node -e 'const g=require(process.argv[1]); console.log((g.merge&&g.merge.baseBranch)||"main")' "$gates" 2>/dev/null || echo main)"
 
-# Feedback candidates OUTRANK ci-fix (precedence) — exclude their PR numbers
-# up front so a PR that qualifies for both never shows up here at all.
+# Feedback AND comment-fix candidates OUTRANK ci-fix (precedence) — exclude
+# their PR numbers up front so a PR that qualifies for either never shows up
+# here at all.
 feedback_prs="$(bash "$script_dir/pr-feedback.sh" "$repo" 2>/dev/null \
   | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1}' || true)"
 is_feedback_candidate() {
   local n="$1"
   case $'\n'"$feedback_prs"$'\n' in
+    *$'\n'"$n"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+comment_fix_prs="$(bash "$script_dir/pr-comment-fix.sh" "$repo" 2>/dev/null \
+  | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1}' || true)"
+is_comment_fix_candidate() {
+  local n="$1"
+  case $'\n'"$comment_fix_prs"$'\n' in
     *$'\n'"$n"$'\n'*) return 0 ;;
     *) return 1 ;;
   esac
@@ -112,6 +126,7 @@ gh pr list -R "$repo" --state open --base "$base" \
     [ "$guard_skip" = "1" ] && continue
     [ -z "$failing" ] && continue          # no failing check on the current head -> nothing to fix
     is_feedback_candidate "$num" && continue
+    is_comment_fix_candidate "$num" && continue
 
     # Already-addressed cursor: skip if a bot comment carries the marker tied
     # to THIS EXACT head_sha (see header doc above).

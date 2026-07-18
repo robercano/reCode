@@ -35,13 +35,13 @@ check() {
 }
 
 # Build one fresh fake "consumer project" per scenario: <fixture>/.claude/scripts/.
-# fake_census / fake_feedback / fake_cifix are the exact stdout the
-# corresponding real script would print; notify-poll.sh and merge-ready.sh are
-# stubbed to just print a marker line (their output is passed through, never
-# parsed). fake_cifix defaults to empty (no ci-fix candidates) so every
-# existing 3-arg call site keeps working unchanged.
+# fake_census / fake_feedback / fake_cifix / fake_commentfix are the exact
+# stdout the corresponding real script would print; notify-poll.sh and
+# merge-ready.sh are stubbed to just print a marker line (their output is
+# passed through, never parsed). fake_cifix/fake_commentfix default to empty
+# (no candidates) so every existing 3/4-arg call site keeps working unchanged.
 new_fixture() {
-  local name="$1" fake_census="$2" fake_feedback="$3" fake_cifix="${4:-}"
+  local name="$1" fake_census="$2" fake_feedback="$3" fake_cifix="${4:-}" fake_commentfix="${5:-}"
   local dir="$work/$name/.claude/scripts"
   mkdir -p "$dir" "$work/$name/.claude/state" 2>/dev/null
   rm -rf "$work/$name/.claude/state"   # loop-tick.sh must mkdir -p it itself
@@ -80,6 +80,12 @@ EOF
 cat <<'CIFIX'
 $fake_cifix
 CIFIX
+EOF
+  cat > "$dir/pr-comment-fix.sh" <<EOF
+#!/usr/bin/env bash
+cat <<'COMMENTFIX'
+$fake_commentfix
+COMMENTFIX
 EOF
   chmod +x "$dir"/*.sh
   printf '%s\n' "$dir"
@@ -183,14 +189,15 @@ check "scenario 6: self-heal diagnostic mentions the cleared stale issue=3" bash
 check "scenario 6: lock file now records the NEW issue=9, not the stale 3" grep -q '^issue=9 ts=' "$lock6"
 
 # ---------------------------------------------------------------------------
-# 7. All five step scripts' full output is preserved (never swallowed).
+# 7. All six step scripts' full output is preserved (never swallowed).
 # ---------------------------------------------------------------------------
-check "all five labeled step headers appear in the tick's output" bash -c '
-  printf "%s\n" "$1" | grep -q "1/5 loop-census.sh" &&
-  printf "%s\n" "$1" | grep -q "2/5 notify-poll.sh" &&
-  printf "%s\n" "$1" | grep -q "3/5 merge-ready.sh" &&
-  printf "%s\n" "$1" | grep -q "4/5 pr-feedback.sh" &&
-  printf "%s\n" "$1" | grep -q "5/5 pr-ci-fix.sh"
+check "all six labeled step headers appear in the tick's output" bash -c '
+  printf "%s\n" "$1" | grep -q "1/6 loop-census.sh" &&
+  printf "%s\n" "$1" | grep -q "2/6 notify-poll.sh" &&
+  printf "%s\n" "$1" | grep -q "3/6 merge-ready.sh" &&
+  printf "%s\n" "$1" | grep -q "4/6 pr-feedback.sh" &&
+  printf "%s\n" "$1" | grep -q "5/6 pr-comment-fix.sh" &&
+  printf "%s\n" "$1" | grep -q "6/6 pr-ci-fix.sh"
 ' _ "$out1"
 check "notify-poll.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "fake notify-poll output"' _ "$out1"
 check "merge-ready.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "merge-ready: merged=0 skipped=0"' _ "$out1"
@@ -363,6 +370,66 @@ check "scenario 12d: action=ci-fix tick record captures pr number and cadence" n
   if (obj.pr !== "5") throw new Error("pr mismatch: " + JSON.stringify(obj));
   if (obj.cadence !== "WATCH") throw new Error("cadence mismatch: " + JSON.stringify(obj));
 ' "$ticks12d"
+
+# ---------------------------------------------------------------------------
+# 12e. Comment-fix candidate present, no feedback, nothing advance_ready, no
+#      ci-fix -> picked as action=comment-fix pr=N (issue #96 part 2), lowest-
+#      numbered PR wins among comment-fix candidates, and (mirroring scenario
+#      12b's "no spawn lock" for ci-fix) never writes the advance spawn lock.
+# ---------------------------------------------------------------------------
+dir12e="$(new_fixture scenario12e 'open_prs=1
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '' '' "$(printf '9\tfeat/issue-9-x\tTABC:1\tsha9
+4\tfeat/issue-4-y\tTDEF:1\tsha4')")"
+out12e="$(run_tick "$dir12e")"
+check "scenario 12e (comment-fix, lowest-numbered PR wins): verdict is action=comment-fix pr=4" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=comment-fix pr=4" ]' _ "$out12e"
+check "scenario 12e: no spawn lock written (advance never attempted)" [ ! -e "$dir12e/../state/loop-advance.lock" ]
+
+# ---------------------------------------------------------------------------
+# 12f. Comment-fix wins over an ALSO-ready ci-fix AND an also-ready advance
+#      (issue #96 part 2 precedence: comment-fix > ci-fix > advance).
+# ---------------------------------------------------------------------------
+dir12f="$(new_fixture scenario12f 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=7 branch=none title=Some issue
+advance_ready=7
+cadence=FAST cron=* * * * *' '' "$(printf '20\tfeat/issue-20-x\tbuild\tsha20')" "$(printf '11\tfeat/issue-11-x\tTABC:1\tsha11')")"
+out12f="$(run_tick "$dir12f")"
+check "scenario 12f (comment-fix beats an also-ready ci-fix and advance): verdict is action=comment-fix pr=11" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=comment-fix pr=11" ]' _ "$out12f"
+check "scenario 12f: no spawn lock written (advance never attempted)" [ ! -e "$dir12f/../state/loop-advance.lock" ]
+
+# ---------------------------------------------------------------------------
+# 12g. Feedback still wins over an also-ready comment-fix (issue #96 part 2
+#      precedence: feedback > comment-fix), same shape as scenario 4's
+#      feedback-beats-advance check.
+# ---------------------------------------------------------------------------
+dir12g="$(new_fixture scenario12g 'open_prs=1
+feedback_prs=1
+planned_issues=0
+advance_ready=none
+cadence=FAST cron=* * * * *' "$(printf '3\tfeat/issue-3-x\towner\t2026-01-01T00:00:00Z')" '' "$(printf '6\tfeat/issue-6-x\tTABC:1\tsha6')")"
+out12g="$(run_tick "$dir12g")"
+check "scenario 12g (feedback beats an also-ready comment-fix): verdict is action=feedback pr=3" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=feedback pr=3" ]' _ "$out12g"
+
+# action=comment-fix tick record: pr number captured, cadence round-trips.
+dir12h="$(new_fixture scenario12h 'open_prs=1
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '' '' "$(printf '8\tfeat/issue-8-x\tTABC:1\tsha8')")"
+ticks12h="$work/scenario12h-ticks.jsonl"
+out12h="$(CLAUDE_TICKS_FILE="$ticks12h" run_tick "$dir12h")"
+check "scenario 12h: verdict is still the LAST stdout line for action=comment-fix" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=comment-fix pr=8" ]' _ "$out12h"
+check "scenario 12h: action=comment-fix tick record captures pr number and cadence" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.action !== "comment-fix") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (obj.pr !== "8") throw new Error("pr mismatch: " + JSON.stringify(obj));
+  if (obj.cadence !== "WATCH") throw new Error("cadence mismatch: " + JSON.stringify(obj));
+' "$ticks12h"
 
 # ---------------------------------------------------------------------------
 # 11. Rotation: LOOP_TICKS_MAX_LINES caps the tick log to the last N lines
@@ -747,6 +814,10 @@ EOF
 exit 0
 EOF
   cat > "$scripts/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/pr-comment-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF

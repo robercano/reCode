@@ -373,46 +373,52 @@ verify_and_classify_post_exit() {
   printf '%s' "$out"
 }
 
-# --- transient systemd unit naming (issue #119 pt 1; issue #96 pt ci-fix) ---
+# --- transient systemd unit naming (issue #119 pt 1; issue #96 pt ci-fix;
+# issue #96 part 2 pt comment-fix) -------------------------------------------
 # $1=verdict -> "pr-loop-driver-issue<N>" for "advance issue=N",
-# "pr-loop-driver-pr<N>" for "feedback pr=N", or
-# "pr-loop-driver-cifix-pr<N>" for "ci-fix pr=N". Used both to SPAWN the unit
-# (run_driver) and, in reverse (verdict_from_unit_name below), to recover the
-# verdict from a unit already running when this daemon process starts up
-# (reattach_orphaned_drivers) — the two must stay exact inverses of each other.
-# ci-fix gets its OWN distinct unit name (not "pr-loop-driver-pr<N>") so a
-# feedback driver and a ci-fix driver on the SAME PR can never collide in
-# naming or reattach — the verdict precedence (feedback > ci-fix) makes both
-# firing for the same PR in the same tick impossible, but a feedback driver
-# from a PRIOR tick could still be finishing up while a later tick, after that
-# feedback was addressed, dispatches a ci-fix driver for the identical PR
-# number; distinct unit names keep those two spawns/reattaches from ever being
+# "pr-loop-driver-pr<N>" for "feedback pr=N", "pr-loop-driver-cifix-pr<N>"
+# for "ci-fix pr=N", or "pr-loop-driver-commentfix-pr<N>" for
+# "comment-fix pr=N". Used both to SPAWN the unit (run_driver) and, in reverse
+# (verdict_from_unit_name below), to recover the verdict from a unit already
+# running when this daemon process starts up (reattach_orphaned_drivers) — the
+# two must stay exact inverses of each other. ci-fix and comment-fix EACH get
+# their OWN distinct unit name (neither reuses "pr-loop-driver-pr<N>") so a
+# feedback driver, a comment-fix driver, and a ci-fix driver on the SAME PR
+# can never collide in naming or reattach — the verdict precedence
+# (feedback > comment-fix > ci-fix) makes more than one of these firing for
+# the same PR in the SAME tick impossible, but a driver from a PRIOR tick
+# could still be finishing up while a LATER tick, after that reaction was
+# addressed, dispatches a DIFFERENT kind of driver for the identical PR
+# number; distinct unit names keep those spawns/reattaches from ever being
 # confused with each other.
 driver_unit_name() {
   case "$1" in
-    "advance issue="*)  printf 'pr-loop-driver-issue%s' "${1#advance issue=}" ;;
-    "ci-fix pr="*)       printf 'pr-loop-driver-cifix-pr%s' "${1#ci-fix pr=}" ;;
-    "feedback pr="*)    printf 'pr-loop-driver-pr%s' "${1#feedback pr=}" ;;
-    *)                  printf 'pr-loop-driver-unknown' ;;
+    "advance issue="*)     printf 'pr-loop-driver-issue%s' "${1#advance issue=}" ;;
+    "comment-fix pr="*)    printf 'pr-loop-driver-commentfix-pr%s' "${1#comment-fix pr=}" ;;
+    "ci-fix pr="*)         printf 'pr-loop-driver-cifix-pr%s' "${1#ci-fix pr=}" ;;
+    "feedback pr="*)       printf 'pr-loop-driver-pr%s' "${1#feedback pr=}" ;;
+    *)                     printf 'pr-loop-driver-unknown' ;;
   esac
 }
 
 # --- reverse of driver_unit_name: unit name -> verdict (issue #119 pt 3) ----
 # Prints nothing (not an error) for a unit name that doesn't match the
 # expected naming convention — reattach_orphaned_drivers skips those rather
-# than guessing. The `pr-loop-driver-cifix-pr*` arm MUST be checked before
-# `pr-loop-driver-pr*` would even matter for disambiguation (it doesn't here —
-# "cifix-pr..." never matches the "pr..." prefix pattern either way — but the
-# ordering keeps the two ci-fix/feedback arms visually adjacent to their
-# distinct name shapes in driver_unit_name above, so the pairing stays obvious
-# on read).
+# than guessing. The `pr-loop-driver-cifix-pr*`/`pr-loop-driver-commentfix-pr*`
+# arms MUST be checked before `pr-loop-driver-pr*` would even matter for
+# disambiguation (it doesn't here — neither "cifix-pr..." nor
+# "commentfix-pr..." ever matches the plain "pr..." prefix pattern either
+# way — but the ordering keeps all three non-advance arms visually adjacent to
+# their distinct name shapes in driver_unit_name above, so the pairing stays
+# obvious on read).
 verdict_from_unit_name() {
   local unit="${1%.service}"
   case "$unit" in
-    pr-loop-driver-issue*)    printf 'advance issue=%s' "${unit#pr-loop-driver-issue}" ;;
-    pr-loop-driver-cifix-pr*) printf 'ci-fix pr=%s' "${unit#pr-loop-driver-cifix-pr}" ;;
-    pr-loop-driver-pr*)       printf 'feedback pr=%s' "${unit#pr-loop-driver-pr}" ;;
-    *)                        : ;;
+    pr-loop-driver-issue*)      printf 'advance issue=%s' "${unit#pr-loop-driver-issue}" ;;
+    pr-loop-driver-cifix-pr*)   printf 'ci-fix pr=%s' "${unit#pr-loop-driver-cifix-pr}" ;;
+    pr-loop-driver-commentfix-pr*) printf 'comment-fix pr=%s' "${unit#pr-loop-driver-commentfix-pr}" ;;
+    pr-loop-driver-pr*)         printf 'feedback pr=%s' "${unit#pr-loop-driver-pr}" ;;
+    *)                          : ;;
   esac
 }
 
@@ -679,7 +685,7 @@ run_once() {
     none|"")
       : # nothing actionable — no driver spawned
       ;;
-    "advance issue="*|"feedback pr="*|"ci-fix pr="*)
+    "advance issue="*|"feedback pr="*|"comment-fix pr="*|"ci-fix pr="*)
       local model prompt_file
       model="$(printf '%s\n' "$out" | sed -n 's/^loop-event: model=//p' | tail -1)"
       model="${model:-${LOOP_MODEL:-sonnet}}"

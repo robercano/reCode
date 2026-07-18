@@ -111,6 +111,10 @@ cat > "$scripts_dir/pr-ci-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat > "$scripts_dir/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
 
 # Fake bot-gh.sh: no network, no real `gh` — dispatches on the subcommand and
 # a `--json` marker to canned, fixture-appropriate output.
@@ -204,6 +208,7 @@ check "exactly one in_flight line total (only issue 42 qualifies)" bash -c '[ "$
 check "planned_issues=4 counted" bash -c 'printf "%s\n" "$1" | grep -qx "planned_issues=4"' _ "$out"
 check "issue=42 branch line shows the origin-prefixed remote-tracking name" bash -c 'printf "%s\n" "$1" | grep -q "^issue=42 branch=origin/feat/issue-42-y"' _ "$out"
 check "ci_fix_prs=0 counted (no-op pr-ci-fix.sh stub, issue #96)" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=0"' _ "$out"
+check "comment_fix_prs=0 counted (no-op pr-comment-fix.sh stub, issue #96 part 2)" bash -c 'printf "%s\n" "$1" | grep -qx "comment_fix_prs=0"' _ "$out"
 
 # ---------------------------------------------------------------------------
 # ci_fix_prs (issue #96): loop-census.sh must surface pr-ci-fix.sh's own
@@ -228,6 +233,19 @@ git -C "$fixture" add .claude/scripts/pr-ci-fix.sh
 git -C "$fixture" -c user.email=t@e.st -c user.name=t commit -q -m "swap in ci_fix_prs stub (test fixture)"
 outCiFix="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
 check "ci_fix_prs=2 counted when pr-ci-fix.sh reports two candidates" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=2"' _ "$outCiFix"
+
+# ---------------------------------------------------------------------------
+# comment_fix_prs (issue #96 part 2): same wrapping contract as ci_fix_prs
+# above, exercised against pr-comment-fix.sh instead.
+# ---------------------------------------------------------------------------
+cat > "$scripts_dir/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '20\tfeat/issue-20-a\tTABC:1\tsha20\n'
+EOF
+git -C "$fixture" add .claude/scripts/pr-comment-fix.sh
+git -C "$fixture" -c user.email=t@e.st -c user.name=t commit -q -m "swap in comment_fix_prs stub (test fixture)"
+outCommentFix="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "comment_fix_prs=1 counted when pr-comment-fix.sh reports one candidate" bash -c 'printf "%s\n" "$1" | grep -qx "comment_fix_prs=1"' _ "$outCommentFix"
 
 # ---------------------------------------------------------------------------
 # driver_unit_active guard (issue #119 post-review finding #5): loop-census.sh
@@ -261,6 +279,10 @@ EOF
 exit 0
 EOF
   cat > "$scripts/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/pr-comment-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
@@ -354,7 +376,11 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  chmod +x "$scripts/pr-feedback.sh" "$scripts/pr-ci-fix.sh" "$scripts/cockpit.sh" "$scripts/loop-census.sh"
+  cat > "$scripts/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$scripts/pr-feedback.sh" "$scripts/pr-ci-fix.sh" "$scripts/pr-comment-fix.sh" "$scripts/cockpit.sh" "$scripts/loop-census.sh"
   git -C "$dir" init -q -b main
   git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
 }
@@ -595,6 +621,10 @@ cat > "$scriptsStall/pr-feedback.sh" <<'EOF'
 exit 0
 EOF
 cat > "$scriptsStall/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsStall/pr-comment-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF

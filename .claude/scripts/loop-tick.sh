@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # loop-tick.sh — one-shot orchestration tick for the autonomous PR loop.
 #
-# Runs the loop's five step scripts, IN ORDER, with their FULL output
+# Runs the loop's six step scripts, IN ORDER, with their FULL output
 # preserved (never swallowed or `tail -1`'d), then emits exactly one
 # machine-readable verdict line as the LAST line of output:
 #   action=none
 #   action=advance issue=N
 #   action=feedback pr=N
+#   action=comment-fix pr=N   (issue #96 part 2 -- see PRECEDENCE below)
 #   action=ci-fix pr=N
 #   action=resume issue=N branch=<name>   (issue #98 -- see STEP 0.5 below)
 #
@@ -26,15 +27,25 @@
 # adds the verdict arithmetic + the spawn lock (see
 # .claude/state/loop-advance.lock below).
 #
-# Precedence (issue #96): feedback > ci-fix > advance > resume.
+# Precedence (issue #96): feedback > comment-fix > ci-fix > advance > resume.
 #   - unaddressed CHANGES_REQUESTED feedback (pr-feedback.sh) always wins over
 #     everything else — a human is waiting on a reply. When multiple PRs need
 #     feedback addressed, the lowest-numbered PR is picked.
-#   - CI-FIX (pr-ci-fix.sh) wins over ADVANCE, but never over feedback: a PR
-#     that is BOTH a feedback candidate AND has failing CI is handled as
-#     feedback, never ci-fix (pr-ci-fix.sh itself already excludes feedback
-#     candidates from its own output, so this precedence is enforced twice —
-#     belt and suspenders). When multiple PRs need a CI fix, the
+#   - COMMENT-FIX (pr-comment-fix.sh, issue #96 part 2) wins over CI-FIX and
+#     ADVANCE, but never over feedback: a PR that is BOTH a feedback candidate
+#     AND has an unresolved qualifying review-comment thread is handled as
+#     feedback, never comment-fix (pr-comment-fix.sh itself already excludes
+#     feedback candidates from its own output, so this precedence is enforced
+#     twice — belt and suspenders). When multiple PRs need a comment fix, the
+#     lowest-numbered PR is picked, same tie-break as feedback.
+#   - CI-FIX (pr-ci-fix.sh) wins over ADVANCE, but never over feedback or
+#     comment-fix: a PR that is BOTH a comment-fix candidate AND has failing
+#     CI is handled as comment-fix first (the reopened review conversation is
+#     addressed before chasing a possibly-unrelated CI failure). pr-ci-fix.sh
+#     does NOT itself exclude comment-fix candidates (the two conditions are
+#     independent signals on the SAME PR, unlike feedback's stronger
+#     "human is waiting" precedence) — this ordering is enforced solely at the
+#     verdict-decision level below. When multiple PRs need a CI fix, the
 #     lowest-numbered PR is picked, same tie-break as feedback.
 #   - ADVANCE additionally requires: census says advance_ready=N (already
 #     means zero open PRs + a planned+module issue + no existing branch), N is
@@ -138,6 +149,7 @@ write_tick_record() {
   case "$verdict" in
     "action=advance issue="*) action="advance"; issue="${verdict#action=advance issue=}" ;;
     "action=feedback pr="*) action="feedback"; pr="${verdict#action=feedback pr=}" ;;
+    "action=comment-fix pr="*) action="comment-fix"; pr="${verdict#action=comment-fix pr=}" ;;
     "action=ci-fix pr="*) action="ci-fix"; pr="${verdict#action=ci-fix pr=}" ;;
     "action=resume issue="*)
       action="resume"
@@ -203,21 +215,25 @@ write_tick_record() {
   return 0
 }
 
-echo "=== 1/5 loop-census.sh ==="
+echo "=== 1/6 loop-census.sh ==="
 census_out="$(bash "$script_dir/loop-census.sh" "$repo")"
 printf '%s\n' "$census_out"
 
-echo "=== 2/5 notify-poll.sh ==="
+echo "=== 2/6 notify-poll.sh ==="
 bash "$script_dir/notify-poll.sh" "$repo"
 
-echo "=== 3/5 merge-ready.sh ==="
+echo "=== 3/6 merge-ready.sh ==="
 bash "$script_dir/merge-ready.sh" "$repo"
 
-echo "=== 4/5 pr-feedback.sh ==="
+echo "=== 4/6 pr-feedback.sh ==="
 feedback_out="$(bash "$script_dir/pr-feedback.sh" "$repo")"
 printf '%s\n' "$feedback_out"
 
-echo "=== 5/5 pr-ci-fix.sh ==="
+echo "=== 5/6 pr-comment-fix.sh ==="
+commentfix_out="$(bash "$script_dir/pr-comment-fix.sh" "$repo")"
+printf '%s\n' "$commentfix_out"
+
+echo "=== 6/6 pr-ci-fix.sh ==="
 cifix_out="$(bash "$script_dir/pr-ci-fix.sh" "$repo")"
 printf '%s\n' "$cifix_out"
 
@@ -249,11 +265,27 @@ feedback_branch="$(printf '%s\n' "$feedback_line" | awk -F'\t' '{print $2}')"
 # number itself when the branch doesn't follow that convention.
 feedback_issue="$(printf '%s\n' "$feedback_branch" | sed -n 's#.*feat/issue-\([0-9][0-9]*\)-.*#\1#p')"
 
+# --- Parse pr-comment-fix.sh's TSV (num, branch, thread_ids:attempts_csv,
+# head_sha) --- Lowest-numbered PR wins when several need a comment fix, same
+# tie-break as feedback above. pr-comment-fix.sh already excludes feedback
+# candidates from its own output (precedence, issue #96 part 2), so no
+# additional filtering is needed here beyond the verdict decision below.
+commentfix_line="$(printf '%s\n' "$commentfix_out" | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}' | sort -t $'\t' -k1,1n | head -1)"
+commentfix_pr="$(printf '%s\n' "$commentfix_line" | awk -F'\t' '{print $1}')"
+commentfix_branch="$(printf '%s\n' "$commentfix_line" | awk -F'\t' '{print $2}')"
+# Same #95 per-issue attempt budget key derivation as feedback_issue above —
+# comment-fix dispatches for issue N share the SAME counter as
+# advance/feedback/ci-fix dispatches for issue N (do NOT invent a new counter
+# file for THIS budget; the separate per-THREAD retry budget is tracked
+# entirely inside pr-comment-fix.sh itself via the claude-comment-addressed
+# marker's embedded attempt number — see that script's header doc).
+commentfix_issue="$(printf '%s\n' "$commentfix_branch" | sed -n 's#.*feat/issue-\([0-9][0-9]*\)-.*#\1#p')"
+
 # --- Parse pr-ci-fix.sh's TSV (num, branch, failing_checks_csv, head_sha) ---
 # Lowest-numbered PR wins when several need a CI fix, same tie-break as
-# feedback above. pr-ci-fix.sh already excludes feedback candidates from its
-# own output (precedence, issue #96), so no additional filtering is needed
-# here beyond the verdict decision below.
+# feedback above. pr-ci-fix.sh already excludes feedback AND comment-fix
+# candidates from its own output (precedence, issue #96), so no additional
+# filtering is needed here beyond the verdict decision below.
 cifix_line="$(printf '%s\n' "$cifix_out" | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}' | sort -t $'\t' -k1,1n | head -1)"
 cifix_pr="$(printf '%s\n' "$cifix_line" | awk -F'\t' '{print $1}')"
 cifix_branch="$(printf '%s\n' "$cifix_line" | awk -F'\t' '{print $2}')"
@@ -518,21 +550,30 @@ if [ -z "$ceiling_block" ] && [ "$daily_count" -ge "$daily_action_ceiling" ]; th
   fi
 fi
 
-# --- 3) per-issue advance/feedback/ci-fix attempt budget ---------------------
+# --- 3) per-issue advance/feedback/comment-fix/ci-fix attempt budget ---------
 # .claude/state/loop-issue-attempts.json: { "<issue>": {attempts,escalated} }.
 # Keyed by the ORIGINATING issue number (advance_ready directly; feedback/
-# ci-fix via feedback_issue/cifix_issue, parsed from the PR's feat/issue-N-*
-# branch) so advance-phase, feedback-phase, and ci-fix-phase dispatches for the
-# same issue share ONE counter (issue #96 reuses the SAME #95 counter, no new
-# state file) -- the candidate mirrors the SAME precedence the verdict
-# decision below applies (feedback beats ci-fix beats advance; in_flight/
-# lock-held advance candidates are never charged).
+# comment-fix/ci-fix via feedback_issue/commentfix_issue/cifix_issue, parsed
+# from the PR's feat/issue-N-* branch) so advance-phase, feedback-phase,
+# comment-fix-phase, and ci-fix-phase dispatches for the same issue share ONE
+# counter (issue #96 reuses the SAME #95 counter, no new state file) -- the
+# candidate mirrors the SAME precedence the verdict decision below applies
+# (feedback beats comment-fix beats ci-fix beats advance; in_flight/
+# lock-held advance candidates are never charged). This is INDEPENDENT of
+# pr-comment-fix.sh's own per-THREAD retry budget (2 attempts/thread, tracked
+# via the claude-comment-addressed marker) -- this counter bounds how many
+# TIMES issue N gets dispatched across ANY reaction, that one bounds how many
+# times ONE THREAD gets retried.
 attempts_file="$state_dir/loop-issue-attempts.json"
 attempt_issue="" attempt_escalate_kind="" attempt_escalate_num=""
 if [ -n "$feedback_pr" ]; then
   attempt_issue="${feedback_issue:-$feedback_pr}"
   attempt_escalate_kind="pr"
   attempt_escalate_num="$feedback_pr"
+elif [ -n "$commentfix_pr" ]; then
+  attempt_issue="${commentfix_issue:-$commentfix_pr}"
+  attempt_escalate_kind="pr"
+  attempt_escalate_num="$commentfix_pr"
 elif [ -n "$cifix_pr" ]; then
   attempt_issue="${cifix_issue:-$cifix_pr}"
   attempt_escalate_kind="pr"
@@ -739,6 +780,8 @@ if [ -n "$ceiling_block" ]; then
   verdict="action=none"
 elif [ -n "$feedback_pr" ]; then
   verdict="action=feedback pr=$feedback_pr"
+elif [ -n "$commentfix_pr" ]; then
+  verdict="action=comment-fix pr=$commentfix_pr"
 elif [ -n "$cifix_pr" ]; then
   verdict="action=ci-fix pr=$cifix_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
@@ -869,6 +912,14 @@ case "$verdict" in
     dispatch_pr="${verdict#action=feedback pr=}"
     if [ "$dispatch_pr" = "$feedback_pr" ] && [ -n "${feedback_issue:-}" ]; then
       dispatch_issue="$feedback_issue"
+    else
+      dispatch_issue="$dispatch_pr"
+    fi
+    ;;
+  "action=comment-fix pr="*)
+    dispatch_pr="${verdict#action=comment-fix pr=}"
+    if [ "$dispatch_pr" = "$commentfix_pr" ] && [ -n "${commentfix_issue:-}" ]; then
+      dispatch_issue="$commentfix_issue"
     else
       dispatch_issue="$dispatch_pr"
     fi
