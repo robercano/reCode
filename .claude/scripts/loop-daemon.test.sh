@@ -157,11 +157,15 @@ check "verify_and_classify_post_exit: spawn-error rc=127 passes extra through un
 vp_cifix="$(verify_and_classify_post_exit 'ci-fix pr=23' 0 'result=exit rc=0')"
 check "verify_and_classify_post_exit: ci-fix verdict passes extra through unchanged (issue #96 -- no fresh branch/worktree to classify)" [ "$vp_cifix" = "result=exit rc=0" ]
 
-# --- driver_unit_name / verdict_from_unit_name (issue #119 pt 1; issue #96) --
-# ci-fix gets its OWN distinct unit name (pr-loop-driver-cifix-pr<N>, not the
-# feedback shape pr-loop-driver-pr<N>) so a feedback driver and a ci-fix driver
-# on the same PR number can never collide in naming or reattach -- and the
-# reverse mapping must be an exact inverse.
+vp_commentfix="$(verify_and_classify_post_exit 'comment-fix pr=23' 0 'result=exit rc=0')"
+check "verify_and_classify_post_exit: comment-fix verdict passes extra through unchanged (issue #96 part 2 -- no fresh branch/worktree to classify)" [ "$vp_commentfix" = "result=exit rc=0" ]
+
+# --- driver_unit_name / verdict_from_unit_name (issue #119 pt 1; issue #96;
+# issue #96 part 2) -----------------------------------------------------------
+# ci-fix and comment-fix EACH get their OWN distinct unit name (neither reuses
+# the feedback shape pr-loop-driver-pr<N>) so a feedback driver, a comment-fix
+# driver, and a ci-fix driver on the SAME PR number can never collide in
+# naming or reattach -- and the reverse mapping must be an exact inverse.
 un_advance="$(driver_unit_name 'advance issue=42')"
 check "driver_unit_name: advance issue=42 -> pr-loop-driver-issue42" [ "$un_advance" = "pr-loop-driver-issue42" ]
 un_feedback="$(driver_unit_name 'feedback pr=9')"
@@ -169,6 +173,9 @@ check "driver_unit_name: feedback pr=9 -> pr-loop-driver-pr9" [ "$un_feedback" =
 un_cifix="$(driver_unit_name 'ci-fix pr=9')"
 check "driver_unit_name: ci-fix pr=9 -> pr-loop-driver-cifix-pr9 (distinct from feedback's same PR number)" [ "$un_cifix" = "pr-loop-driver-cifix-pr9" ]
 check "driver_unit_name: ci-fix and feedback unit names for the SAME PR number never collide" bash -c '[ "$1" != "$2" ]' _ "$un_cifix" "$un_feedback"
+un_commentfix="$(driver_unit_name 'comment-fix pr=9')"
+check "driver_unit_name: comment-fix pr=9 -> pr-loop-driver-commentfix-pr9 (distinct from feedback's and ci-fix's same PR number)" [ "$un_commentfix" = "pr-loop-driver-commentfix-pr9" ]
+check "driver_unit_name: comment-fix, ci-fix, and feedback unit names for the SAME PR number never collide" bash -c '[ "$1" != "$2" ] && [ "$1" != "$3" ] && [ "$2" != "$3" ]' _ "$un_commentfix" "$un_cifix" "$un_feedback"
 
 vun_advance="$(verdict_from_unit_name 'pr-loop-driver-issue42.service')"
 check "verdict_from_unit_name: pr-loop-driver-issue42.service -> advance issue=42 (exact inverse)" [ "$vun_advance" = "advance issue=42" ]
@@ -176,6 +183,8 @@ vun_feedback="$(verdict_from_unit_name 'pr-loop-driver-pr9.service')"
 check "verdict_from_unit_name: pr-loop-driver-pr9.service -> feedback pr=9 (exact inverse)" [ "$vun_feedback" = "feedback pr=9" ]
 vun_cifix="$(verdict_from_unit_name 'pr-loop-driver-cifix-pr9.service')"
 check "verdict_from_unit_name: pr-loop-driver-cifix-pr9.service -> ci-fix pr=9 (exact inverse)" [ "$vun_cifix" = "ci-fix pr=9" ]
+vun_commentfix="$(verdict_from_unit_name 'pr-loop-driver-commentfix-pr9.service')"
+check "verdict_from_unit_name: pr-loop-driver-commentfix-pr9.service -> comment-fix pr=9 (exact inverse)" [ "$vun_commentfix" = "comment-fix pr=9" ]
 
 # =============================================================================
 # (B) Integration checks: real subprocess, fake loop-event.sh + fake claude.
@@ -380,6 +389,38 @@ check "scenario 4b (ci-fix): ledger records verdict=ci-fix pr=23" bash -c '
   grep -Eq "^pid=[0-9]+ session=sess-cifix-23 verdict=ci-fix pr=23 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"
 ' _ "$ledger4b"
 check "scenario 4b: prompt file was cleaned up after the driver ran" [ ! -f "$prompt4b_dir/prompt.txt" ]
+
+# ---------------------------------------------------------------------------
+# 4c. action=comment-fix pr=N (issue #96 part 2): same driver path as
+#     feedback/ci-fix, a distinct verdict text, and its own transient unit
+#     name (pr-loop-driver-commentfix-pr<N>, not pr-loop-driver-pr<N> or
+#     pr-loop-driver-cifix-pr<N>) so it can never collide with a feedback or
+#     ci-fix driver on the same PR number.
+# ---------------------------------------------------------------------------
+prompt4c_dir="$work/scenario4c-support"
+mkdir -p "$prompt4c_dir"
+printf 'Run the COMMENT-FIX step for PR #14.
+' > "$prompt4c_dir/prompt.txt"
+dir4c="$(new_fixture scenario4c "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=comment-fix pr=14'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt4c_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir4c" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir4c" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir4c" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-commentfix-14\"}"
+exit 0'
+run_daemon_once "$dir4c" >/dev/null 2>&1
+ledger4c="$dir4c/.claude/state/loop-runs.log"
+check "scenario 4c (comment-fix): ledger records verdict=comment-fix pr=14" bash -c '
+  grep -Eq "^pid=[0-9]+ session=sess-commentfix-14 verdict=comment-fix pr=14 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"
+' _ "$ledger4c"
+check "scenario 4c: prompt file was cleaned up after the driver ran" [ ! -f "$prompt4c_dir/prompt.txt" ]
 
 # ---------------------------------------------------------------------------
 # 5. Driver timeout: fake timeout stub exits 124 (as GNU timeout does on a

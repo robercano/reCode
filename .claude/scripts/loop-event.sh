@@ -23,6 +23,7 @@
 #     -> nothing else is printed. NO model/driver process must be spawned.
 #   loop-event: action=advance issue=N
 #   loop-event: action=feedback pr=N
+#   loop-event: action=comment-fix pr=N   (issue #96 part 2)
 #   loop-event: action=ci-fix pr=N
 #   loop-event: model=<model>
 #   loop-event: prompt-file=<absolute path to a plain-text file holding the
@@ -85,6 +86,7 @@ case "$verdict" in
     ;;
   "action=advance issue="*) n="${verdict#action=advance issue=}" ;;
   "action=feedback pr="*)   n="${verdict#action=feedback pr=}" ;;
+  "action=comment-fix pr="*) n="${verdict#action=comment-fix pr=}" ;;
   "action=ci-fix pr="*)     n="${verdict#action=ci-fix pr=}" ;;
   *)
     echo "loop-event: unexpected verdict line: $verdict" >&2
@@ -151,9 +153,14 @@ Drive issue #$n through the orchestrator: scope → worktree implementer → gat
         ;;
     esac
     ;;
+  action=comment-fix*)
+    prompt="Run the COMMENT-FIX step of the autonomous PR loop for PR #$n (issue #96 part 2). $common
+PR #$n has one or more UNRESOLVED, qualifying inline review-comment threads (see the \`5/6 pr-comment-fix.sh\` section above for the exact thread id(s) and next attempt number(s), formatted \`<thread_id>:<attempt>\`). Before starting, label the PR \`claude-comment-fixing\` via bot-gh.sh (create the label with --force if it doesn't exist yet) as an in-flight guard against a second tick double-dispatching this same PR. Address the threads: orchestrator → worktree implementer on the SAME branch (checkout the PR's existing branch, do NOT create a new one) → reviewer lenses per the adapter, push the fix(es) to update the PR in place. Then, for EACH thread you actually addressed (and ONLY those — do not claim one you didn't touch): (1) resolve that review thread on GitHub (\`bot-gh.sh api graphql -f query='mutation{resolveReviewThread(input:{threadId:\"<thread_id>\"}){thread{id}}}'\`), and (2) post ONE bot comment on the PR whose body contains, for every addressed thread, a line \`<!-- claude-comment-addressed:<thread_id>:<attempt> -->\` (substituting the real thread id and the EXACT attempt number pr-comment-fix.sh's output gave you for that thread — this is the cursor pr-comment-fix.sh checks so an already-fixed-but-not-yet-re-reviewed thread isn't re-dispatched every tick, while a genuinely NEW comment reopening the thread still re-triggers). Do NOT merge, and do NOT force-push."
+    action_line="action=comment-fix pr=$n"
+    ;;
   action=ci-fix*)
     prompt="Run the CI-FIX step of the autonomous PR loop for PR #$n. $common
-PR #$n has a FAILING CI check on its current head (see the \`5/5 pr-ci-fix.sh\` section above for which check(s) and its head SHA). Before starting, label the PR \`claude-ci-fixing\` via bot-gh.sh (create the label with --force if it doesn't exist yet) as an in-flight guard against a second tick double-dispatching this same PR. Address the failure: orchestrator → worktree implementer on the SAME branch (checkout the PR's existing branch, do NOT create a new one) → reviewer lenses per the adapter, push the fix to update the PR in place. After pushing, query the PR's CURRENT head commit SHA (bot-gh.sh pr view $n --json headRefOid) and post a bot comment containing exactly \`<!-- claude-ci-addressed:<that-head-sha> -->\` (substituting the real SHA) — this is the cursor pr-ci-fix.sh checks so an unresolved-but-still-rerunning check isn't re-dispatched every tick, while a genuinely NEW failure on a NEW commit still re-triggers. Do NOT merge, and do NOT force-push."
+PR #$n has a FAILING CI check on its current head (see the \`6/6 pr-ci-fix.sh\` section above for which check(s) and its head SHA). Before starting, label the PR \`claude-ci-fixing\` via bot-gh.sh (create the label with --force if it doesn't exist yet) as an in-flight guard against a second tick double-dispatching this same PR. Address the failure: orchestrator → worktree implementer on the SAME branch (checkout the PR's existing branch, do NOT create a new one) → reviewer lenses per the adapter, push the fix to update the PR in place. After pushing, query the PR's CURRENT head commit SHA (bot-gh.sh pr view $n --json headRefOid) and post a bot comment containing exactly \`<!-- claude-ci-addressed:<that-head-sha> -->\` (substituting the real SHA) — this is the cursor pr-ci-fix.sh checks so an unresolved-but-still-rerunning check isn't re-dispatched every tick, while a genuinely NEW failure on a NEW commit still re-triggers. Do NOT merge, and do NOT force-push."
     action_line="action=ci-fix pr=$n"
     ;;
   *)

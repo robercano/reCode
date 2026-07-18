@@ -50,6 +50,8 @@ cp "$resolve_roots_src" "$scripts_dir/resolve-roots.sh"
 #                                                                 -> NOT emitted (already-addressed cursor)
 #   16: failing CI via the LEGACY StatusContext shape (state=ERROR, no
 #       "conclusion" field at all)                                -> EMITTED (dual-shape parse, same as merge-ready.sh)
+#   17: failing CI, ALSO a pr-comment-fix.sh candidate (issue #96 part 2)
+#                                                                 -> NOT emitted (precedence)
 cat > "$scripts_dir/bot-gh.sh" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -63,6 +65,7 @@ case "$1" in
 {"number":14,"headRefName":"feat/issue-14-a","author":{"login":"testbot"},"labels":[],"statusCheckRollup":[{"name":"build","conclusion":"FAILURE"}],"headRefOid":"sha14"}
 {"number":15,"headRefName":"feat/issue-15-a","author":{"login":"testbot"},"labels":[],"statusCheckRollup":[{"name":"build","conclusion":"FAILURE"}],"headRefOid":"sha15"}
 {"number":16,"headRefName":"feat/issue-16-a","author":{"login":"testbot"},"labels":[],"statusCheckRollup":[{"context":"legacy-ci","state":"ERROR"}],"headRefOid":"sha16"}
+{"number":17,"headRefName":"feat/issue-17-a","author":{"login":"testbot"},"labels":[],"statusCheckRollup":[{"name":"build","conclusion":"FAILURE"}],"headRefOid":"sha17"}
 JSON
     else
       echo "fake-bot-gh.sh: unexpected pr subcommand: $*" >&2
@@ -86,6 +89,13 @@ cat > "$scripts_dir/pr-feedback.sh" <<'EOF'
 printf '14\tfeat/issue-14-a\towner\t2026-01-01T00:00:00Z\n'
 EOF
 
+# 17 is a comment-fix candidate (precedence, issue #96 part 2: comment-fix
+# outranks ci-fix).
+cat > "$scripts_dir/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '17\tfeat/issue-17-a\tTABC:1\tsha17\n'
+EOF
+
 chmod +x "$scripts_dir"/*.sh
 
 out="$(BOT_LOGIN=testbot bash "$scripts_dir/pr-ci-fix.sh" "acme/repo")"
@@ -99,6 +109,7 @@ check "PR 14 (also a feedback candidate — precedence): NOT emitted" bash -c '!
 check "PR 15 (already-addressed marker for the current head): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^15\b"' _ "$out"
 check "PR 16 (failing CI via legacy StatusContext shape): emitted" bash -c '
   printf "%s\n" "$1" | grep -qF "$(printf "16\tfeat/issue-16-a\tlegacy-ci\tsha16")"' _ "$out"
+check "PR 17 (also a comment-fix candidate -- precedence, issue #96 part 2): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^17\b"' _ "$out"
 check "exactly 2 PRs emitted total (10 and 16 only)" bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 2 ]' _ "$out"
 
 echo ""

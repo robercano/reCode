@@ -145,6 +145,32 @@ check "scenario 3b: prompt file forbids ending the turn before the work product 
 check "scenario 3b: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3b"
 
 # ---------------------------------------------------------------------------
+# 3c. action=comment-fix pr=N (issue #96 part 2) -> same one-shot contract,
+#     COMMENT-FIX wording, in-flight-guard/marker-comment instructions,
+#     LOOP_MODEL honored.
+# ---------------------------------------------------------------------------
+dir3c="$(new_fixture scenario3c 'cadence=FAST cron=* * * * *
+action=comment-fix pr=14')"
+out3c="$(cd "$dir3c" && PATH="/usr/bin:/bin" LOOP_MODEL=opus bash .claude/scripts/loop-event.sh)"; rc3c=$?
+check "scenario 3c (comment-fix): exits 0" [ "$rc3c" -eq 0 ]
+check "scenario 3c: emits loop-event: action=comment-fix pr=14" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: action=comment-fix pr=14"' _ "$out3c"
+check "scenario 3c: LOOP_MODEL is honored (model=opus)" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: model=opus"' _ "$out3c"
+pf3c="$(printf '%s
+' "$out3c" | sed -n 's/^loop-event: prompt-file=//p')"
+check "scenario 3c: prompt file mentions PR #14" bash -c 'grep -q "PR #14" "$1"' _ "$pf3c"
+check "scenario 3c: prompt file says COMMENT-FIX step, and Do NOT merge" bash -c 'grep -q "COMMENT-FIX step" "$1" && grep -q "Do NOT merge" "$1"' _ "$pf3c"
+check "scenario 3c: prompt file mandates the claude-comment-fixing in-flight guard label" bash -c 'grep -q "claude-comment-fixing" "$1"' _ "$pf3c"
+check "scenario 3c: prompt file mandates the claude-comment-addressed marker comment keyed to thread+attempt" bash -c 'grep -q "claude-comment-addressed" "$1"' _ "$pf3c"
+check "scenario 3c: prompt file mandates resolving ONLY the threads actually addressed" bash -c 'grep -qi "ONLY those" "$1"' _ "$pf3c"
+
+# Same one-shot contract clauses, on the COMMENT-FIX prompt this time.
+check "scenario 3c: prompt file mandates FOREGROUND-only spawn (run_in_background: false)" bash -c 'grep -qi "FOREGROUND" "$1" && grep -q "run_in_background: false" "$1"' _ "$pf3c"
+check "scenario 3c: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf3c"
+check "scenario 3c: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3c"
+
+# ---------------------------------------------------------------------------
 # 4. Garbage verdict line -> non-zero exit, action=none fallback line, no
 #    prompt-file (never spawns on a verdict it can't parse).
 # ---------------------------------------------------------------------------
