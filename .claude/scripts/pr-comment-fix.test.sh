@@ -70,6 +70,13 @@ EOF
 #   19: unresolved thread, ALLOWLISTED bot commenter               -> EMITTED attempt=1
 cat > "$scripts_dir/bot-gh.sh" <<'BOTGH'
 #!/usr/bin/env bash
+# Log every invocation (mirrors pr-feedback.test.sh's gh-call-log convention)
+# so escalation side effects (needs_human_flag's `gh pr edit ... --add-label
+# needs-human`) can be asserted on directly, not just inferred from "the PR
+# wasn't emitted" (which can't distinguish correct escalation from a silent
+# drop).
+log_dir="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$*" >> "$log_dir/gh-calls.log"
 case "$1" in
   repo) echo "acme/repo" ;;
   label) exit 0 ;;  # needs_human_flag's `gh label create needs-human ...`
@@ -184,6 +191,97 @@ check "PR 18 (resolved thread): NOT emitted" bash -c '! printf "%s\n" "$1" | gre
 check "PR 19 (allowlisted bot commenter): emitted attempt=1" bash -c '
   printf "%s\n" "$1" | grep -qF "$(printf "19\tfeat/issue-19-a\tT19:1\tsha19")"' _ "$out"
 check "exactly 3 PRs emitted total (10, 16, 19)" bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 3 ]' _ "$out"
+
+# --- anti-livelock escalation: positive assertion on the ACTUAL gh side
+# effect, not just "PR 17 wasn't emitted" (which can't tell correct
+# escalation apart from a silent bug that just drops the thread).
+gh_log1="$scripts_dir/gh-calls.log"
+check "PR 17 (budget exhausted): needs-human label ACTUALLY applied (gh pr edit 17 --add-label needs-human)" \
+  grep -q "pr edit 17 --add-label needs-human" "$gh_log1"
+check "PR 16 (attempt 2, budget not yet exhausted): needs-human label NOT applied" \
+  bash -c '! grep -q "pr edit 16 --add-label needs-human" "$1"' _ "$gh_log1"
+
+# --- fixture2: the SHIPPED DEFAULT (commentFix.botAllowlist: []) must
+# actually be exercised -- fixture1 above hardcodes a non-empty allowlist for
+# every scenario, so an empty allowlist (bots disabled by default; only the
+# owner qualifies) is never exercised without this fixture.
+#   30: unresolved thread, only a BOT (non-owner, non-allowlisted) commenter
+#                                                                 -> NOT emitted (empty allowlist = no bots qualify)
+#   31: unresolved thread, owner comment, same run                -> EMITTED attempt=1 (owner always qualifies)
+fixture2="$work/fixture2"
+scripts_dir2="$fixture2/.claude/scripts"
+mkdir -p "$scripts_dir2" "$fixture2/.claude/state"
+cp "$src" "$scripts_dir2/pr-comment-fix.sh"
+cp "$resolve_roots_src" "$scripts_dir2/resolve-roots.sh"
+cp "$script_dir/needs-human.sh" "$scripts_dir2/needs-human.sh"
+cp "$script_dir/notify.sh" "$scripts_dir2/notify.sh"
+
+cat > "$fixture2/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" },
+  "commentFix": { "botAllowlist": [] }
+}
+EOF
+
+cat > "$scripts_dir2/bot-gh.sh" <<'BOTGH'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  label) exit 0 ;;
+  pr)
+    case "$2" in
+      edit|comment) exit 0 ;;
+      view) echo ""; exit 0 ;;
+    esac
+    if printf '%s\n' "$*" | grep -q 'headRefOid'; then
+      cat <<'JSON'
+{"number":30,"headRefName":"feat/issue-30-a","author":{"login":"testbot"},"labels":[],"headRefOid":"sha30"}
+{"number":31,"headRefName":"feat/issue-31-a","author":{"login":"testbot"},"labels":[],"headRefOid":"sha31"}
+JSON
+    else
+      echo "fake-bot-gh.sh: unexpected pr subcommand: $*" >&2
+      exit 1
+    fi
+    ;;
+  api)
+    case " $* " in
+      *" number=30 "*)
+        echo '[{"id":"T30","isResolved":false,"comments":{"nodes":[{"author":{"login":"some-bot"},"createdAt":"2026-01-01T00:00:00Z"}]}}]'
+        ;;
+      *" number=31 "*)
+        echo '[{"id":"T31","isResolved":false,"comments":{"nodes":[{"author":{"login":"acme"},"createdAt":"2026-01-01T00:00:00Z"}]}}]'
+        ;;
+      *"graphql"*)
+        echo '[]'
+        ;;
+      *"issues/"*"/comments"*)
+        echo '[]'
+        ;;
+      *)
+        echo "fake-bot-gh.sh: unhandled api call: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+BOTGH
+chmod +x "$scripts_dir2/bot-gh.sh"
+
+# No feedback candidates in this fixture -- empty stub.
+cat > "$scripts_dir2/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+EOF
+chmod +x "$scripts_dir2/pr-feedback.sh"
+
+out2="$(env -u GATES_FILE BOT_LOGIN=testbot OWNER_LOGIN=acme bash "$scripts_dir2/pr-comment-fix.sh" "acme/repo")"
+
+check "fixture2/PR 30 (empty allowlist, only a bot commenter): NOT emitted (default-disabled)" \
+  bash -c '! printf "%s\n" "$1" | grep -qE "^30\b"' _ "$out2"
+check "fixture2/PR 31 (empty allowlist, owner commenter, same run): emitted attempt=1 (owner always qualifies)" bash -c '
+  printf "%s\n" "$1" | grep -qF "$(printf "31\tfeat/issue-31-a\tT31:1\tsha31")"' _ "$out2"
+check "fixture2: exactly 1 PR emitted total (31 only)" bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ]' _ "$out2"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
