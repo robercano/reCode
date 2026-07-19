@@ -171,6 +171,34 @@ check "scenario 3c: prompt file forbids ending the turn before the work product 
 check "scenario 3c: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3c"
 
 # ---------------------------------------------------------------------------
+# 3d. action=rebase pr=N (issue #96 part 3) -> same one-shot contract, REBASE
+#     wording, in-flight-guard/marker-comment/conflict-abort instructions,
+#     LOOP_MODEL honored.
+# ---------------------------------------------------------------------------
+dir3d="$(new_fixture scenario3d 'cadence=FAST cron=* * * * *
+action=rebase pr=21')"
+out3d="$(cd "$dir3d" && PATH="/usr/bin:/bin" LOOP_MODEL=opus bash .claude/scripts/loop-event.sh)"; rc3d=$?
+check "scenario 3d (rebase): exits 0" [ "$rc3d" -eq 0 ]
+check "scenario 3d: emits loop-event: action=rebase pr=21" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: action=rebase pr=21"' _ "$out3d"
+check "scenario 3d: LOOP_MODEL is honored (model=opus)" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: model=opus"' _ "$out3d"
+pf3d="$(printf '%s
+' "$out3d" | sed -n 's/^loop-event: prompt-file=//p')"
+check "scenario 3d: prompt file mentions PR #21" bash -c 'grep -q "PR #21" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file says REBASE step, and NEVER merge" bash -c 'grep -q "REBASE step" "$1" && grep -qi "NEVER merge" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file mandates the claude-rebasing in-flight guard label" bash -c 'grep -q "claude-rebasing" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file mandates the claude-rebase-attempted marker comment" bash -c 'grep -q "claude-rebase-attempted" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file mandates force-push-with-lease on a clean rebase" bash -c 'grep -q -- "--force-with-lease" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file mandates aborting the rebase on conflict" bash -c 'grep -q -- "rebase --abort" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file mandates the needs-human label on conflict" bash -c 'grep -q "needs-human" "$1"' _ "$pf3d"
+
+# Same one-shot contract clauses, on the REBASE prompt this time.
+check "scenario 3d: prompt file mandates FOREGROUND-only spawn (run_in_background: false)" bash -c 'grep -qi "FOREGROUND" "$1" && grep -q "run_in_background: false" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf3d"
+check "scenario 3d: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3d"
+
+# ---------------------------------------------------------------------------
 # 4. Garbage verdict line -> non-zero exit, action=none fallback line, no
 #    prompt-file (never spawns on a verdict it can't parse).
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # loop-tick.sh — one-shot orchestration tick for the autonomous PR loop.
 #
-# Runs the loop's six step scripts, IN ORDER, with their FULL output
+# Runs the loop's seven step scripts, IN ORDER, with their FULL output
 # preserved (never swallowed or `tail -1`'d), then emits exactly one
 # machine-readable verdict line as the LAST line of output:
 #   action=none
@@ -9,6 +9,7 @@
 #   action=feedback pr=N
 #   action=comment-fix pr=N   (issue #96 part 2 -- see PRECEDENCE below)
 #   action=ci-fix pr=N
+#   action=rebase pr=N   (issue #96 part 3 -- see PRECEDENCE below)
 #   action=resume issue=N branch=<name>   (issue #98 -- see STEP 0.5 below)
 #
 # WHY THIS EXISTS (issue #81): the tick used to be a multi-step PROMPT
@@ -27,35 +28,50 @@
 # adds the verdict arithmetic + the spawn lock (see
 # .claude/state/loop-advance.lock below).
 #
-# Precedence (issue #96): feedback > comment-fix > ci-fix > advance > resume.
+# Precedence (issue #96): feedback > comment-fix > ci-fix > rebase > advance >
+# resume.
 #   - unaddressed CHANGES_REQUESTED feedback (pr-feedback.sh) always wins over
 #     everything else — a human is waiting on a reply. When multiple PRs need
 #     feedback addressed, the lowest-numbered PR is picked.
-#   - COMMENT-FIX (pr-comment-fix.sh, issue #96 part 2) wins over CI-FIX and
-#     ADVANCE, but never over feedback: a PR that is BOTH a feedback candidate
-#     AND has an unresolved qualifying review-comment thread is handled as
-#     feedback, never comment-fix (pr-comment-fix.sh itself already excludes
-#     feedback candidates from its own output, so this precedence is enforced
-#     twice — belt and suspenders). When multiple PRs need a comment fix, the
-#     lowest-numbered PR is picked, same tie-break as feedback.
-#   - CI-FIX (pr-ci-fix.sh) wins over ADVANCE, but never over feedback or
-#     comment-fix: a PR that is BOTH a comment-fix candidate AND has failing
-#     CI is handled as comment-fix first (the reopened review conversation is
-#     addressed before chasing a possibly-unrelated CI failure). pr-ci-fix.sh
-#     does NOT itself exclude comment-fix candidates (the two conditions are
-#     independent signals on the SAME PR, unlike feedback's stronger
-#     "human is waiting" precedence) — this ordering is enforced solely at the
-#     verdict-decision level below. When multiple PRs need a CI fix, the
-#     lowest-numbered PR is picked, same tie-break as feedback.
+#   - COMMENT-FIX (pr-comment-fix.sh, issue #96 part 2) wins over CI-FIX,
+#     REBASE, and ADVANCE, but never over feedback: a PR that is BOTH a
+#     feedback candidate AND has an unresolved qualifying review-comment
+#     thread is handled as feedback, never comment-fix (pr-comment-fix.sh
+#     itself already excludes feedback candidates from its own output, so
+#     this precedence is enforced twice — belt and suspenders). When multiple
+#     PRs need a comment fix, the lowest-numbered PR is picked, same tie-break
+#     as feedback.
+#   - CI-FIX (pr-ci-fix.sh) wins over REBASE and ADVANCE, but never over
+#     feedback or comment-fix: a PR that is BOTH a comment-fix candidate AND
+#     has failing CI is handled as comment-fix first (the reopened review
+#     conversation is addressed before chasing a possibly-unrelated CI
+#     failure). pr-ci-fix.sh does NOT itself exclude comment-fix candidates
+#     (the two conditions are independent signals on the SAME PR, unlike
+#     feedback's stronger "human is waiting" precedence) — this ordering is
+#     enforced solely at the verdict-decision level below. When multiple PRs
+#     need a CI fix, the lowest-numbered PR is picked, same tie-break as
+#     feedback.
+#   - REBASE (pr-rebase.sh, issue #96 part 3) wins over ADVANCE, but never
+#     over feedback, comment-fix, or ci-fix: a PR that went CONFLICTING
+#     against base (typically because a sibling PR merged first) is the
+#     LOWEST of the four PR-event reactions — a merge conflict alone is not
+#     proof that something is WRONG with this PR's own change, unlike
+#     unaddressed feedback, an unresolved review thread, or red CI, so it only
+#     gets attention once none of those three apply. pr-rebase.sh itself
+#     already excludes feedback/comment-fix/ci-fix candidates from its own
+#     output (belt and suspenders, mirroring the other two siblings). When
+#     multiple PRs need a rebase, the lowest-numbered PR is picked, same
+#     tie-break as feedback.
 #   - ADVANCE additionally requires: census says advance_ready=N (already
 #     means zero open PRs + a planned+module issue + no existing branch), N is
 #     not census's in_flight=N (a feat/issue-N-* branch with no open PR —
 #     someone/something is already mid-flight on it), and the spawn lock
 #     (below) is not already held for N.
 #   - RESUME (issue #98, see STEP 0.5 below) is lowest precedence: it only
-#     fires when neither FEEDBACK, CI-FIX, nor a fresh ADVANCE claimed the
-#     tick (advance_ready=none), and picks the lowest-numbered in_flight issue
-#     that census's stall clock or debris classifier flags as stuck.
+#     fires when neither FEEDBACK, COMMENT-FIX, CI-FIX, REBASE, nor a fresh
+#     ADVANCE claimed the tick (advance_ready=none), and picks the
+#     lowest-numbered in_flight issue that census's stall clock or debris
+#     classifier flags as stuck.
 #
 # Spawn lock: .claude/state/loop-advance.lock (root-relative; .claude/state/
 # is already gitignored). Written the moment this script emits
@@ -151,6 +167,7 @@ write_tick_record() {
     "action=feedback pr="*) action="feedback"; pr="${verdict#action=feedback pr=}" ;;
     "action=comment-fix pr="*) action="comment-fix"; pr="${verdict#action=comment-fix pr=}" ;;
     "action=ci-fix pr="*) action="ci-fix"; pr="${verdict#action=ci-fix pr=}" ;;
+    "action=rebase pr="*) action="rebase"; pr="${verdict#action=rebase pr=}" ;;
     "action=resume issue="*)
       action="resume"
       issue="${verdict#action=resume issue=}"
@@ -215,27 +232,31 @@ write_tick_record() {
   return 0
 }
 
-echo "=== 1/6 loop-census.sh ==="
+echo "=== 1/7 loop-census.sh ==="
 census_out="$(bash "$script_dir/loop-census.sh" "$repo")"
 printf '%s\n' "$census_out"
 
-echo "=== 2/6 notify-poll.sh ==="
+echo "=== 2/7 notify-poll.sh ==="
 bash "$script_dir/notify-poll.sh" "$repo"
 
-echo "=== 3/6 merge-ready.sh ==="
+echo "=== 3/7 merge-ready.sh ==="
 bash "$script_dir/merge-ready.sh" "$repo"
 
-echo "=== 4/6 pr-feedback.sh ==="
+echo "=== 4/7 pr-feedback.sh ==="
 feedback_out="$(bash "$script_dir/pr-feedback.sh" "$repo")"
 printf '%s\n' "$feedback_out"
 
-echo "=== 5/6 pr-comment-fix.sh ==="
+echo "=== 5/7 pr-comment-fix.sh ==="
 commentfix_out="$(bash "$script_dir/pr-comment-fix.sh" "$repo")"
 printf '%s\n' "$commentfix_out"
 
-echo "=== 6/6 pr-ci-fix.sh ==="
+echo "=== 6/7 pr-ci-fix.sh ==="
 cifix_out="$(bash "$script_dir/pr-ci-fix.sh" "$repo")"
 printf '%s\n' "$cifix_out"
+
+echo "=== 7/7 pr-rebase.sh ==="
+rebase_out="$(bash "$script_dir/pr-rebase.sh" "$repo")"
+printf '%s\n' "$rebase_out"
 
 echo "=== verdict ==="
 
@@ -293,6 +314,22 @@ cifix_branch="$(printf '%s\n' "$cifix_line" | awk -F'\t' '{print $2}')"
 # ci-fix dispatches for issue N share the SAME counter as advance/feedback
 # dispatches for issue N (do NOT invent a new counter file).
 cifix_issue="$(printf '%s\n' "$cifix_branch" | sed -n 's#.*feat/issue-\([0-9][0-9]*\)-.*#\1#p')"
+
+# --- Parse pr-rebase.sh's TSV (num, branch, head_sha, base_sha, attempt) ---
+# Lowest-numbered PR wins when several need a rebase, same tie-break as
+# feedback above. pr-rebase.sh already excludes feedback/comment-fix/ci-fix
+# candidates from its own output (precedence, issue #96 part 3), so no
+# additional filtering is needed here beyond the verdict decision below.
+rebase_line="$(printf '%s\n' "$rebase_out" | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}' | sort -t $'\t' -k1,1n | head -1)"
+rebase_pr="$(printf '%s\n' "$rebase_line" | awk -F'\t' '{print $1}')"
+rebase_branch="$(printf '%s\n' "$rebase_line" | awk -F'\t' '{print $2}')"
+# Same #95 per-issue attempt budget key derivation as feedback_issue above —
+# rebase dispatches for issue N share the SAME counter as advance/feedback/
+# comment-fix/ci-fix dispatches for issue N (do NOT invent a new counter
+# file for THIS budget; the separate per-BASE-COMMIT retry budget is tracked
+# entirely inside pr-rebase.sh itself via the claude-rebase-attempted marker's
+# embedded attempt number — see that script's header doc).
+rebase_issue="$(printf '%s\n' "$rebase_branch" | sed -n 's#.*feat/issue-\([0-9][0-9]*\)-.*#\1#p')"
 
 # --- Spawn lock: read + self-heal against the FRESH census above -----------
 # TTL rationale: this lock is written the instant a tick emits
@@ -550,20 +587,23 @@ if [ -z "$ceiling_block" ] && [ "$daily_count" -ge "$daily_action_ceiling" ]; th
   fi
 fi
 
-# --- 3) per-issue advance/feedback/comment-fix/ci-fix attempt budget ---------
+# --- 3) per-issue advance/feedback/comment-fix/ci-fix/rebase attempt budget --
 # .claude/state/loop-issue-attempts.json: { "<issue>": {attempts,escalated} }.
 # Keyed by the ORIGINATING issue number (advance_ready directly; feedback/
-# comment-fix/ci-fix via feedback_issue/commentfix_issue/cifix_issue, parsed
-# from the PR's feat/issue-N-* branch) so advance-phase, feedback-phase,
-# comment-fix-phase, and ci-fix-phase dispatches for the same issue share ONE
-# counter (issue #96 reuses the SAME #95 counter, no new state file) -- the
-# candidate mirrors the SAME precedence the verdict decision below applies
-# (feedback beats comment-fix beats ci-fix beats advance; in_flight/
-# lock-held advance candidates are never charged). This is INDEPENDENT of
-# pr-comment-fix.sh's own per-THREAD retry budget (2 attempts/thread, tracked
-# via the claude-comment-addressed marker) -- this counter bounds how many
-# TIMES issue N gets dispatched across ANY reaction, that one bounds how many
-# times ONE THREAD gets retried.
+# comment-fix/ci-fix/rebase via feedback_issue/commentfix_issue/cifix_issue/
+# rebase_issue, parsed from the PR's feat/issue-N-* branch) so advance-phase,
+# feedback-phase, comment-fix-phase, ci-fix-phase, and rebase-phase
+# dispatches for the same issue share ONE counter (issue #96 reuses the SAME
+# #95 counter, no new state file) -- the candidate mirrors the SAME
+# precedence the verdict decision below applies (feedback beats comment-fix
+# beats ci-fix beats rebase beats advance; in_flight/lock-held advance
+# candidates are never charged). This is INDEPENDENT of pr-comment-fix.sh's
+# own per-THREAD retry budget (2 attempts/thread, tracked via the
+# claude-comment-addressed marker) and pr-rebase.sh's own per-BASE-COMMIT
+# retry budget (2 attempts/base commit, tracked via the
+# claude-rebase-attempted marker) -- this counter bounds how many TIMES issue
+# N gets dispatched across ANY reaction, those bound how many times ONE
+# THREAD/BASE-COMMIT gets retried.
 attempts_file="$state_dir/loop-issue-attempts.json"
 attempt_issue="" attempt_escalate_kind="" attempt_escalate_num=""
 if [ -n "$feedback_pr" ]; then
@@ -578,6 +618,10 @@ elif [ -n "$cifix_pr" ]; then
   attempt_issue="${cifix_issue:-$cifix_pr}"
   attempt_escalate_kind="pr"
   attempt_escalate_num="$cifix_pr"
+elif [ -n "$rebase_pr" ]; then
+  attempt_issue="${rebase_issue:-$rebase_pr}"
+  attempt_escalate_kind="pr"
+  attempt_escalate_num="$rebase_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ] \
      && ! printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready" \
      && [ "$lock_issue" != "$advance_ready" ]; then
@@ -784,6 +828,8 @@ elif [ -n "$commentfix_pr" ]; then
   verdict="action=comment-fix pr=$commentfix_pr"
 elif [ -n "$cifix_pr" ]; then
   verdict="action=ci-fix pr=$cifix_pr"
+elif [ -n "$rebase_pr" ]; then
+  verdict="action=rebase pr=$rebase_pr"
 elif [ "$advance_ready" != "none" ] && [ -n "$advance_ready" ]; then
   if printf '%s\n' "$in_flight_issues" | grep -qx "$advance_ready"; then
     # Defensive only: real census can never report the SAME issue as both
@@ -897,9 +943,10 @@ else
 fi
 
 # --- Spend-ceiling bookkeeping: increment counts on an ACTUAL dispatch ------
-# Only runs when the verdict just decided is a genuine advance/feedback/ci-fix
-# dispatch (never on action=none, ceiling-blocked or not) -- so a blocked
-# tick never itself grows the very counters that blocked it. action=resume is
+# Only runs when the verdict just decided is a genuine advance/feedback/
+# comment-fix/ci-fix/rebase dispatch (never on action=none, ceiling-blocked or
+# not) -- so a blocked tick never itself grows the very counters that blocked
+# it. action=resume is
 # DELIBERATELY excluded here: resume attempts are tracked in the SIBLING
 # loop-resume-attempts.json (written above, alongside the verdict decision),
 # precisely so a resume never charges issue #95's advance/feedback dispatch
@@ -928,6 +975,14 @@ case "$verdict" in
     dispatch_pr="${verdict#action=ci-fix pr=}"
     if [ "$dispatch_pr" = "$cifix_pr" ] && [ -n "${cifix_issue:-}" ]; then
       dispatch_issue="$cifix_issue"
+    else
+      dispatch_issue="$dispatch_pr"
+    fi
+    ;;
+  "action=rebase pr="*)
+    dispatch_pr="${verdict#action=rebase pr=}"
+    if [ "$dispatch_pr" = "$rebase_pr" ] && [ -n "${rebase_issue:-}" ]; then
+      dispatch_issue="$rebase_issue"
     else
       dispatch_issue="$dispatch_pr"
     fi

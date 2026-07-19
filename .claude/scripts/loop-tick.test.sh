@@ -35,13 +35,14 @@ check() {
 }
 
 # Build one fresh fake "consumer project" per scenario: <fixture>/.claude/scripts/.
-# fake_census / fake_feedback / fake_cifix / fake_commentfix are the exact
-# stdout the corresponding real script would print; notify-poll.sh and
-# merge-ready.sh are stubbed to just print a marker line (their output is
-# passed through, never parsed). fake_cifix/fake_commentfix default to empty
-# (no candidates) so every existing 3/4-arg call site keeps working unchanged.
+# fake_census / fake_feedback / fake_cifix / fake_commentfix / fake_rebase are
+# the exact stdout the corresponding real script would print; notify-poll.sh
+# and merge-ready.sh are stubbed to just print a marker line (their output is
+# passed through, never parsed). fake_cifix/fake_commentfix/fake_rebase
+# default to empty (no candidates) so every existing 3/4/5-arg call site keeps
+# working unchanged.
 new_fixture() {
-  local name="$1" fake_census="$2" fake_feedback="$3" fake_cifix="${4:-}" fake_commentfix="${5:-}"
+  local name="$1" fake_census="$2" fake_feedback="$3" fake_cifix="${4:-}" fake_commentfix="${5:-}" fake_rebase="${6:-}"
   local dir="$work/$name/.claude/scripts"
   mkdir -p "$dir" "$work/$name/.claude/state" 2>/dev/null
   rm -rf "$work/$name/.claude/state"   # loop-tick.sh must mkdir -p it itself
@@ -86,6 +87,12 @@ EOF
 cat <<'COMMENTFIX'
 $fake_commentfix
 COMMENTFIX
+EOF
+  cat > "$dir/pr-rebase.sh" <<EOF
+#!/usr/bin/env bash
+cat <<'REBASE'
+$fake_rebase
+REBASE
 EOF
   chmod +x "$dir"/*.sh
   printf '%s\n' "$dir"
@@ -189,15 +196,16 @@ check "scenario 6: self-heal diagnostic mentions the cleared stale issue=3" bash
 check "scenario 6: lock file now records the NEW issue=9, not the stale 3" grep -q '^issue=9 ts=' "$lock6"
 
 # ---------------------------------------------------------------------------
-# 7. All six step scripts' full output is preserved (never swallowed).
+# 7. All seven step scripts' full output is preserved (never swallowed).
 # ---------------------------------------------------------------------------
-check "all six labeled step headers appear in the tick's output" bash -c '
-  printf "%s\n" "$1" | grep -q "1/6 loop-census.sh" &&
-  printf "%s\n" "$1" | grep -q "2/6 notify-poll.sh" &&
-  printf "%s\n" "$1" | grep -q "3/6 merge-ready.sh" &&
-  printf "%s\n" "$1" | grep -q "4/6 pr-feedback.sh" &&
-  printf "%s\n" "$1" | grep -q "5/6 pr-comment-fix.sh" &&
-  printf "%s\n" "$1" | grep -q "6/6 pr-ci-fix.sh"
+check "all seven labeled step headers appear in the tick's output" bash -c '
+  printf "%s\n" "$1" | grep -q "1/7 loop-census.sh" &&
+  printf "%s\n" "$1" | grep -q "2/7 notify-poll.sh" &&
+  printf "%s\n" "$1" | grep -q "3/7 merge-ready.sh" &&
+  printf "%s\n" "$1" | grep -q "4/7 pr-feedback.sh" &&
+  printf "%s\n" "$1" | grep -q "5/7 pr-comment-fix.sh" &&
+  printf "%s\n" "$1" | grep -q "6/7 pr-ci-fix.sh" &&
+  printf "%s\n" "$1" | grep -q "7/7 pr-rebase.sh"
 ' _ "$out1"
 check "notify-poll.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "fake notify-poll output"' _ "$out1"
 check "merge-ready.sh full output line passed through, not swallowed" bash -c 'printf "%s\n" "$1" | grep -qF "merge-ready: merged=0 skipped=0"' _ "$out1"
@@ -430,6 +438,70 @@ check "scenario 12h: action=comment-fix tick record captures pr number and caden
   if (obj.pr !== "8") throw new Error("pr mismatch: " + JSON.stringify(obj));
   if (obj.cadence !== "WATCH") throw new Error("cadence mismatch: " + JSON.stringify(obj));
 ' "$ticks12h"
+
+# ---------------------------------------------------------------------------
+# 12i. Rebase candidate present, no feedback/comment-fix/ci-fix, nothing
+#      advance_ready -> picked as action=rebase pr=N (issue #96 part 3),
+#      lowest-numbered PR wins among rebase candidates, and (mirroring
+#      scenario 12b's "no spawn lock" for ci-fix) never writes the advance
+#      spawn lock.
+# ---------------------------------------------------------------------------
+dir12i="$(new_fixture scenario12i 'open_prs=1
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '' '' '' "$(printf '9\tfeat/issue-9-x\tsha9\tbase9\t1
+4\tfeat/issue-4-y\tsha4\tbase4\t1')")"
+out12i="$(run_tick "$dir12i")"
+check "scenario 12i (rebase, lowest-numbered PR wins): verdict is action=rebase pr=4" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=rebase pr=4" ]' _ "$out12i"
+check "scenario 12i: no spawn lock written (advance never attempted)" [ ! -e "$dir12i/../state/loop-advance.lock" ]
+
+# ---------------------------------------------------------------------------
+# 12j. Rebase wins over an ALSO-ready advance (issue #96 part 3 precedence:
+#      rebase > advance), same shape as scenario 12c's ci-fix-beats-advance
+#      check.
+# ---------------------------------------------------------------------------
+dir12j="$(new_fixture scenario12j 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=7 branch=none title=Some issue
+advance_ready=7
+cadence=FAST cron=* * * * *' '' '' '' "$(printf '11\tfeat/issue-11-x\tsha11\tbase11\t1')")"
+out12j="$(run_tick "$dir12j")"
+check "scenario 12j (rebase beats an also-ready advance): verdict is action=rebase pr=11" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=rebase pr=11" ]' _ "$out12j"
+check "scenario 12j: no spawn lock written (advance never attempted)" [ ! -e "$dir12j/../state/loop-advance.lock" ]
+
+# ---------------------------------------------------------------------------
+# 12k. CI-fix wins over an ALSO-ready rebase (issue #96 part 3 precedence:
+#      ci-fix > rebase), same shape as scenario 12f's comment-fix-beats-ci-fix
+#      check.
+# ---------------------------------------------------------------------------
+dir12k="$(new_fixture scenario12k 'open_prs=0
+feedback_prs=0
+planned_issues=1
+issue=7 branch=none title=Some issue
+advance_ready=7
+cadence=FAST cron=* * * * *' '' "$(printf '20\tfeat/issue-20-x\tbuild\tsha20')" '' "$(printf '11\tfeat/issue-11-x\tsha11\tbase11\t1')")"
+out12k="$(run_tick "$dir12k")"
+check "scenario 12k (ci-fix beats an also-ready rebase and advance): verdict is action=ci-fix pr=20" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=ci-fix pr=20" ]' _ "$out12k"
+check "scenario 12k: no spawn lock written (advance never attempted)" [ ! -e "$dir12k/../state/loop-advance.lock" ]
+
+# action=rebase tick record: pr number captured, cadence round-trips.
+dir12l="$(new_fixture scenario12l 'open_prs=1
+feedback_prs=0
+planned_issues=0
+advance_ready=none
+cadence=WATCH cron=*/5 * * * *' '' '' '' "$(printf '15\tfeat/issue-15-x\tsha15\tbase15\t2')")"
+ticks12l="$work/scenario12l-ticks.jsonl"
+out12l="$(CLAUDE_TICKS_FILE="$ticks12l" run_tick "$dir12l")"
+check "scenario 12l: verdict is still the LAST stdout line for action=rebase" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=rebase pr=15" ]' _ "$out12l"
+check "scenario 12l: action=rebase tick record captures pr number and cadence" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.action !== "rebase") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (obj.pr !== "15") throw new Error("pr mismatch: " + JSON.stringify(obj));
+  if (obj.cadence !== "WATCH") throw new Error("cadence mismatch: " + JSON.stringify(obj));
+' "$ticks12l"
 
 # ---------------------------------------------------------------------------
 # 11. Rotation: LOOP_TICKS_MAX_LINES caps the tick log to the last N lines
@@ -818,6 +890,10 @@ EOF
 exit 0
 EOF
   cat > "$scripts/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/pr-rebase.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
