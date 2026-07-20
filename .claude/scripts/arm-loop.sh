@@ -225,9 +225,14 @@ echo "arm-loop.sh: wrote $claude_rc_dst"
 # fails it at the NEXT boot with an opaque status=127 -- long after this
 # script has exited 0. Fail loudly, right here, instead.
 for dst in "$pr_loop_dst" "$claude_rc_dst"; do
-  leftover="$(grep -o '__[A-Z_]*__' "$dst" 2>/dev/null | sort -u | tr '\n' ' ')"
+  # Scan only directive (non-comment) lines: the template header comments carry
+  # the literal doc token __PLACEHOLDER__, which is not a sed target and must
+  # not false-positive. A REAL leftover lives in a directive line. `|| true`
+  # keeps the no-leftover healthy path from aborting under `set -euo pipefail`
+  # (grep exits 1 on no match). Fail loudly on genuine skew (issue #130).
+  leftover="$(grep -v '^[[:space:]]*#' "$dst" | grep -o '__[A-Z_]*__' | sort -u | tr '\n' ' ' || true)"
   if [ -n "$leftover" ]; then
-    echo "arm-loop.sh: unsubstituted placeholder(s) leaked into $dst: $leftover-- the sed block that generated this file is missing a substitution (issue #130); fix arm-loop.sh before re-running." >&2
+    echo "arm-loop.sh: unsubstituted placeholder(s) leaked into $dst: ${leftover}-- the sed block that generated this file is missing a substitution (issue #130); fix arm-loop.sh before re-running." >&2
     exit 1
   fi
 done
