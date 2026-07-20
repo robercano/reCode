@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @orchestrator-managed arm-loop v6
+# @orchestrator-managed arm-loop v7
 # arm-loop.sh — installs the cron-less PR-loop as systemd (user) units
 # (issue #102). Templated + re-stamped by `/orchestrator:setup`/`sync`; do
 # not hand-edit the copy scaffold.sh wrote into this repo if you want future
@@ -217,6 +217,20 @@ sed -e "s#__WORKDIR__#$repo_root#g" \
 
 echo "arm-loop.sh: wrote $pr_loop_dst"
 echo "arm-loop.sh: wrote $claude_rc_dst"
+
+# Guard against template/script skew (issue #130): if either sed block above
+# is missing a substitution for a placeholder the template still contains
+# (e.g. a new __FOO__ added to the .service template without a matching -e
+# here), the installed unit silently keeps the literal token and systemd
+# fails it at the NEXT boot with an opaque status=127 -- long after this
+# script has exited 0. Fail loudly, right here, instead.
+for dst in "$pr_loop_dst" "$claude_rc_dst"; do
+  leftover="$(grep -o '__[A-Z_]*__' "$dst" 2>/dev/null | sort -u | tr '\n' ' ')"
+  if [ -n "$leftover" ]; then
+    echo "arm-loop.sh: unsubstituted placeholder(s) leaked into $dst: $leftover-- the sed block that generated this file is missing a substitution (issue #130); fix arm-loop.sh before re-running." >&2
+    exit 1
+  fi
+done
 
 systemctl --user daemon-reload
 # pr-loop: enable --now on purpose (NOT restart) — never kill a daemon that
