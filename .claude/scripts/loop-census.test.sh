@@ -115,6 +115,10 @@ cat > "$scripts_dir/pr-comment-fix.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat > "$scripts_dir/pr-rebase.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
 
 # Fake bot-gh.sh: no network, no real `gh` — dispatches on the subcommand and
 # a `--json` marker to canned, fixture-appropriate output.
@@ -209,6 +213,7 @@ check "planned_issues=4 counted" bash -c 'printf "%s\n" "$1" | grep -qx "planned
 check "issue=42 branch line shows the origin-prefixed remote-tracking name" bash -c 'printf "%s\n" "$1" | grep -q "^issue=42 branch=origin/feat/issue-42-y"' _ "$out"
 check "ci_fix_prs=0 counted (no-op pr-ci-fix.sh stub, issue #96)" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=0"' _ "$out"
 check "comment_fix_prs=0 counted (no-op pr-comment-fix.sh stub, issue #96 part 2)" bash -c 'printf "%s\n" "$1" | grep -qx "comment_fix_prs=0"' _ "$out"
+check "rebase_prs=0 counted (no-op pr-rebase.sh stub, issue #96 part 3)" bash -c 'printf "%s\n" "$1" | grep -qx "rebase_prs=0"' _ "$out"
 
 # ---------------------------------------------------------------------------
 # ci_fix_prs (issue #96): loop-census.sh must surface pr-ci-fix.sh's own
@@ -248,6 +253,19 @@ outCommentFix="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo
 check "comment_fix_prs=1 counted when pr-comment-fix.sh reports one candidate" bash -c 'printf "%s\n" "$1" | grep -qx "comment_fix_prs=1"' _ "$outCommentFix"
 
 # ---------------------------------------------------------------------------
+# rebase_prs (issue #96 part 3): same wrapping contract as ci_fix_prs/
+# comment_fix_prs above, exercised against pr-rebase.sh instead.
+# ---------------------------------------------------------------------------
+cat > "$scripts_dir/pr-rebase.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '30\tfeat/issue-30-a\tsha30\tbase30\t1\n'
+EOF
+git -C "$fixture" add .claude/scripts/pr-rebase.sh
+git -C "$fixture" -c user.email=t@e.st -c user.name=t commit -q -m "swap in rebase_prs stub (test fixture)"
+outRebase="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"
+check "rebase_prs=1 counted when pr-rebase.sh reports one candidate" bash -c 'printf "%s\n" "$1" | grep -qx "rebase_prs=1"' _ "$outRebase"
+
+# ---------------------------------------------------------------------------
 # driver_unit_active guard (issue #119 post-review finding #5): loop-census.sh
 # must never report advance_ready for an issue whose transient driver unit
 # (pr-loop-driver-issue<N>, spawned by loop-daemon.sh's run_driver) is
@@ -283,6 +301,10 @@ EOF
 exit 0
 EOF
   cat > "$scripts/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat > "$scripts/pr-rebase.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
@@ -380,7 +402,11 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  chmod +x "$scripts/pr-feedback.sh" "$scripts/pr-ci-fix.sh" "$scripts/pr-comment-fix.sh" "$scripts/cockpit.sh" "$scripts/loop-census.sh"
+  cat > "$scripts/pr-rebase.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$scripts/pr-feedback.sh" "$scripts/pr-ci-fix.sh" "$scripts/pr-comment-fix.sh" "$scripts/pr-rebase.sh" "$scripts/cockpit.sh" "$scripts/loop-census.sh"
   git -C "$dir" init -q -b main
   git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
 }
@@ -625,6 +651,10 @@ cat > "$scriptsStall/pr-ci-fix.sh" <<'EOF'
 exit 0
 EOF
 cat > "$scriptsStall/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsStall/pr-rebase.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
