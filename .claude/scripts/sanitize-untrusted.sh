@@ -20,12 +20,16 @@
 #   ...sanitized body...
 #   [END UNTRUSTED USER CONTENT <NONCE>]
 #
-# Before wrapping, any occurrence of the literal marker phrase
-# ("UNTRUSTED USER CONTENT", case-insensitive) inside the untrusted body is
-# neutralized. That, combined with the random nonce, means untrusted text
-# can never contain a string identical to the real fence markers — it
-# cannot forge a closing fence and smuggle post-fence text that looks like
-# it's outside the untrusted region.
+# Before wrapping, any occurrence of the marker phrase ("UNTRUSTED USER
+# CONTENT", case-insensitive, and whitespace-tolerant — one-or-more spaces,
+# tabs, or a mix between the words, e.g. "UNTRUSTED  USER CONTENT" or
+# "UNTRUSTED<TAB>USER CONTENT") inside the untrusted body is neutralized.
+# That, combined with the random nonce, means untrusted text can never
+# contain a string identical to the real fence markers — it cannot forge a
+# closing fence (even a whitespace-variant one) and smuggle post-fence text
+# that looks like it's outside the untrusted region. The anti-spoof property
+# does not rely on nonce secrecy: the phrase is neutralized regardless of
+# whether the attacker guesses or observes the real nonce.
 #
 # MECHANICAL SANITIZATION applied to the body, in this order:
 #   1. Strip ANSI escape sequences, then any remaining control characters
@@ -75,11 +79,14 @@ body="$(printf '%s' "$raw" \
   | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' \
   | tr -d '\000-\010\013-\037\177')"
 
-# 2. Anti-spoof: neutralize the literal marker phrase wherever it occurs in
-#    the body (case-insensitive), so untrusted text can never contain a
-#    string identical to the real fence markers below.
+# 2. Anti-spoof: neutralize the marker phrase wherever it occurs in the body
+#    (case-insensitive, whitespace-tolerant between the words — matches a
+#    single space, a double space, a tab, or any run of whitespace, so
+#    whitespace-variant forged fences can't survive un-neutralized), so
+#    untrusted text can never contain a string identical to the real fence
+#    markers below.
 body="$(printf '%s' "$body" \
-  | sed -E 's/untrusted user content/UNTRUSTED-USER-CONTENT(neutralized)/gI')"
+  | sed -E 's/untrusted[[:space:]]+user[[:space:]]+content/UNTRUSTED-USER-CONTENT(neutralized)/gI')"
 
 # 3. Escape angle brackets so HTML/script/comment markup is inert.
 body="$(printf '%s' "$body" | sed -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
