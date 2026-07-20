@@ -29,6 +29,12 @@
 #                               hasn't reached PR stage. A tick uses this to
 #                               avoid double-spawning an orchestrator for an
 #                               issue that already has a worktree in progress.
+#                               A REMOTE-ONLY branch match (no local branch of
+#                               the same name) that turns out to be a stale
+#                               ref for an issue whose PR already MERGED is
+#                               ignored (branch=none) instead of counting as
+#                               in_flight forever — see STALE-MERGED-REMOTE
+#                               below (issue #158).
 #   stalled=<n> age_min=<m>      one line PER in_flight issue whose most recent
 #                               events.jsonl activity is older than the stall
 #                               threshold (issue #98) — see STALL DETECTION
@@ -116,6 +122,26 @@
 # the block) and log that fallback to stderr. This only fires when at least
 # one candidate was otherwise eligible; with zero eligible candidates,
 # advance_ready stays "none" exactly as before this feature.
+#
+# --- STALE-MERGED-REMOTE (issue #158) ---------------------------------------
+# `git branch -a --list "*feat/issue-N-*"` matches BOTH local branches and
+# remote-tracking refs (`remotes/origin/...`). After a PR merges — even with
+# `gh pr merge --delete-branch` — the MAIN checkout's local remote-tracking
+# ref for that branch can survive until pruned (`git fetch --prune` /
+# `git remote prune`). Without this guard, a still-open issue whose partial
+# PR already merged would keep matching that stale ref FOREVER, so census
+# would report it in_flight forever — wedging advance_ready and eventually
+# tripping stall/escalation for an issue that in truth has no active branch.
+#
+# Fix: when the ONLY match for an issue is a remote-tracking ref (no local
+# branch of the same name), look up whether a MERGED PR exists for that bare
+# branch name. If one does, treat the issue as branch=none (ignore the stale
+# ref) — it neither counts as in_flight nor blocks advance_ready. If no
+# merged PR is found (the common case: work genuinely in progress, only
+# pushed, local branch since deleted), remote-only in_flight is preserved
+# exactly as before this fix. A genuine LOCAL branch match is unaffected —
+# it always wins over a remote-only one, so this only changes behavior for
+# the specific remote-only-and-already-merged case.
 #
 # --- STALL DETECTION (issue #98) --------------------------------------------
 # An `in_flight` issue (feat/issue-N-* branch exists, no open PR yet) can sit
@@ -348,12 +374,51 @@ while IFS=$'\t' read -r num labels title; do
   done <<< "$module_labels"
   [ "$hit" -eq 1 ] || continue
   planned_count=$((planned_count + 1))
-  # Existing feat/issue-<n>-* branch (local or remote) means it's already in flight.
-  # NOTE: `| head -1` can make `git` see SIGPIPE (exit 141) if head closes the
-  # pipe before git finishes writing; under `set -euo pipefail` that would abort
-  # this whole script. `|| true` on the assignment absorbs that non-fatal
-  # pipeline failure — the captured output (head's one line) is unaffected.
-  branch=$(git -C "$root" branch -a --list "*feat/issue-$num-*" | head -1 | sed 's/^[* ]*//;s|^remotes/||') || true
+  # Existing feat/issue-<n>-* branch: a LOCAL branch means genuinely in_flight
+  # (branch #158) regardless of GitHub state. A REMOTE-ONLY match
+  # (`remotes/origin/...`, no local branch of the same name) is only treated
+  # as "existing" if it is NOT a stale ref left over from an already-merged
+  # PR (issue #158): `git branch -a --list` matches BOTH local branches and
+  # remote-tracking refs, and after a PR merges (even with
+  # `gh pr merge --delete-branch`) the MAIN checkout's local remote-tracking
+  # ref for it can survive until pruned — so a still-open issue whose partial
+  # PR already merged would otherwise match that stale ref FOREVER and never
+  # advance (wedges advance_ready, triggers false stall/escalation). A local
+  # match, when present, always wins over a remote-only one.
+  local_branch=""
+  remote_branch=""
+  branch_lines=$(git -C "$root" branch -a --list "*feat/issue-$num-*" | sed 's/^[* ]*//') || true
+  if [ -n "$branch_lines" ]; then
+    while IFS= read -r bl; do
+      [ -z "$bl" ] && continue
+      case "$bl" in
+        remotes/*) [ -z "$remote_branch" ] && remote_branch="$bl" ;;
+        *) [ -z "$local_branch" ] && local_branch="$bl" ;;
+      esac
+    done <<< "$branch_lines"
+  fi
+
+  if [ -n "$local_branch" ]; then
+    branch="$local_branch"
+  elif [ -n "$remote_branch" ]; then
+    # Bare branch name (strip the "remotes/<remote>/" prefix, e.g.
+    # "remotes/origin/feat/issue-158-x" -> "feat/issue-158-x") to query gh
+    # for a merged PR under it. Only done on this remote-only path — never on
+    # the common local-branch path above — to avoid the extra gh call there.
+    # Guarded with `|| true` (transient gh failure degrades gracefully to "no
+    # merged PR found", i.e. the prior remote-only-stays-in_flight behavior;
+    # it must never abort the census under `set -euo pipefail`).
+    bare_branch="${remote_branch#remotes/*/}"
+    merged_count=$(gh pr list -R "$repo" --state merged --head "$bare_branch" --json number --jq 'length' 2>/dev/null) || true
+    case "$merged_count" in ''|*[!0-9]*) merged_count=0 ;; esac
+    if [ "$merged_count" -ge 1 ]; then
+      branch="none"  # stale remote-tracking ref for an already-merged PR — ignore it (issue #158)
+    else
+      branch="${remote_branch#remotes/}"
+    fi
+  else
+    branch="none"
+  fi
   [ -n "$branch" ] || branch="none"
   detail+="issue=$num branch=$branch title=$title"$'\n'
 
