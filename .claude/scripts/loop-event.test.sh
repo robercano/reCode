@@ -199,6 +199,58 @@ check "scenario 3d: prompt file forbids ending the turn before the work product 
 check "scenario 3d: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3d"
 
 # ---------------------------------------------------------------------------
+# 3e. action=resume issue=N branch=<name> (issue #98/#154 -- stall recovery,
+#     WITH a branch name): one-shot contract, RESUME wording, "continue the
+#     EXISTING branch, never recreate" instructions, the branch name threaded
+#     into the prompt, gate-rerun + publish instructions, LOOP_MODEL honored.
+#     The EMITTED action line itself must stay branch-less (bare "issue=N"),
+#     matching every other verdict kind's action_line shape -- the branch is
+#     prompt context only, never part of the dispatched verdict identity.
+# ---------------------------------------------------------------------------
+dir3e="$(new_fixture scenario3e 'cadence=FAST cron=* * * * *
+action=resume issue=33 branch=feat/issue-33-something')"
+out3e="$(cd "$dir3e" && PATH="/usr/bin:/bin" LOOP_MODEL=opus bash .claude/scripts/loop-event.sh)"; rc3e=$?
+check "scenario 3e (resume, with branch): exits 0" [ "$rc3e" -eq 0 ]
+check "scenario 3e: emits the BARE loop-event: action=resume issue=33 (no branch= in the action line itself)" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: action=resume issue=33"' _ "$out3e"
+check "scenario 3e: LOOP_MODEL is honored (model=opus)" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: model=opus"' _ "$out3e"
+pf3e="$(printf '%s
+' "$out3e" | sed -n 's/^loop-event: prompt-file=//p')"
+check "scenario 3e: prompt-file line points at a real file" bash -c '[ -n "$1" ] && [ -f "$1" ]' _ "$pf3e"
+check "scenario 3e: prompt file mentions issue #33" bash -c 'grep -q "issue #33" "$1"' _ "$pf3e"
+check "scenario 3e: prompt file says RESUME step" bash -c 'grep -q "RESUME step" "$1"' _ "$pf3e"
+check "scenario 3e: prompt file references the given branch name" bash -c 'grep -qF "feat/issue-33-something" "$1"' _ "$pf3e"
+check "scenario 3e: prompt file instructs CONTINUING the existing branch, never recreating it" bash -c 'grep -qi "do not create a new branch\|do NOT create a new branch\|CONTINUATION, NOT a fresh advance" "$1"' _ "$pf3e"
+check "scenario 3e: prompt file mandates re-running the module gates via gate.sh" bash -c 'grep -q "gate.sh" "$1"' _ "$pf3e"
+check "scenario 3e: prompt file mandates publishing (push + open/refresh the bot PR via bot-gh.sh)" bash -c 'grep -q "bot-gh.sh pr create" "$1" && grep -qi "push" "$1"' _ "$pf3e"
+check "scenario 3e: prompt file says Do NOT merge" bash -c 'grep -q "Do NOT merge" "$1"' _ "$pf3e"
+
+# Same one-shot contract clauses, on the RESUME prompt this time.
+check "scenario 3e: prompt file mandates FOREGROUND-only spawn (run_in_background: false)" bash -c 'grep -qi "FOREGROUND" "$1" && grep -q "run_in_background: false" "$1"' _ "$pf3e"
+check "scenario 3e: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf3e"
+
+# ---------------------------------------------------------------------------
+# 3f. action=resume issue=N (issue #98/#154, WITHOUT a branch=... suffix):
+#     loop-tick.sh doesn't always know the branch name -- proves parsing
+#     handles the branch-less form too, and the prompt falls back to
+#     instructing the driver to LOCATE the existing feat/issue-N-* branch
+#     itself rather than referencing a name that was never given.
+# ---------------------------------------------------------------------------
+dir3f="$(new_fixture scenario3f 'cadence=FAST cron=* * * * *
+action=resume issue=34')"
+out3f="$(run_event "$dir3f")"; rc3f=$?
+check "scenario 3f (resume, no branch): exits 0" [ "$rc3f" -eq 0 ]
+check "scenario 3f: emits loop-event: action=resume issue=34" bash -c 'printf "%s
+" "$1" | grep -qxF "loop-event: action=resume issue=34"' _ "$out3f"
+pf3f="$(printf '%s
+' "$out3f" | sed -n 's/^loop-event: prompt-file=//p')"
+check "scenario 3f: prompt-file line points at a real file" bash -c '[ -n "$1" ] && [ -f "$1" ]' _ "$pf3f"
+check "scenario 3f: prompt file mentions issue #34" bash -c 'grep -q "issue #34" "$1"' _ "$pf3f"
+check "scenario 3f: prompt file says RESUME step" bash -c 'grep -q "RESUME step" "$1"' _ "$pf3f"
+check "scenario 3f: prompt file instructs LOCATING the existing feat/issue-34-* branch (no branch name was given)" bash -c 'grep -qF "feat/issue-34-" "$1"' _ "$pf3f"
+
+# ---------------------------------------------------------------------------
 # 4. Garbage verdict line -> non-zero exit, action=none fallback line, no
 #    prompt-file (never spawns on a verdict it can't parse).
 # ---------------------------------------------------------------------------
