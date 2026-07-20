@@ -26,6 +26,7 @@
 #   loop-event: action=comment-fix pr=N   (issue #96 part 2)
 #   loop-event: action=ci-fix pr=N
 #   loop-event: action=rebase pr=N   (issue #96 part 3)
+#   loop-event: action=resume issue=N   (issue #98/#154)
 #   loop-event: model=<model>
 #   loop-event: prompt-file=<absolute path to a plain-text file holding the
 #               verdict-obeying prompt for the driver session>
@@ -79,6 +80,12 @@ verdict="$(printf '%s\n' "$tick_out" | tail -1)"
 
 # --- 2. Obey the verdict -----------------------------------------------------
 n=""
+# resume_branch (issue #98/#154): the OPTIONAL branch name loop-tick.sh's
+# "action=resume issue=N [branch=<name>]" verdict carries when it already
+# knows the stalled issue's local feat/issue-N-* branch -- empty when it
+# doesn't (loop-tick.sh still emits the bare form in that case). Only ever
+# set by the resume arm below; every other verdict leaves it empty.
+resume_branch=""
 case "$verdict" in
   action=none)
     echo "loop-event: no actionable activity — no driver to spawn"
@@ -90,6 +97,16 @@ case "$verdict" in
   "action=comment-fix pr="*) n="${verdict#action=comment-fix pr=}" ;;
   "action=ci-fix pr="*)     n="${verdict#action=ci-fix pr=}" ;;
   "action=rebase pr="*)     n="${verdict#action=rebase pr=}" ;;
+  "action=resume issue="*)
+    # Strip the "action=resume issue=" prefix, then split the OPTIONAL
+    # " branch=<name>" suffix off the remainder: n is always just the digits,
+    # resume_branch is whatever followed "branch=" when present.
+    rest="${verdict#action=resume issue=}"
+    n="${rest%% branch=*}"
+    case "$rest" in
+      *" branch="*) resume_branch="${rest#*branch=}" ;;
+    esac
+    ;;
   *)
     echo "loop-event: unexpected verdict line: $verdict" >&2
     echo "loop-event: action=none"
@@ -172,6 +189,23 @@ PR #$n has gone unmergeable (GitHub reports mergeable=CONFLICTING against base),
 2. CONFLICT: run \`git rebase --abort\` immediately — never leave the worktree mid-rebase. Label the PR \`needs-human\` via bot-gh.sh (create the label with --force if it doesn't exist yet, color b60205, mirroring needs-human.sh's seam) and post ONE bot comment explaining the conflict (which files/hunks conflicted) that ALSO contains \`<!-- claude-rebase-attempted:<base_sha>:<attempt> -->\` (same substitution as above), so pr-rebase.sh's cursor still reflects this attempt if a human later clears the label.
 NEVER force-merge, and NEVER merge, in either outcome."
     action_line="action=rebase pr=$n"
+    ;;
+  action=resume*)
+    branch_clause=""
+    if [ -n "$resume_branch" ]; then
+      branch_clause="Its branch is \`$resume_branch\` — checkout/reattach THAT worktree/branch directly."
+    else
+      branch_clause="No branch name was given with this verdict — locate the existing local branch matching \`feat/issue-$n-*\` (\`git branch --list 'feat/issue-$n-*'\`) and its worktree yourself before doing anything else."
+    fi
+    prompt="Run the RESUME step of the autonomous PR loop for issue #$n (stall recovery, issue #98/#154). $common
+Issue #$n was flagged STALLED by loop-census.sh (no recorded activity for the adapter's stall_minutes window) and a PRIOR driver already left partial work on a local \`feat/issue-$n-*\` branch. $branch_clause This is a CONTINUATION, NOT a fresh advance: do NOT create a new branch, do NOT re-scope the issue from scratch, and do NOT start a new worktree implementer with a clean slate — inspect what is ALREADY THERE (git log/diff on that branch) and pick up from it.
+1. Locate and reattach to the EXISTING worktree for that branch (or re-create a worktree checked out on the SAME branch if the prior one was already cleaned up) — the commits/WIP on the branch are the authoritative starting point.
+2. Assess what's actually done vs. still missing against the issue's acceptance criteria, then finish the implementation on that SAME branch.
+3. Re-run the module's gates before publishing: \`GATES_FILE=.claude/self/gates.json bash $script_dir/gate.sh <name>\` for build/lint/typecheck/test/coverage per the adapter (per the adapter clause above) — do not skip this just because some gates may have passed in a prior, now-stale attempt.
+4. Route the finished diff through the reviewer lenses per the adapter (consensus as configured), addressing any reject before proceeding.
+5. Publish: push the branch and open the bot PR if none exists yet (\`bash $script_dir/bot-gh.sh pr create ...\`), or push the update to refresh an already-open PR for this issue. The work product MUST land on GitHub before you end your turn — a resume that ends without a pushed branch/PR just re-stalls the issue for the next tick.
+Do NOT merge."
+    action_line="action=resume issue=$n"
     ;;
   *)
     prompt="Run the ADDRESS FEEDBACK step of the autonomous PR loop for PR #$n. $common

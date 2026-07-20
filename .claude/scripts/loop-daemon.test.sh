@@ -163,6 +163,9 @@ check "verify_and_classify_post_exit: comment-fix verdict passes extra through u
 vp_rebase="$(verify_and_classify_post_exit 'rebase pr=23' 0 'result=exit rc=0')"
 check "verify_and_classify_post_exit: rebase verdict passes extra through unchanged (issue #96 part 3 -- no fresh branch/worktree to classify)" [ "$vp_rebase" = "result=exit rc=0" ]
 
+vp_resume="$(verify_and_classify_post_exit 'resume issue=42' 0 'result=exit rc=0')"
+check "verify_and_classify_post_exit: resume verdict passes extra through unchanged (issue #98/#154 -- branch PREDATES this run and may hold real work, never classify it as debris)" [ "$vp_resume" = "result=exit rc=0" ]
+
 # --- driver_unit_name / verdict_from_unit_name (issue #119 pt 1; issue #96;
 # issue #96 part 2; issue #96 part 3) -----------------------------------------
 # ci-fix, comment-fix, and rebase EACH get their OWN distinct unit name
@@ -186,6 +189,9 @@ check "driver_unit_name: rebase, comment-fix, ci-fix, and feedback unit names fo
   [ "$1" != "$2" ] && [ "$1" != "$3" ] && [ "$1" != "$4" ] &&
   [ "$2" != "$3" ] && [ "$2" != "$4" ] && [ "$3" != "$4" ]
 ' _ "$un_rebase" "$un_commentfix" "$un_cifix" "$un_feedback"
+un_resume="$(driver_unit_name 'resume issue=42')"
+check "driver_unit_name: resume issue=42 -> pr-loop-driver-resume-issue42 (distinct from advance's SAME issue number, issue #98/#154)" [ "$un_resume" = "pr-loop-driver-resume-issue42" ]
+check "driver_unit_name: resume and advance unit names for the SAME issue number never collide" bash -c '[ "$1" != "$2" ]' _ "$un_resume" "$un_advance"
 
 vun_advance="$(verdict_from_unit_name 'pr-loop-driver-issue42.service')"
 check "verdict_from_unit_name: pr-loop-driver-issue42.service -> advance issue=42 (exact inverse)" [ "$vun_advance" = "advance issue=42" ]
@@ -197,6 +203,9 @@ vun_commentfix="$(verdict_from_unit_name 'pr-loop-driver-commentfix-pr9.service'
 check "verdict_from_unit_name: pr-loop-driver-commentfix-pr9.service -> comment-fix pr=9 (exact inverse)" [ "$vun_commentfix" = "comment-fix pr=9" ]
 vun_rebase="$(verdict_from_unit_name 'pr-loop-driver-rebase-pr9.service')"
 check "verdict_from_unit_name: pr-loop-driver-rebase-pr9.service -> rebase pr=9 (exact inverse)" [ "$vun_rebase" = "rebase pr=9" ]
+vun_resume="$(verdict_from_unit_name 'pr-loop-driver-resume-issue42.service')"
+check "verdict_from_unit_name: pr-loop-driver-resume-issue42.service -> resume issue=42 (exact inverse, issue #98/#154)" [ "$vun_resume" = "resume issue=42" ]
+check "verdict_from_unit_name: pr-loop-driver-resume-issue42.service is NEVER mistaken for an advance verdict" bash -c '[ "$1" != "$2" ]' _ "$vun_resume" "$vun_advance"
 
 # =============================================================================
 # (B) Integration checks: real subprocess, fake loop-event.sh + fake claude.
@@ -467,6 +476,72 @@ check "scenario 4d (rebase): ledger records verdict=rebase pr=21" bash -c '
 check "scenario 4d: prompt file was cleaned up after the driver ran" [ ! -f "$prompt4d_dir/prompt.txt" ]
 
 # ---------------------------------------------------------------------------
+# 4e. action=resume issue=N (issue #98/#154 -- stall recovery): a resume
+#     verdict must actually spawn a driver (NOT fall through to the
+#     unrecognized-action branch, which was #154's bug), with its own
+#     distinct verdict text (never confused with an advance issue=N verdict
+#     for the same issue number).
+# ---------------------------------------------------------------------------
+prompt4e_dir="$work/scenario4e-support"
+mkdir -p "$prompt4e_dir"
+printf 'Run the RESUME step for issue #55.
+' > "$prompt4e_dir/prompt.txt"
+dir4e="$(new_fixture scenario4e "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=resume issue=55'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt4e_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir4e" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir4e" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir4e" claude '#!/usr/bin/env bash
+echo "claude-ran" >> "'"$dir4e"'/claude.marker"
+echo "{\"session_id\":\"sess-resume-55\"}"
+exit 0'
+run_daemon_once "$dir4e" >/dev/null 2>&1
+check "scenario 4e (resume): driver actually spawned (claude ran, NOT the unrecognized-action fallthrough -- issue #154's bug)" [ -f "$dir4e/claude.marker" ]
+ledger4e="$dir4e/.claude/state/loop-runs.log"
+check "scenario 4e: ledger records verdict=resume issue=55" bash -c '
+  grep -Eq "^pid=[0-9]+ session=sess-resume-55 verdict=resume issue=55 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"
+' _ "$ledger4e"
+check "scenario 4e: prompt file was cleaned up after the driver ran" [ ! -f "$prompt4e_dir/prompt.txt" ]
+
+# ---------------------------------------------------------------------------
+# 4f. action=resume issue=N branch=<name> (issue #98/#154): loop-tick.sh's
+#     resume verdict may carry an OPTIONAL trailing " branch=<name>" -- even
+#     if it reaches this daemon unstripped, driver_unit_name/the ledger must
+#     still see the BARE "resume issue=N" shape (the branch is prompt-only
+#     context, never part of the verdict/unit-name identity).
+# ---------------------------------------------------------------------------
+prompt4f_dir="$work/scenario4f-support"
+mkdir -p "$prompt4f_dir"
+printf 'Run the RESUME step for issue #56.
+' > "$prompt4f_dir/prompt.txt"
+dir4f="$(new_fixture scenario4f "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=resume issue=56 branch=feat/issue-56-wip'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt4f_dir/prompt.txt'
+exit 0")"
+fake_bin "$dir4f" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir4f" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir4f" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-resume-56\"}"
+exit 0'
+run_daemon_once "$dir4f" >/dev/null 2>&1
+ledger4f="$dir4f/.claude/state/loop-runs.log"
+check "scenario 4f (resume with branch suffix): ledger records the BARE verdict=resume issue=56 (branch suffix stripped before driver_unit_name/the ledger)" bash -c '
+  grep -Eq "^pid=[0-9]+ session=sess-resume-56 verdict=resume issue=56 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"
+' _ "$ledger4f"
+check "scenario 4f: prompt file was cleaned up after the driver ran" [ ! -f "$prompt4f_dir/prompt.txt" ]
+
+# ---------------------------------------------------------------------------
 # 5. Driver timeout: fake timeout stub exits 124 (as GNU timeout does on a
 #    real kill) without ever invoking claude; ledger must record
 #    result=timeout rc=124.
@@ -706,6 +781,50 @@ check "scenario 10: nothing was deleted on the offline path — branch still exi
 check "scenario 10: nothing was deleted on the offline path — worktree still exists" [ -d "$wt10" ]
 
 # ---------------------------------------------------------------------------
+# 10b. resume verdicts NEVER reach the debris classifier (issue #98/#154):
+#      same "empty branch, no open PR" fixture as scenario 8's Case A, but
+#      with a resume issue=N verdict instead of advance issue=N, and
+#      deliberately NO bot-gh.sh stub installed. Scenario 8 proves an ADVANCE
+#      driver's provably-empty branch IS auto-deleted; this proves a RESUME
+#      driver's branch is NEVER touched even when it looks identically
+#      "empty" by classify_debris's own metric — verify_and_classify_post_exit
+#      excludes every non-advance verdict (resume included), so the whole
+#      debris path (and the bot-gh.sh PR query it would otherwise make) must
+#      never even run. If it did run here, the missing bot-gh.sh stub would
+#      make it fail loudly rather than silently.
+# ---------------------------------------------------------------------------
+prompt10b_dir="$work/scenario10b-support"
+mkdir -p "$prompt10b_dir"
+printf 'Run the RESUME step for issue #89.\n' > "$prompt10b_dir/prompt.txt"
+dir10b="$(git_fixture scenario10b "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=resume issue=89'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt10b_dir/prompt.txt'
+exit 0")"
+wt10b="$work/scenario10b-wt"
+git -C "$dir10b" branch feat/issue-89-empty main
+git -C "$dir10b" worktree add -q "$wt10b" feat/issue-89-empty
+fake_bin "$dir10b" setsid '#!/usr/bin/env bash
+exec "$@"'
+fake_bin "$dir10b" timeout '#!/usr/bin/env bash
+shift; shift
+exec "$@"'
+fake_bin "$dir10b" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-89\",\"result\":\"ok\"}"
+exit 0'
+# Deliberately NO bot-gh.sh stub installed at all in this fixture -- proves
+# verify_and_classify_post_exit's GitHub query never even runs for resume.
+run_daemon_once "$dir10b" >/dev/null 2>&1
+ledger10b="$dir10b/.claude/state/loop-runs.log"
+check "scenario 10b (resume debris-exclusion): ledger records the plain verdict, no debris=/pr=/verify= fields (post-exit verify never ran)" bash -c '
+  grep -Eq "^pid=[0-9]+ session=sess-89 verdict=resume issue=89 ts=[0-9T:Z-]+ result=exit rc=0$" "$1"' _ "$ledger10b"
+check "scenario 10b: ledger never records action=deleted for a resume verdict" bash -c '! grep -q "action=deleted" "$1"' _ "$ledger10b"
+check "scenario 10b (debris-exclusion safety): the branch was NOT deleted" bash -c '
+  git -C "$1" rev-parse --verify --quiet refs/heads/feat/issue-89-empty >/dev/null 2>&1' _ "$dir10b"
+check "scenario 10b: the worktree was NOT removed" [ -d "$wt10b" ]
+
+# ---------------------------------------------------------------------------
 # fake_systemd_run: a generic stub that records its full invocation (so a
 # scenario can assert on --unit=/RuntimeMaxSec=/--setenv= verbatim) and then
 # execs whatever follows the "--" marker, mirroring what real `systemd-run
@@ -792,6 +911,33 @@ check "scenario 12: unit name derived from a feedback verdict (pr-loop-driver-pr
 ledger12="$dir12/.claude/state/loop-runs.log"
 check "scenario 12: ledger records the feedback verdict with rc=0 propagated" bash -c '
   grep -Eq "verdict=feedback pr=201 ts=[0-9T:Z-]+ result=exit rc=0" "$1"' _ "$ledger12"
+
+# ---------------------------------------------------------------------------
+# 12b. Transient systemd unit path, resume verdict (issue #98/#154): unit
+#      naming derived as pr-loop-driver-resume-issue<N> (NOT
+#      pr-loop-driver-issue<N> -- that shape is reserved for a fresh advance
+#      driver on the SAME issue number), and exit-code propagation still
+#      lands in the ledger.
+# ---------------------------------------------------------------------------
+prompt12b_dir="$work/scenario12b-support"
+mkdir -p "$prompt12b_dir"
+printf 'Run the RESUME step for issue #202.\n' > "$prompt12b_dir/prompt.txt"
+dir12b="$(new_fixture scenario12b "#!/usr/bin/env bash
+echo 'cadence=FAST cron=* * * * *'
+echo 'loop-event: action=resume issue=202'
+echo 'loop-event: model=sonnet'
+echo 'loop-event: prompt-file=$prompt12b_dir/prompt.txt'
+exit 0")"
+fake_systemd_run "$dir12b"
+fake_bin "$dir12b" claude '#!/usr/bin/env bash
+echo "{\"session_id\":\"sess-202\",\"result\":\"ok\"}"
+exit 0'
+run_daemon_once "$dir12b" >/dev/null 2>&1
+check "scenario 12b: unit name derived from a resume verdict (pr-loop-driver-resume-issue202, distinct from advance's pr-loop-driver-issue202)" bash -c '
+  grep -qF -- "--unit=pr-loop-driver-resume-issue202" "$1"' _ "$dir12b/systemd-run.args"
+ledger12b="$dir12b/.claude/state/loop-runs.log"
+check "scenario 12b: ledger records the resume verdict with rc=0 propagated" bash -c '
+  grep -Eq "verdict=resume issue=202 ts=[0-9T:Z-]+ result=exit rc=0" "$1"' _ "$ledger12b"
 
 # ---------------------------------------------------------------------------
 # 13. Startup re-attach (issue #119 pt 3): a driver unit for issue #300 is

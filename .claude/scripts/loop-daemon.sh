@@ -21,7 +21,7 @@
 # so a driver's own bash children can never be orphaned by a bare SIGTERM.
 #
 # RUN LEDGER: one line per driver appended to .claude/state/loop-runs.log:
-#   pid=<pgid> session=<session_id> verdict=<advance issue=N|feedback pr=N|ci-fix pr=N|comment-fix pr=N|rebase pr=N> ts=<ISO8601> [result=exit|timeout|phantom rc=N] [pr=N] [debris=empty|publishable|half-done [action=deleted|resumable]] [verify=skipped]
+#   pid=<pgid> session=<session_id> verdict=<advance issue=N|feedback pr=N|ci-fix pr=N|comment-fix pr=N|rebase pr=N|resume issue=N> ts=<ISO8601> [result=exit|timeout|phantom rc=N] [pr=N] [debris=empty|publishable|half-done [action=deleted|resumable]] [verify=skipped]
 # session_id is parsed out of the driver's own --output-format json stdout,
 # so a hung/dead driver can be inspected later with
 # `claude --resume <session_id> --fork-session` (safe while it's still
@@ -55,7 +55,7 @@
 # drivers died ledger-less this way. The fix: when `systemd-run` is on PATH,
 # `run_driver` spawns each driver as its OWN transient `--user` unit
 # (`pr-loop-driver-issue<N>`/`pr-loop-driver-pr<N>`/`pr-loop-driver-cifix-pr<N>`/
-# `pr-loop-driver-rebase-pr<N>`, derived from the verdict)
+# `pr-loop-driver-rebase-pr<N>`/`pr-loop-driver-resume-issue<N>`, derived from the verdict)
 # via `systemd-run --user --wait --collect --unit=... -p RuntimeMaxSec=<LOOP_DRIVER_TIMEOUT>`.
 # The driver's real parent becomes the user manager — it lives in ITS OWN
 # scope, independent of the daemon's cgroup — so a daemon restart/crash kills
@@ -291,6 +291,17 @@ classify_debris() {
 # — it NEVER falsely declares `result=phantom`, and NEVER deletes anything, on
 # a network hiccup. classify_debris (pure git) still runs regardless of
 # network reachability.
+#
+# `resume issue=N` (issue #98/#154) is ALSO deliberately excluded here (falls
+# into the same `*` pass-through arm) — DO NOT "fix" this by adding it to the
+# advance arm. A resume driver continues an EXISTING, possibly half-done local
+# `feat/issue-N-*` branch left by a PRIOR stalled driver; running this debris
+# check against it could misclassify genuine in-progress work as `empty` and
+# delete it out from under the resume driver. Unlike feedback/ci-fix/rebase
+# (which never even create a local branch — they push straight onto an
+# existing PR's branch), resume's branch predates this run but is exactly the
+# kind of half-finished work classify_debris's `half-done`/`publishable`
+# outcomes are meant to protect, never destroy.
 verify_and_classify_post_exit() {
   local verdict="$1" rc="$2" extra="$3"
 
@@ -375,31 +386,41 @@ verify_and_classify_post_exit() {
 }
 
 # --- transient systemd unit naming (issue #119 pt 1; issue #96 pt ci-fix;
-# issue #96 part 2 pt comment-fix; issue #96 part 3 pt rebase) ---------------
+# issue #96 part 2 pt comment-fix; issue #96 part 3 pt rebase; issue #98/#154
+# pt resume) -------------------------------------------------------------
 # $1=verdict -> "pr-loop-driver-issue<N>" for "advance issue=N",
 # "pr-loop-driver-pr<N>" for "feedback pr=N", "pr-loop-driver-cifix-pr<N>"
 # for "ci-fix pr=N", "pr-loop-driver-commentfix-pr<N>" for
-# "comment-fix pr=N", or "pr-loop-driver-rebase-pr<N>" for "rebase pr=N".
-# Used both to SPAWN the unit (run_driver) and, in reverse
-# (verdict_from_unit_name below), to recover the verdict from a unit already
-# running when this daemon process starts up (reattach_orphaned_drivers) — the
-# two must stay exact inverses of each other. ci-fix, comment-fix, and rebase
-# EACH get their OWN distinct unit name (none reuses "pr-loop-driver-pr<N>")
-# so a feedback driver, a comment-fix driver, a ci-fix driver, and a rebase
-# driver on the SAME PR can never collide in naming or reattach — the verdict
-# precedence (feedback > comment-fix > ci-fix > rebase) makes more than one of
-# these firing for the same PR in the SAME tick impossible, but a driver from
-# a PRIOR tick could still be finishing up while a LATER tick, after that
-# reaction was addressed, dispatches a DIFFERENT kind of driver for the
-# identical PR number; distinct unit names keep those spawns/reattaches from
-# ever being confused with each other. "pr-loop-driver-rebase-pr<N>" cannot
-# collide with the plain "pr-loop-driver-pr<N>" shape either: the literal
-# string immediately following the common "pr-loop-driver-" prefix is
-# "rebase-pr" vs bare "pr", so neither is ever a prefix of the other, and the
-# same holds against the "cifix-pr"/"commentfix-pr" shapes.
+# "comment-fix pr=N", "pr-loop-driver-rebase-pr<N>" for "rebase pr=N", or
+# "pr-loop-driver-resume-issue<N>" for "resume issue=N". Used both to SPAWN
+# the unit (run_driver) and, in reverse (verdict_from_unit_name below), to
+# recover the verdict from a unit already running when this daemon process
+# starts up (reattach_orphaned_drivers) — the two must stay exact inverses of
+# each other. ci-fix, comment-fix, rebase, and resume EACH get their OWN
+# distinct unit name (none reuses "pr-loop-driver-pr<N>", and resume does NOT
+# reuse the advance shape "pr-loop-driver-issue<N>" either — a resume driver
+# continues an EXISTING branch with partial work, not a fresh advance, so
+# reusing that name would risk colliding with a genuine advance driver on
+# reattach) so a feedback driver, a comment-fix driver, a ci-fix driver, a
+# rebase driver, and a resume driver on the SAME PR/issue can never collide in
+# naming or reattach — the verdict precedence (feedback > comment-fix > ci-fix
+# > rebase) makes more than one of these firing for the same PR in the SAME
+# tick impossible, but a driver from a PRIOR tick could still be finishing up
+# while a LATER tick, after that reaction was addressed, dispatches a
+# DIFFERENT kind of driver for the identical PR/issue number; distinct unit
+# names keep those spawns/reattaches from ever being confused with each other.
+# "pr-loop-driver-rebase-pr<N>" cannot collide with the plain
+# "pr-loop-driver-pr<N>" shape either: the literal string immediately
+# following the common "pr-loop-driver-" prefix is "rebase-pr" vs bare "pr",
+# so neither is ever a prefix of the other, and the same holds against the
+# "cifix-pr"/"commentfix-pr" shapes. "pr-loop-driver-resume-issue<N>" cannot
+# collide with "pr-loop-driver-issue<N>" either: the literal string
+# immediately following "pr-loop-driver-" is "resume-issue" vs bare "issue",
+# so neither is ever a prefix of the other.
 driver_unit_name() {
   case "$1" in
     "advance issue="*)     printf 'pr-loop-driver-issue%s' "${1#advance issue=}" ;;
+    "resume issue="*)      printf 'pr-loop-driver-resume-issue%s' "${1#resume issue=}" ;;
     "comment-fix pr="*)    printf 'pr-loop-driver-commentfix-pr%s' "${1#comment-fix pr=}" ;;
     "ci-fix pr="*)         printf 'pr-loop-driver-cifix-pr%s' "${1#ci-fix pr=}" ;;
     "rebase pr="*)         printf 'pr-loop-driver-rebase-pr%s' "${1#rebase pr=}" ;;
@@ -417,11 +438,16 @@ driver_unit_name() {
 # "commentfix-pr..." ever matches the plain "pr..." prefix pattern either
 # way — but the ordering keeps all three non-advance arms visually adjacent to
 # their distinct name shapes in driver_unit_name above, so the pairing stays
-# obvious on read).
+# obvious on read). Same reasoning for `pr-loop-driver-resume-issue*`: it can
+# never be shadowed by `pr-loop-driver-issue*` (the literal "resume-issue" vs
+# bare "issue" following the common prefix means neither is ever a prefix of
+# the other), but it's placed right after the advance arm anyway to keep it
+# visually adjacent to its distinct name shape in driver_unit_name above.
 verdict_from_unit_name() {
   local unit="${1%.service}"
   case "$unit" in
     pr-loop-driver-issue*)      printf 'advance issue=%s' "${unit#pr-loop-driver-issue}" ;;
+    pr-loop-driver-resume-issue*)  printf 'resume issue=%s' "${unit#pr-loop-driver-resume-issue}" ;;
     pr-loop-driver-cifix-pr*)   printf 'ci-fix pr=%s' "${unit#pr-loop-driver-cifix-pr}" ;;
     pr-loop-driver-commentfix-pr*) printf 'comment-fix pr=%s' "${unit#pr-loop-driver-commentfix-pr}" ;;
     pr-loop-driver-rebase-pr*)  printf 'rebase pr=%s' "${unit#pr-loop-driver-rebase-pr}" ;;
@@ -484,7 +510,7 @@ reattach_orphaned_drivers() {
     [ -n "$unit" ] || continue
     local verdict; verdict="$(verdict_from_unit_name "$unit")"
     if [ -z "$verdict" ]; then
-      log "startup re-attach: active unit '$unit' doesn't match the pr-loop-driver-<issueN|prN|cifix-prN> naming — leaving it to systemd, not re-attaching"
+      log "startup re-attach: active unit '$unit' doesn't match the pr-loop-driver-<issueN|prN|cifix-prN|resume-issueN> naming — leaving it to systemd, not re-attaching"
       continue
     fi
     log "startup re-attach: found active driver unit '$unit' from a previous daemon ($verdict) — waiting instead of spawning a new one"
@@ -494,6 +520,10 @@ reattach_orphaned_drivers() {
     case "$rc" in
       124|137) extra="result=timeout rc=$rc" ;;
     esac
+    # "advance issue=N" only — a "resume issue=N" verdict is deliberately
+    # excluded here too (same reasoning as verify_and_classify_post_exit's own
+    # guard above): its branch predates this run and may hold real half-done
+    # work that must never be misclassified as debris.
     case "$verdict" in
       "advance issue="*) extra="$(verify_and_classify_post_exit "$verdict" "$rc" "$extra")" ;;
     esac
@@ -693,7 +723,7 @@ run_once() {
     none|"")
       : # nothing actionable — no driver spawned
       ;;
-    "advance issue="*|"feedback pr="*|"comment-fix pr="*|"ci-fix pr="*|"rebase pr="*)
+    "advance issue="*|"feedback pr="*|"comment-fix pr="*|"ci-fix pr="*|"rebase pr="*|"resume issue="*)
       local model prompt_file
       model="$(printf '%s\n' "$out" | sed -n 's/^loop-event: model=//p' | tail -1)"
       model="${model:-${LOOP_MODEL:-sonnet}}"
@@ -701,7 +731,16 @@ run_once() {
       if [ -z "$prompt_file" ]; then
         log "action=$action_line but no prompt-file was emitted — refusing to spawn"
       else
-        run_driver "$action_line" "$model" "$prompt_file" || true
+        # A "resume issue=N" action line may carry an OPTIONAL trailing
+        # " branch=<name>" (issue #98/#154) -- that's context for the PROMPT
+        # only; strip it before this reaches run_driver/driver_unit_name/the
+        # ledger so all three stay the bare "resume issue=N" shape, exactly
+        # like every other verdict kind dispatched here.
+        local driver_verdict="$action_line"
+        case "$driver_verdict" in
+          "resume issue="*" branch="*) driver_verdict="${driver_verdict%% branch=*}" ;;
+        esac
+        run_driver "$driver_verdict" "$model" "$prompt_file" || true
       fi
       ;;
     *)
