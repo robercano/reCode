@@ -22,6 +22,11 @@
 # rows); an unfinished task silent for >COCKPIT_STALE_AFTER_SECONDS (default
 # 2h) is badged "stale" with muted rows instead of reading as active work.
 #
+# Issue #173 adds a priority chip to each issue row when the owner has set a
+# `priority:critical|high|medium|low` label (see priorityOf() below) — the
+# same label set loop-census.sh's ADVANCE ordering uses. Unprioritized issues
+# render with no chip.
+#
 # Usage:
 #   cockpit.sh [--fixtures <dir>] [output-path]
 #   cockpit.sh --parse-blocking
@@ -455,6 +460,27 @@ function hasLabel(obj, name) {
   return (obj.labels || []).some((l) => l && l.name === name);
 }
 
+// ---- Priority chip (issue #173) --------------------------------------------
+// The owner sets AT MOST one `priority:critical|high|medium|low` label per
+// issue in the GitHub UI (loop-census.sh's ordering feature, same label
+// set). priorityOf() surfaces that label for renderIssues() below, reusing
+// the SAME .badge classes the rest of the dashboard already uses rather than
+// inventing new ones: critical=bad (red), high=warn (amber), medium/low=
+// muted (grey). Returns null (no chip) when the issue carries none of the
+// four labels — an unprioritized issue stays visually quiet, not noisy.
+const PRIORITY_LEVELS = [
+  { name: "critical", cls: "bad" },
+  { name: "high", cls: "warn" },
+  { name: "medium", cls: "muted" },
+  { name: "low", cls: "muted" },
+];
+function priorityOf(issue) {
+  for (const level of PRIORITY_LEVELS) {
+    if (hasLabel(issue, "priority:" + level.name)) return level;
+  }
+  return null;
+}
+
 // ---- Live worker progress section (issue #52, grouped by task in #92) -----
 // Derive the CURRENT state per worker keyed by (role, task): keep the LATEST
 // event (by file order, i.e. append order) per key. No event log, or an
@@ -870,6 +896,8 @@ function renderIssues() {
     for (const issue of list) {
       const edges = parseBlocking(issue.body || "");
       html += `<li id="issue-${issue.number}" data-module="${esc(key)}"><a href="${esc(issue.url || "#")}">#${issue.number}</a> ${esc(issue.title)}`;
+      const priority = priorityOf(issue);
+      if (priority) html += ` <span class="badge ${priority.cls}">priority: ${esc(priority.name)}</span>`;
       const rel = [];
       if (edges.blockedBy.length) rel.push(`Blocked by ${refList(edges.blockedBy)}`);
       if (edges.blocks.length) rel.push(`Blocks ${refList(edges.blocks)}`);

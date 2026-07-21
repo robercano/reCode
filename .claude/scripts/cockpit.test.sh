@@ -105,7 +105,7 @@ check "parser finds only 'blocks' edge, no false blockedBy" node -e '
 mkdir -p "$work/fixtures"
 cat > "$work/fixtures/issues.json" <<'EOF'
 [
-  {"number":100,"title":"Issue A <script>alert(1)</script>","url":"https://example.com/100","labels":[{"name":"module:harness"}],"body":"Blocked by #101, #102\nBlocks #103\n- [ ] #104 subtask\n- [x] #105 done subtask"},
+  {"number":100,"title":"Issue A <script>alert(1)</script>","url":"https://example.com/100","labels":[{"name":"module:harness"},{"name":"priority:critical"}],"body":"Blocked by #101, #102\nBlocks #103\n- [ ] #104 subtask\n- [x] #105 done subtask"},
   {"number":101,"title":"Issue B","url":"https://example.com/101","labels":[{"name":"module:docs"}],"body":""},
   {"number":103,"title":"Issue C","url":"https://example.com/103","labels":[],"body":""}
 ]
@@ -165,6 +165,13 @@ check "issue title is HTML-escaped, not raw" bash -c '! grep -qF "<script>alert(
 check "blocked-by relationship rendered, linked to known issue #101" grep -qF 'Blocked by <a href="#issue-101">#101</a>, #102' "$html"
 check "blocks relationship rendered, linked to known issue #103" grep -qF 'Blocks <a href="#issue-103">#103</a>' "$html"
 check "subtasks (task-list refs) rendered" grep -qF 'Subtasks #104, #105' "$html"
+
+# Priority chip (issue #173): issue 100 carries priority:critical -> renders
+# a "bad"-classed chip on its row. Issue 101/103 carry no priority:* label ->
+# no chip at all (unprioritized issues stay visually quiet).
+check "prioritized issue #100 renders a priority:critical chip (badge bad)" grep -qF '<span class="badge bad">priority: critical</span>' "$html"
+check "only the one prioritized issue renders a priority chip (101/103 render none)" bash -c \
+  '[ "$(grep -o "badge [a-z]*\">priority:" "$1" | wc -l)" -eq 1 ]' _ "$html"
 
 # PRs with review + CI status.
 check "PRs section present" grep -q '<section id="prs"' "$html"

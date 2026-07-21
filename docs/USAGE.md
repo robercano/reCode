@@ -353,16 +353,25 @@ decide what the loop actually touches:
   - **`module:<name>`** — routing, not approval. It maps issue → module → the worker's `path` boundary
     (`gates.json.modules[]`). No module ⇒ no boundary ⇒ nothing safe to hand a worker, `planned` or not.
 
-  The ADVANCE step picks the **lowest-numbered open issue labelled `planned` + `module:*`** with no
-  existing `feat/issue-<n>-*` branch — one at a time, and only when there are zero open PRs. Tracking
-  issues (plans split into `Blocked by` sub-issue chains) stay `backlog` forever so the loop works the
-  chain, never the tracker. **"Blocked by #N" in an issue body is load-bearing for this selection, not
-  merely cosmetic for the cockpit graph** (`loop-census.sh`, issue #97): the census skips a `planned`
-  candidate while any issue it declares "Blocked by" is still open, emits a `blocked=<n> by=<N>` line
-  explaining the skip, and picks the next unblocked lowest-numbered candidate instead — a blocker
-  closing makes the skipped issue eligible again on the very next tick, no extra bookkeeping required.
-  A "Blocked by" cycle falls back to the lowest-numbered candidate rather than wedging the loop. Only
-  the explicit "Blocked by" phrase gates; task-list/parent-child refs (`- [ ] #N`) do not.
+  The ADVANCE step picks the **highest-priority, then lowest-numbered, open issue labelled
+  `planned` + `module:*`** with no existing `feat/issue-<n>-*` branch — one at a time, and only when
+  there are zero open PRs. Tracking issues (plans split into `Blocked by` sub-issue chains) stay
+  `backlog` forever so the loop works the chain, never the tracker. **"Blocked by #N" in an issue body
+  is load-bearing for this selection, not merely cosmetic for the cockpit graph** (`loop-census.sh`,
+  issue #97): the census skips a `planned` candidate while any issue it declares "Blocked by" is still
+  open, emits a `blocked=<n> by=<N>` line explaining the skip, and picks the next unblocked candidate
+  instead — a blocker closing makes the skipped issue eligible again on the very next tick, no extra
+  bookkeeping required. A "Blocked by" cycle falls back to the lowest-numbered candidate rather than
+  wedging the loop. Only the explicit "Blocked by" phrase gates; task-list/parent-child refs (`- [ ] #N`)
+  do not.
+  - **Priority labels (`priority:critical|high|medium|low`, issue #173).** The owner sets one of these
+    four labels in the GitHub UI on any `planned` issue; nothing else about the workflow changes. The
+    census orders candidates by (priority rank, then issue number): `critical` < `high` < `medium` <
+    `low` < unlabeled, with issue number as the tiebreaker within a rank — so a label-free backlog
+    behaves exactly as before (lowest-numbered first). The blocking-graph gate above still overrides
+    priority: a blocked candidate is skipped regardless of how high its priority is — priority is
+    preference, "Blocked by" edges are semantics. The cockpit shows a priority chip on each prioritized
+    issue row.
 - **Owner-approval merge gate.** Workers author PRs as the **bot** (`bot-gh.sh`); the MERGE step (above)
   only merges PRs the repo **owner** has Approved on GitHub that are CI-green and mergeable. It never
   approves on the owner's behalf.
