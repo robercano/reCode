@@ -1,15 +1,32 @@
 {
   "_README": "SELF-ADAPTER (issue #11). Lets this template dogfood itself WITHOUT polluting the shipped placeholder .claude/gates.json (which stays pristine for downstream adopters). The loop uses THIS file only when pointed at it via GATES_FILE=.claude/self/gates.json (see .claude/self/README.md). Gate commands are node/bash-only so they run with no extra tooling installed.",
-
-  "project": { "name": "recode", "language": "shell+markdown+js", "packageManager": "none" },
-
+  "project": {
+    "name": "recode",
+    "language": "shell+markdown+js",
+    "packageManager": "none"
+  },
   "modules": [
-    { "name": "docs",     "path": "docs",     "description": "User-facing docs: GETTING_STARTED, USAGE, HARDENING, PROMPTS, ARCHITECTURE, TOKEN_BUDGET." },
-    { "name": "harness",  "path": ".claude",  "description": "Orchestrator machinery: agents, commands, scripts, workflows, self-adapter." },
-    { "name": "examples", "path": "examples", "description": "Worked adapter examples (may not exist yet; created by issue #6)." },
-    { "name": "ci",       "path": ".github",  "description": "Server-side gate workflows and composite actions." }
+    {
+      "name": "docs",
+      "path": "docs",
+      "description": "User-facing docs: GETTING_STARTED, USAGE, HARDENING, PROMPTS, ARCHITECTURE, TOKEN_BUDGET."
+    },
+    {
+      "name": "harness",
+      "path": ".claude",
+      "description": "Orchestrator machinery: agents, commands, scripts, workflows, self-adapter."
+    },
+    {
+      "name": "examples",
+      "path": "examples",
+      "description": "Worked adapter examples (may not exist yet; created by issue #6)."
+    },
+    {
+      "name": "ci",
+      "path": ".github",
+      "description": "Server-side gate workflows and composite actions."
+    }
   ],
-
   "gates": {
     "_note": "Static checks in .claude/self/checks.sh; end-to-end fan-out smoke in .claude/self/smoke-fanout.sh (issue #64) — node + bash + git only, so they pass in a bare environment. test_affected stays static-only: it's the Stop-hook fast path and shouldn't pay the smoke's git churn on every stop.",
     "install": "",
@@ -23,38 +40,47 @@
     "e2e": "",
     "security": ""
   },
-
   "worktree": {
     "_note": "Self-host workers need no external toolchain state (gates are node/bash-only), so both hooks are empty. Present to document the schema and exercise worktree.sh's skip path.",
     "setup": "",
     "teardown": ""
   },
-
-  "review": { "lenses": ["correctness", "tests"], "consensus": "all", "skills": [] },
-
+  "review": {
+    "lenses": [
+      "correctness",
+      "tests"
+    ],
+    "consensus": "all",
+    "skills": []
+  },
   "budget": {
-    "orchestrator_model": "opus", "worker_model": "sonnet",
-    "explorer_model": "haiku", "reviewer_model": "sonnet",
-    "reviewer_models": { "correctness": "opus" },
+    "orchestrator_model": "opus",
+    "worker_model": "sonnet",
+    "explorer_model": "haiku",
+    "reviewer_model": "sonnet",
+    "reviewer_models": {
+      "correctness": "opus"
+    },
     "max_parallel_workers": 2,
-
     "_spend_ceilings_note": "issue #95 — loop spend ceilings, read by loop-tick.sh's STEP 0 pre-flight and arm-loop.sh's default --stop-after-days. Documented in docs/TOKEN_BUDGET.md -> 'Loop spend ceilings'.",
-    "stop_after_days": 7,
+    "stop_after_days": 3650,
     "per_issue_attempts": 5,
     "daily_action_ceiling": 50,
-
     "_stall_resume_note": "issue #98 — stall/resume: stall_minutes is loop-census.sh's threshold (events.jsonl inactivity) for flagging an in_flight issue as stalled=N; loop-tick.sh then resumes it (bounded to 2 attempts, tracked in .claude/state/loop-resume-attempts.json) instead of refusing forever.",
     "stall_minutes": 30
   },
-
-  "merge": { "policy": "pr-per-agent", "baseBranch": "main" },
-
+  "merge": {
+    "policy": "pr-per-agent",
+    "baseBranch": "main"
+  },
   "_notify_note": "issue #99 — needs-human push-notification seam, read by .claude/scripts/notify.sh (GATES_FILE-aware, same empty-means-skip convention as `gates`/`budget`). Empty string here = disabled (offline/CI-safe no-op); left EMPTY deliberately for this repo's own dogfooding — the owner picks a default later. Contract: severity/title/body-line reach the configured command BOTH as positional args ($1/$2/$3) and as NOTIFY_SEVERITY/NOTIFY_TITLE/NOTIFY_BODY env vars. Called by .claude/scripts/needs-human.sh's needs_human_flag() at every loop block-on-owner point (attempt-budget/stall escalation in loop-tick.sh, PR-ready-for-review/re-approval-needed in merge-ready.sh, CHANGES_REQUESTED-addressed-awaiting-re-review in pr-feedback.sh), throttled to one notification per (kind,target) per window (default 1800s, see notify.sh). Example commands (uncomment/adapt ONE):\n  ntfy:        curl -s -d \"$NOTIFY_BODY\" -H \"Title: $NOTIFY_TITLE\" -H \"Priority: $NOTIFY_SEVERITY\" ntfy.sh/<your-topic>\n  notify-send: notify-send \"$NOTIFY_TITLE\" \"$NOTIFY_BODY\"\n  webhook:     curl -s -X POST -H 'Content-Type: application/json' -d \"{\\\"severity\\\":\\\"$NOTIFY_SEVERITY\\\",\\\"title\\\":\\\"$NOTIFY_TITLE\\\",\\\"body\\\":\\\"$NOTIFY_BODY\\\"}\" https://example.invalid/hook",
   "notify": "",
-
   "_commentFix_note": "issue #96 (part 2) — bot-commenter allowlist for the comment-fix reaction, read by .claude/scripts/pr-comment-fix.sh. commentFix.botAllowlist: bot GitHub logins whose inline PR review comments ALSO qualify a thread for automated comment-fix, in addition to the repo owner (who always qualifies). Empty array = disabled (only the owner's own review threads trigger it) — left empty here, same as the root adapter; the owner picks a default later.",
-  "commentFix": { "botAllowlist": [] },
-
+  "commentFix": {
+    "botAllowlist": []
+  },
   "_plan_note": "issue #100 — optional spec/plan gate. plan.gate: off (default; unchanged single-pass advance behavior, byte-identical census output) | label (gate only planned issues that ALSO carry the plan-first label) | always (gate every planned+module candidate). Unknown/missing value falls back to off. Read by loop-census.sh (derives each candidate's plan state from its labels: plan-approved -> gated-approved, else plan-review -> awaiting-owner (blocked on the owner, skipped for advance_ready/fallback_ready like a 'Blocked by' edge), else gated-by-mode -> needs-plan, else ungated), loop-tick.sh (passes advance_mode through as telemetry), and loop-event.sh (builds a PLAN-ONLY driver prompt for needs-plan, injects the approved plan as authoritative scope for gated-approved, and today's single-pass prompt for ungated/off). Left off here so this repo's own self-hosted loop keeps its existing single-pass behavior — see docs/USAGE.md.",
-  "plan": { "gate": "off" }
+  "plan": {
+    "gate": "off"
+  }
 }
