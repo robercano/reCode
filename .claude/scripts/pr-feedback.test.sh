@@ -21,6 +21,13 @@
 #     loop-census.sh now uses so a read-only census never mutates GitHub
 #     state.
 #
+# Issue #169: needs-human.sh's label reads/writes now go through `gh api`
+# (REST) instead of `gh pr edit --*-label`/`gh pr view --json labels` (the
+# latter silently no-op'd/GraphQL-scope-errored on this environment). The
+# fake bot-gh.sh below simulates GitHub's own label state via a marker FILE
+# the REST add touches, so the post-add CONFIRM read (issue #169's
+# comment-gating invariant) sees the label actually "stuck".
+#
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/pr-feedback.test.sh
 set -uo pipefail
@@ -57,6 +64,7 @@ new_fixture() {
   cp "$script_dir/resolve-roots.sh" "$scripts/resolve-roots.sh"
   cp "$script_dir/needs-human.sh" "$scripts/needs-human.sh"
   cp "$script_dir/notify.sh" "$scripts/notify.sh"
+  cp "$script_dir/log-event.sh" "$scripts/log-event.sh"
   chmod +x "$scripts"/*.sh
   cat > "$dir/.claude/gates.json" <<EOF
 { "notify": "printf 'fired\\n' >> $work/$name-notify-fired.txt" }
@@ -78,21 +86,18 @@ case "\$1" in
   pr)
     case "\$2" in
       list) printf '20\tfeat/issue-20-x\t\n' ;;
-      view) : ;; # not queried on this path before the clear
-      edit) : ;;
       comment) : ;;
       *) : ;;
     esac
     ;;
   api)
-    case "\$2" in
-      repos/*/pulls/*/reviews) printf '2026-02-01T00:00:00Z\treviewer1\n' ;;
-      repos/*/issues/*/comments) : ;; # no addressed-marker comment at all
+    case "\$*" in
+      *"pulls/"*"/reviews"*) printf '2026-02-01T00:00:00Z\treviewer1\n' ;;
+      *"issues/"*"/comments"*) : ;; # no addressed-marker comment at all
+      *"-X DELETE"*"/labels/needs-human") : ;; # the clear this scenario exercises
       *) : ;;
     esac
     ;;
-  label) : ;;
-  issue) : ;;
   *) echo "unhandled: \$*" >&2; exit 1 ;;
 esac
 EOF
@@ -100,7 +105,7 @@ chmod +x "$dirA/.claude/scripts/bot-gh.sh"
 outA="$(env -u GATES_FILE bash "$dirA/.claude/scripts/pr-feedback.sh" "acme/repo" 2>&1)"
 
 check "A: unaddressed PR 20 IS listed in the TSV" bash -c 'printf "%s\n" "$1" | grep -qF "20	feat/issue-20-x	reviewer1	2026-02-01T00:00:00Z"' _ "$outA"
-check "A: earlier 'awaiting re-review' flag is CLEARED (ball back in bot's court)" grep -q "pr edit 20 --remove-label needs-human" "$gh_logA"
+check "A: earlier 'awaiting re-review' flag is CLEARED (ball back in bot's court)" grep -qF -- "-X DELETE repos/acme/repo/issues/20/labels/needs-human" "$gh_logA"
 check "A: no comment posted on the clear path" bash -c '! grep -q "^pr comment" "$1"' _ "$gh_logA"
 
 # ---------------------------------------------------------------------------
@@ -120,14 +125,12 @@ case "\$1" in
     esac
     ;;
   api)
-    case "\$2" in
-      repos/*/pulls/*/reviews) printf '2026-02-01T00:00:00Z\treviewer1\n' ;;
-      repos/*/issues/*/comments) : ;;
+    case "\$*" in
+      *"pulls/"*"/reviews"*) printf '2026-02-01T00:00:00Z\treviewer1\n' ;;
+      *"issues/"*"/comments"*) : ;;
       *) : ;;
     esac
     ;;
-  label) : ;;
-  issue) : ;;
   *) echo "unhandled: \$*" >&2; exit 1 ;;
 esac
 EOF
@@ -136,7 +139,7 @@ outAc="$(env -u GATES_FILE PR_FEEDBACK_COUNT_ONLY=1 bash "$dirA/.claude/scripts/
 
 check "A-count-only: TSV output identical to the real (non-count-only) run" \
   bash -c '[ "$1" = "$2" ]' _ "$outA" "$outAc"
-check "A-count-only: NO gh label mutation at all (pure counter, finding #2)" bash -c '! grep -q "pr edit" "$1"' _ "$gh_logAc"
+check "A-count-only: NO gh label mutation at all (pure counter, finding #2)" bash -c '! grep -qE -- "-X (POST|DELETE) repos/.*labels" "$1"' _ "$gh_logAc"
 
 # ---------------------------------------------------------------------------
 # B. ADDRESSED PR (marker comment newer than the last CHANGES_REQUESTED
@@ -157,29 +160,19 @@ case "\$1" in
   pr)
     case "\$2" in
       list) printf '21\tfeat/issue-21-y\t\n' ;;
-      view)
-        if printf '%s\n' "\$*" | grep -q -- '--json labels'; then
-          [ -f "$labeled_markerB" ] && printf 'needs-human\n'
-        fi
-        ;;
-      edit)
-        if printf '%s\n' "\$*" | grep -q -- '--add-label needs-human'; then
-          touch "$labeled_markerB"
-        fi
-        ;;
       comment) : ;;
       *) : ;;
     esac
     ;;
   api)
-    case "\$2" in
-      repos/*/pulls/*/reviews) printf '2026-02-01T00:00:00Z\treviewer2\n' ;;
-      repos/*/issues/*/comments) printf '2026-02-02T00:00:00Z\n' ;; # marker AFTER the CR
+    case "\$*" in
+      *"pulls/"*"/reviews"*) printf '2026-02-01T00:00:00Z\treviewer2\n' ;;
+      *"issues/"*"/comments"*) printf '2026-02-02T00:00:00Z\n' ;; # marker AFTER the CR
+      *"-X POST"*"/issues/21/labels --input -") touch "$labeled_markerB" ;;
+      *"-q .labels[].name"*) [ -f "$labeled_markerB" ] && printf 'needs-human\n' ;;
       *) : ;;
     esac
     ;;
-  label) : ;;
-  issue) : ;;
   *) echo "unhandled: \$*" >&2; exit 1 ;;
 esac
 EOF
@@ -189,7 +182,7 @@ outB2="$(env -u GATES_FILE bash "$dirB/.claude/scripts/pr-feedback.sh" "acme/rep
 
 check "B: addressed PR 21 is NOT listed on run 1" bash -c '[ -z "$1" ]' _ "$outB1"
 check "B: addressed PR 21 is NOT listed on run 2 either" bash -c '[ -z "$1" ]' _ "$outB2"
-check "B: label add attempted on BOTH runs" bash -c '[ "$(grep -c "pr edit 21 --add-label needs-human" "$1")" -eq 2 ]' _ "$gh_logB"
+check "B: label add attempted on BOTH runs" bash -c '[ "$(grep -c -- "-X POST repos/acme/repo/issues/21/labels --input -" "$1")" -eq 2 ]' _ "$gh_logB"
 check "B: exactly ONE comment across BOTH runs (episode-gated, finding #1)" bash -c '[ "$(grep -c "pr comment 21 --body" "$1")" -eq 1 ]' _ "$gh_logB"
 
 # ---------------------------------------------------------------------------
@@ -208,14 +201,12 @@ case "\$1" in
     esac
     ;;
   api)
-    case "\$2" in
-      repos/*/pulls/*/reviews) printf '2026-02-01T00:00:00Z\treviewer2\n' ;;
-      repos/*/issues/*/comments) printf '2026-02-02T00:00:00Z\n' ;;
+    case "\$*" in
+      *"pulls/"*"/reviews"*) printf '2026-02-01T00:00:00Z\treviewer2\n' ;;
+      *"issues/"*"/comments"*) printf '2026-02-02T00:00:00Z\n' ;;
       *) : ;;
     esac
     ;;
-  label) : ;;
-  issue) : ;;
   *) echo "unhandled: \$*" >&2; exit 1 ;;
 esac
 EOF
@@ -223,7 +214,7 @@ chmod +x "$dirB/.claude/scripts/bot-gh.sh"
 outBc="$(env -u GATES_FILE PR_FEEDBACK_COUNT_ONLY=1 bash "$dirB/.claude/scripts/pr-feedback.sh" "acme/repo" 2>&1)"
 
 check "B-count-only: still not listed (same as non-count-only)" bash -c '[ -z "$1" ]' _ "$outBc"
-check "B-count-only: no label add, no comment at all" bash -c '! grep -qE "add-label|^pr comment" "$1"' _ "$gh_logBc"
+check "B-count-only: no label add, no comment at all" bash -c '! grep -qE -- "-X (POST|DELETE) repos/.*labels|^pr comment" "$1"' _ "$gh_logBc"
 
 # ---------------------------------------------------------------------------
 # C. A PR already labeled `claude-addressing` is skipped entirely -- not even

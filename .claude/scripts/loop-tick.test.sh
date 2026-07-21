@@ -647,13 +647,34 @@ check "scenario 16: resume-attempts file now records count=2" node -e '
 ' "$resume15"
 
 # Scenario 17: 3rd stall (count already at 2) -> escalate to needs-human
-# instead of resuming again: label create + issue edit + issue comment (all
+# instead of resuming again: label create + label add + issue comment (all
 # via bot-gh.sh, captured here into a plain log file), escalated:true
 # persisted, and an escalated-to-needs-human event logged.
+#
+# Issue #169: needs-human.sh's label reads/writes now go through `gh api`
+# (REST). This stub simulates GitHub's own label state via a marker FILE the
+# REST add touches, so the post-add CONFIRM read (issue #169's
+# comment-gating invariant) sees the label actually "stuck" and the episode
+# comment posts.
 gh_calls17="$work/scenario17-gh-calls.log"
+label_marker17="$work/scenario17-label.marker"
 cat > "$dir15/bot-gh.sh" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$gh_calls17"
+case "\$1" in
+  api)
+    case "\$*" in
+      *"-X POST"*"/issues/42/labels --input -")
+        touch "$label_marker17"
+        ;;
+      *"-q .labels[].name"*)
+        [ -f "$label_marker17" ] && printf 'needs-human\n'
+        ;;
+      *) : ;;
+    esac
+    ;;
+  *) : ;;
+esac
 exit 0
 EOF
 chmod +x "$dir15/bot-gh.sh"
@@ -664,9 +685,9 @@ check "scenario 17: resume-attempts file now escalated=true (count stays 2)" nod
   const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   if (!j["42"] || j["42"].count !== 2 || j["42"].escalated !== true) throw new Error("got " + JSON.stringify(j));
 ' "$resume15"
-check "scenario 17: needs-human label create + issue edit + issue comment all dispatched via bot-gh.sh" bash -c '
-  grep -q "^label create needs-human" "$1" &&
-  grep -q "^issue edit 42 --add-label needs-human" "$1" &&
+check "scenario 17: needs-human label create + label add (REST) + issue comment all dispatched via bot-gh.sh" bash -c '
+  grep -qF -- "-X POST repos/acme/repo/labels " "$1" &&
+  grep -qF -- "-X POST repos/acme/repo/issues/42/labels --input -" "$1" &&
   grep -q "^issue comment 42 " "$1"
 ' _ "$gh_calls17"
 check "scenario 17: escalated-to-needs-human event logged" bash -c 'grep -q "\"phase\":\"escalated-to-needs-human\"" "$1"' _ "$ticks15_events"

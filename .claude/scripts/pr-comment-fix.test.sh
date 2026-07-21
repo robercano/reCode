@@ -9,6 +9,12 @@
 # the precedence exclusion can be exercised without any real
 # feedback-detection logic). No network, no real `gh` CLI required.
 #
+# Issue #169: needs-human.sh's label reads/writes now go through `gh api`
+# (REST) instead of `gh pr edit --*-label`/`gh pr view --json labels`. The
+# fake bot-gh.sh below simulates GitHub's own label state via a marker FILE
+# the REST add touches, so the post-add CONFIRM read (issue #169's
+# comment-gating invariant) sees the label actually "stuck".
+#
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/pr-comment-fix.test.sh
 set -uo pipefail
@@ -40,6 +46,7 @@ cp "$src" "$scripts_dir/pr-comment-fix.sh"
 cp "$resolve_roots_src" "$scripts_dir/resolve-roots.sh"
 cp "$script_dir/needs-human.sh" "$scripts_dir/needs-human.sh"
 cp "$script_dir/notify.sh" "$scripts_dir/notify.sh"
+cp "$script_dir/log-event.sh" "$scripts_dir/log-event.sh"
 
 cat > "$fixture/.claude/gates.json" <<'EOF'
 {
@@ -71,19 +78,21 @@ EOF
 cat > "$scripts_dir/bot-gh.sh" <<'BOTGH'
 #!/usr/bin/env bash
 # Log every invocation (mirrors pr-feedback.test.sh's gh-call-log convention)
-# so escalation side effects (needs_human_flag's `gh pr edit ... --add-label
-# needs-human`) can be asserted on directly, not just inferred from "the PR
-# wasn't emitted" (which can't distinguish correct escalation from a silent
-# drop).
+# so escalation side effects (needs_human_flag's REST label add, issue #169)
+# can be asserted on directly, not just inferred from "the PR wasn't emitted"
+# (which can't distinguish correct escalation from a silent drop). The
+# needs-human label marker FILE below simulates GitHub's own label state (the
+# REST add touches it; the REST read reports it) so needs_human_flag's
+# post-add CONFIRM read sees the label actually "stuck" for PR 17's
+# escalation.
 log_dir="$(cd "$(dirname "$0")" && pwd)"
+label_marker17="$log_dir/labeled-17.marker"
 printf '%s\n' "$*" >> "$log_dir/gh-calls.log"
 case "$1" in
   repo) echo "acme/repo" ;;
-  label) exit 0 ;;  # needs_human_flag's `gh label create needs-human ...`
   pr)
     case "$2" in
-      edit|comment) exit 0 ;;  # needs_human_flag's `gh pr edit`/`gh pr comment`
-      view) echo ""; exit 0 ;;  # _needs_human_already_labeled's `gh pr view --json labels`
+      comment) exit 0 ;;  # needs_human_flag's `gh pr comment`
     esac
     if printf '%s\n' "$*" | grep -q 'headRefOid'; then
       cat <<'JSON'
@@ -139,6 +148,15 @@ JSON
         ;;
       *"graphql"*)
         echo '[]'
+        ;;
+      *"-X POST"*"/issues/17/labels --input -")
+        touch "$label_marker17"
+        ;;
+      *"-X POST"*"repos/acme/repo/labels "*)
+        : # ensure-label repo-level create (idempotent, needs_human_flag)
+        ;;
+      *"-q .labels[].name"*)
+        [ -f "$label_marker17" ] && echo "needs-human"
         ;;
       *"issues/15/comments"*)
         echo '[{"user":{"login":"testbot"},"body":"<!-- claude-comment-addressed:T15:1 -->","created_at":"2026-02-01T00:00:00Z"}]'
@@ -196,10 +214,10 @@ check "exactly 3 PRs emitted total (10, 16, 19)" bash -c '[ "$(printf "%s\n" "$1
 # effect, not just "PR 17 wasn't emitted" (which can't tell correct
 # escalation apart from a silent bug that just drops the thread).
 gh_log1="$scripts_dir/gh-calls.log"
-check "PR 17 (budget exhausted): needs-human label ACTUALLY applied (gh pr edit 17 --add-label needs-human)" \
-  grep -q "pr edit 17 --add-label needs-human" "$gh_log1"
+check "PR 17 (budget exhausted): needs-human label ACTUALLY applied via REST (issue #169)" \
+  grep -qF -- "-X POST repos/acme/repo/issues/17/labels --input -" "$gh_log1"
 check "PR 16 (attempt 2, budget not yet exhausted): needs-human label NOT applied" \
-  bash -c '! grep -q "pr edit 16 --add-label needs-human" "$1"' _ "$gh_log1"
+  bash -c '! grep -qF -- "-X POST repos/acme/repo/issues/16/labels --input -" "$1"' _ "$gh_log1"
 
 # --- fixture2: the SHIPPED DEFAULT (commentFix.botAllowlist: []) must
 # actually be exercised -- fixture1 above hardcodes a non-empty allowlist for
@@ -215,6 +233,7 @@ cp "$src" "$scripts_dir2/pr-comment-fix.sh"
 cp "$resolve_roots_src" "$scripts_dir2/resolve-roots.sh"
 cp "$script_dir/needs-human.sh" "$scripts_dir2/needs-human.sh"
 cp "$script_dir/notify.sh" "$scripts_dir2/notify.sh"
+cp "$script_dir/log-event.sh" "$scripts_dir2/log-event.sh"
 
 cat > "$fixture2/.claude/gates.json" <<'EOF'
 {
@@ -226,13 +245,13 @@ EOF
 
 cat > "$scripts_dir2/bot-gh.sh" <<'BOTGH'
 #!/usr/bin/env bash
+# Neither PR here reaches the anti-livelock escalation (needs_human_flag),
+# so no label/comment REST calls are ever expected in this fixture.
 case "$1" in
   repo) echo "acme/repo" ;;
-  label) exit 0 ;;
   pr)
     case "$2" in
-      edit|comment) exit 0 ;;
-      view) echo ""; exit 0 ;;
+      comment) exit 0 ;;
     esac
     if printf '%s\n' "$*" | grep -q 'headRefOid'; then
       cat <<'JSON'
