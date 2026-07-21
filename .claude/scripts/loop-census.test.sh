@@ -85,6 +85,11 @@ check() {
 #   - issue 100: a LOCAL branch feat/issue-100-w, which ALREADY has an open
 #                PR under its bare (exact, no prefix) name -> must NOT be
 #                in_flight (the plain exact-match control case).
+#   - issue 44:  a REMOTE-tracking-only branch feat/issue-44-m (pushed, local
+#                copy deleted, same shape as issue 42), but a MERGED PR
+#                already exists for it -> stale-merged-remote (issue #158):
+#                must report branch=none and NOT be in_flight, even though
+#                the remote-tracking ref itself still exists.
 # ---------------------------------------------------------------------------
 fixture="$work/fixture1"
 scripts_dir="$fixture/.claude/scripts"
@@ -122,18 +127,28 @@ EOF
 
 # Fake bot-gh.sh: no network, no real `gh` — dispatches on the subcommand and
 # a `--json` marker to canned, fixture-appropriate output.
+#   - `pr list --state merged --head <branch> ...`: merged-PR count for a
+#     bare branch name (issue #158) — 1 for feat/issue-44-m (the
+#     stale-merged-remote case), 0 for everything else (default). Checked
+#     BEFORE the headRefName/default branches below since it shares the `pr`
+#     subcommand but never carries the `headRefName` marker.
 #   - `pr list ... --json headRefName ...`: bare branch names of open PRs —
-#     issues 43 and 100 already have one; issue 42 does not (issue 4 has no
-#     branch, so it can't have a PR either).
+#     issues 43 and 100 already have one; issue 42 and 44 do not (issue 4 has
+#     no branch, so it can't have a PR either).
 #   - `pr list ... --json number ...`:       open PR count (2, matching above).
 #   - `issue list ...`:                      TSV `num<TAB>labels<TAB>title`
-#     for the four planned+module:test issues.
+#     for the five planned+module:test issues.
 cat > "$scripts_dir/bot-gh.sh" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/repo" ;;
   pr)
-    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+    if printf '%s\n' "$*" | grep -q -- '--state merged'; then
+      case "$*" in
+        *"--head feat/issue-44-m"*) echo 1 ;;
+        *) echo 0 ;;
+      esac
+    elif printf '%s\n' "$*" | grep -q 'headRefName'; then
       printf '%s\n' "feat/issue-43-z"
       printf '%s\n' "feat/issue-100-w"
     else
@@ -144,6 +159,7 @@ case "$1" in
     printf '4\tplanned,module:test\tIssue four\n'
     printf '42\tplanned,module:test\tIssue forty two\n'
     printf '43\tplanned,module:test\tIssue forty three\n'
+    printf '44\tplanned,module:test\tIssue forty four\n'
     printf '100\tplanned,module:test\tIssue one hundred\n'
     ;;
   *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
@@ -193,6 +209,14 @@ git -C "$fixture" branch feat/issue-43-z main >/dev/null
 git -C "$fixture" push -q origin feat/issue-43-z >/dev/null 2>&1
 git -C "$fixture" branch -D feat/issue-43-z >/dev/null
 
+# issue 44: same shape as 42/43 (remote-tracking-only ref, local copy
+# deleted), but the fake bot-gh.sh reports a MERGED PR already exists for its
+# bare branch name — the stale-merged-remote case (issue #158): this ref must
+# be ignored (branch=none), not counted as in_flight forever.
+git -C "$fixture" branch feat/issue-44-m main >/dev/null
+git -C "$fixture" push -q origin feat/issue-44-m >/dev/null 2>&1
+git -C "$fixture" branch -D feat/issue-44-m >/dev/null
+
 # issue 100: LOCAL-only branch (never pushed) — exact-match control.
 git -C "$fixture" branch feat/issue-100-w main >/dev/null
 
@@ -208,8 +232,10 @@ check "issue 4 is NOT in_flight (no branch to be in flight with)" bash -c '! pri
 check "issue 42 (remote-only branch, no open PR) IS in_flight" bash -c 'printf "%s\n" "$1" | grep -qx "in_flight=42"' _ "$out"
 check "issue 43 (remote-only branch, already has an open PR via origin/ strip+suffix match) is NOT in_flight" bash -c '! printf "%s\n" "$1" | grep -qx "in_flight=43"' _ "$out"
 check "issue 100 (local branch, already has an open PR, exact-match control) is NOT in_flight" bash -c '! printf "%s\n" "$1" | grep -qx "in_flight=100"' _ "$out"
+check "issue 44 (remote-only branch, MERGED PR already exists) reports branch=none (issue #158)" bash -c 'printf "%s\n" "$1" | grep -q "^issue=44 branch=none"' _ "$out"
+check "issue 44 (stale merged remote-only ref) is NOT in_flight (issue #158)" bash -c '! printf "%s\n" "$1" | grep -qx "in_flight=44"' _ "$out"
 check "exactly one in_flight line total (only issue 42 qualifies)" bash -c '[ "$(printf "%s\n" "$1" | grep -c "^in_flight=")" -eq 1 ]' _ "$out"
-check "planned_issues=4 counted" bash -c 'printf "%s\n" "$1" | grep -qx "planned_issues=4"' _ "$out"
+check "planned_issues=5 counted" bash -c 'printf "%s\n" "$1" | grep -qx "planned_issues=5"' _ "$out"
 check "issue=42 branch line shows the origin-prefixed remote-tracking name" bash -c 'printf "%s\n" "$1" | grep -q "^issue=42 branch=origin/feat/issue-42-y"' _ "$out"
 check "ci_fix_prs=0 counted (no-op pr-ci-fix.sh stub, issue #96)" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=0"' _ "$out"
 check "comment_fix_prs=0 counted (no-op pr-comment-fix.sh stub, issue #96 part 2)" bash -c 'printf "%s\n" "$1" | grep -qx "comment_fix_prs=0"' _ "$out"
