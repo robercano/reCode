@@ -227,6 +227,152 @@ check "C: head_branch->issue-number regex clears issue 77's attempt-budget AND s
   bash -c '[ "$(grep -c -- "-X DELETE repos/acme/repo/issues/77/labels/needs-human" "$1")" -eq 2 ]' _ "$gh_logC"
 check "C: no needs-human label ever ADDED (REST POST) on the merge path" bash -c '! grep -q -- "-X POST" "$1"' _ "$gh_logC"
 
+# ---------------------------------------------------------------------------
+# D. Protected-paths guard BLOCKS+LABELS (issue #94 Layer 2): an otherwise-
+#    MERGEable PR (owner-approved, CI-green) whose diff touches a path
+#    matching the fixture's protectedPaths (.claude/**) must NOT be merged --
+#    verdict flips to SKIP:protected-paths, the needs-human label is added
+#    (REST POST), and the skip line in the output carries reason
+#    "protected-paths".
+# ---------------------------------------------------------------------------
+dirD="$(new_fixture scenarioD)"
+cat > "$dirD/.claude/gates.json" <<EOF
+{ "merge": { "baseBranch": "main" }, "protectedPaths": [".claude/**"], "notify": "printf 'fired\\n' >> $work/scenarioD-notify-fired.txt" }
+EOF
+gh_logD="$work/scenarioD-gh.log"
+labeled_markerD="$work/scenarioD-labeled.marker"
+cat > "$dirD/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logD"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "13"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":13,"title":"Touch harness","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-13-harness","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}],"files":[{"path":".claude/scripts/x.sh"}]}
+JSON
+        ;;
+      comment) : ;;
+      merge) exit 1 ;;
+      *) : ;;
+    esac
+    ;;
+  api)
+    case "\$*" in
+      *"-X POST"*"/issues/13/labels --input -")
+        touch "$labeled_markerD"
+        ;;
+      *"-q .labels[].name"*)
+        [ -f "$labeled_markerD" ] && printf 'needs-human\n'
+        ;;
+      *) : ;;
+    esac
+    ;;
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirD/.claude/scripts/bot-gh.sh"
+outD="$(env -u GATES_FILE bash "$dirD/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+check "D: no merge was attempted (protected-paths blocks an otherwise-MERGE verdict)" bash -c '! grep -q "^pr merge" "$1"' _ "$gh_logD"
+check "D: needs-human label add attempted (REST POST)" grep -qF -- "-X POST repos/acme/repo/issues/13/labels --input -" "$gh_logD"
+check "D: skip line reason is protected-paths" bash -c 'printf "%s\n" "$1" | grep -q "\"reason\":\"protected-paths\""' _ "$outD"
+
+# ---------------------------------------------------------------------------
+# E. Protected-paths guard CLEAN PROCEEDS: same protectedPaths config as D,
+#    but the PR's diff touches an ordinary source file -- verdict stays MERGE
+#    and the PR merges normally, with no protected-paths reason anywhere in
+#    the output.
+# ---------------------------------------------------------------------------
+dirE="$(new_fixture scenarioE)"
+cat > "$dirE/.claude/gates.json" <<EOF
+{ "merge": { "baseBranch": "main" }, "protectedPaths": [".claude/**"], "notify": "printf 'fired\\n' >> $work/scenarioE-notify-fired.txt" }
+EOF
+gh_logE="$work/scenarioE-gh.log"
+cat > "$dirE/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logE"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "14"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":14,"title":"Ship app feature","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-14-app","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}],"files":[{"path":"src/app.js"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;  # every REST call here is a needs_human_clear DELETE no-op
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirE/.claude/scripts/bot-gh.sh"
+outE="$(env -u GATES_FILE bash "$dirE/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+check "E: PR merged (protected-paths does not fire on a clean diff)" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outE"
+check "E: gh pr merge invoked" grep -q "pr merge 14 -R acme/repo --merge --delete-branch" "$gh_logE"
+# NOTE: don't assert "output doesn't contain 'protected-paths'" verbatim -- the
+# post-merge local_sync leg reports the CALLER's real checked-out branch name,
+# which could itself contain that substring (e.g. this very branch). Assert on
+# the specific skip-reason/label-add shapes protected-paths would produce instead.
+check "E: no protected-paths skip reason in output" bash -c '! printf "%s\n" "$1" | grep -q "\"reason\":\"protected-paths\""' _ "$outE"
+check "E: no needs-human label add attempted (nothing to flag)" bash -c '! grep -qF -- "-X POST repos/acme/repo/issues/14/labels --input -" "$1"' _ "$gh_logE"
+
+# ---------------------------------------------------------------------------
+# F. Protected-paths EMPTY OVERRIDE DISABLES the guard (issue #94 Layer 2 self-
+#    host override): protectedPaths:[] in the fixture's gates.json means the
+#    check is disabled even though the diff touches a path that WOULD match
+#    ".claude/**" if the guard were enabled -- PR merges normally.
+# ---------------------------------------------------------------------------
+dirF="$(new_fixture scenarioF)"
+cat > "$dirF/.claude/gates.json" <<EOF
+{ "merge": { "baseBranch": "main" }, "protectedPaths": [], "notify": "printf 'fired\\n' >> $work/scenarioF-notify-fired.txt" }
+EOF
+gh_logF="$work/scenarioF-gh.log"
+cat > "$dirF/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logF"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "15"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":15,"title":"Self-host harness slice","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-15-harness","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}],"files":[{"path":".claude/scripts/x.sh"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;  # every REST call here is a needs_human_clear DELETE no-op
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirF/.claude/scripts/bot-gh.sh"
+outF="$(env -u GATES_FILE bash "$dirF/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+check "F: PR merged (empty protectedPaths override disables the guard)" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outF"
+check "F: gh pr merge invoked despite touching .claude/**" grep -q "pr merge 15 -R acme/repo --merge --delete-branch" "$gh_logF"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "merge-ready.test.sh: PASS ($ok checks)"
