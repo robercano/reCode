@@ -47,6 +47,22 @@ of them — and don't mistake the default (non-strict) sandbox for a cage.
 
 ---
 
+### Protected-paths guard (issue #94 Layer 2)
+
+A deterministic backstop against an injected instruction that tries to get an agent to edit the loop's
+own control plane and have that change auto-merged. The adapter (`.claude/gates.json`, resolved via
+`GATES_FILE`) carries a `protectedPaths` array of glob patterns; any agent-authored PR whose diff touches
+a matching path is never auto-merged — `merge-ready.sh` blocks the merge and labels the PR `needs-human`
+regardless of owner approval or green CI, and reviewers hard-reject it outright (see
+`.claude/agents/reviewer.md`). The shipped root adapter defaults this to a protective set
+(`.claude/**`, `.github/workflows/**`, `gates.json`, `**/gates.json`) so downstream adopters' harness and
+CI files can't be silently rewritten by an agent. This repo's own self-adapter
+(`.claude/self/gates.json`) overrides it to an empty array, which disables the guard — reCode's harness
+files under `.claude/` ARE the product, so legitimate slices of work must remain mergeable when the loop
+runs self-hosted. A fuller writeup is deferred to follow-up issue #166.
+
+---
+
 ## Step 1 — Machine-local hardened profile (`settings.local.json`)
 
 Put the hardened, bypass-enabled config in **`.claude/settings.local.json`**, not the committed

@@ -82,5 +82,7 @@
   "_plan_note": "issue #100 — optional spec/plan gate. plan.gate: off (default; unchanged single-pass advance behavior, byte-identical census output) | label (gate only planned issues that ALSO carry the plan-first label) | always (gate every planned+module candidate). Unknown/missing value falls back to off. Read by loop-census.sh (derives each candidate's plan state from its labels: plan-approved -> gated-approved, else plan-review -> awaiting-owner (blocked on the owner, skipped for advance_ready/fallback_ready like a 'Blocked by' edge), else gated-by-mode -> needs-plan, else ungated), loop-tick.sh (passes advance_mode through as telemetry), and loop-event.sh (builds a PLAN-ONLY driver prompt for needs-plan, injects the approved plan as authoritative scope for gated-approved, and today's single-pass prompt for ungated/off). Left off here so this repo's own self-hosted loop keeps its existing single-pass behavior — see docs/USAGE.md.",
   "plan": {
     "gate": "off"
-  }
+  },
+  "_protectedPaths_note": "issue #94 Layer 2 — protected-paths guard override for THIS self-hosted repo. The root adapter ships a protective default (.claude/**, .github/workflows/**, gates.json) so downstream adopters' control-plane files can't be auto-merged by an agent. But in reCode the harness files under .claude/ ARE the product — legitimate slices of issue #94 itself (this very guard edits .claude/scripts/merge-ready.sh) must be mergeable — so this repo overrides the list to EMPTY, which disables the guard for self-hosted merges (empty-means-skip). See docs/HARDENING.md.",
+  "protectedPaths": []
 }

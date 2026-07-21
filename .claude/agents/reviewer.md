@@ -28,7 +28,11 @@ If you touch GitHub at all (e.g. `gh pr diff`, `gh pr view`, `gh api`), route it
    - **correctness**: logic errors, edge cases, off-by-one, error handling, race conditions, broken invariants.
      If the task provides an APPROVED PLAN / authoritative scope (e.g. issue #100's plan gate), also verify
      the diff stays within it — a diff that exceeds the approved plan's declared files or approach is a
-     valid reject under this lens ("exceeds approved scope").
+     valid reject under this lens ("exceeds approved scope"). Protected-paths hard reject (issue #94 Layer
+     2): if the diff touches any path matching the adapter's `protectedPaths` globs (`.claude/gates.json`,
+     resolved via `GATES_FILE`), REJECT — an agent PR must not modify the loop's own control plane.
+     EXCEPTION: if the adapter's `protectedPaths` is empty or absent (the self-hosting override), skip this
+     check (the harness files are the product).
    - **tests**: do tests actually exercise the change? coverage of edge/failure paths? meaningful assertions, not just "it runs"? Run the test gate if needed.
    - **security**: injection, auth/access control, unsafe input, secrets, dependency risk, (for smart contracts) reentrancy/overflow/access — defer to the project security skill if configured.
    - **performance**: needless work, N+1, allocations, blocking calls, complexity regressions.

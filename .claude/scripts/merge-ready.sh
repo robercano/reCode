@@ -42,7 +42,13 @@ repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 # shellcheck source=needs-human.sh
 if [ -f "$script_dir/needs-human.sh" ]; then . "$script_dir/needs-human.sh"; fi
 owner="${MERGE_APPROVER:-${repo%%/*}}"   # the approver whose APPROVED review authorizes a merge
-gates="$root/.claude/gates.json"
+
+# Adapter file: honor GATES_FILE (the self-host loop points at .claude/self/gates.json),
+# fall back to the shipped root adapter. Both merge.baseBranch and protectedPaths
+# (issue #94 Layer 2) are read from it, so the self-adapter's permissive protectedPaths
+# override applies when the loop runs self-hosted.
+gates_rel="${GATES_FILE:-.claude/gates.json}"
+case "$gates_rel" in /*) gates="$gates_rel";; *) gates="$root/$gates_rel";; esac
 base="$(node -e "try{const g=require('$gates');process.stdout.write((g.merge&&g.merge.baseBranch)||'main')}catch(e){process.stdout.write('main')}")"
 
 # Decide MERGE / SKIP:<reason> for one PR's JSON (read on stdin).
@@ -82,12 +88,51 @@ decide() {
   ' "$base" "$owner"
 }
 
+# protected_paths_check (issue #94 Layer 2): reads the adapter's protectedPaths
+# globs and the PR's changed-file list (`.files[].path`, on stdin) and prints the
+# protected path(s) the diff touches (comma-joined), or nothing. Empty/absent
+# protectedPaths = disabled (prints nothing) — same empty-means-skip convention as
+# `notify`. Deterministic (no LLM); "*" matches one path segment, "**" any depth.
+protected_paths_check() {
+  node -e '
+    const gates = process.argv[1];
+    let globs = [];
+    try { const g = require(gates); if (Array.isArray(g.protectedPaths)) globs = g.protectedPaths; } catch (e) {}
+    if (!globs.length) process.exit(0);
+    let p; try { p = JSON.parse(require("fs").readFileSync(0, "utf8")); } catch (e) { process.exit(0); }
+    const files = (p.files || []).map(f => f && f.path).filter(Boolean);
+    function toRe(glob) {
+      let re = "";
+      for (let i = 0; i < glob.length; i++) {
+        const c = glob[i];
+        if (c === "*") {
+          if (glob[i + 1] === "*") { re += ".*"; i++; if (glob[i + 1] === "/") i++; }
+          else re += "[^/]*";
+        } else if ("\\^$.|?+()[]{}".includes(c)) { re += "\\" + c; }
+        else re += c;
+      }
+      return new RegExp("^" + re + "$");
+    }
+    const res = globs.map(toRe);
+    const hits = files.filter(f => res.some(r => r.test(f)));
+    if (hits.length) process.stdout.write([...new Set(hits)].join(", "));
+  ' "$gates"
+}
+
 merged=0; skipped=0
 for n in $(gh pr list -R "$repo" --base "$base" --state open --json number -q '.[].number'); do
-  data="$(gh pr view "$n" -R "$repo" --json number,title,isDraft,baseRefName,headRefName,mergeable,reviews,statusCheckRollup,commits)"
+  data="$(gh pr view "$n" -R "$repo" --json number,title,isDraft,baseRefName,headRefName,mergeable,reviews,statusCheckRollup,commits,files)"
   verdict="$(printf '%s' "$data" | decide)"
   title="$(printf '%s' "$data" | node -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(0,"utf8")).title)||"")')"
   head_branch="$(printf '%s' "$data" | node -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(0,"utf8")).headRefName)||"")')"
+
+  # Protected-paths guard (issue #94 Layer 2): even an owner-approved, CI-green PR
+  # must not auto-merge if its diff touches a path the adapter marks protected.
+  protected_hit=""
+  if [ "$verdict" = "MERGE" ]; then
+    protected_hit="$(printf '%s' "$data" | protected_paths_check)"
+    [ -n "$protected_hit" ] && verdict="SKIP:protected-paths"
+  fi
 
   # needs-human (issue #99): a PR is genuinely blocked on the OWNER for
   # exactly two of decide()'s skip reasons -- no review submitted yet, or a
@@ -110,6 +155,13 @@ for n in $(gh pr list -R "$repo" --base "$base" --state open --json number -q '.
         esac
         needs_human_flag "pr:$n" "pr-review" "low" \
           "PR #$n ready for your review" "$title ($reason_text)"
+      fi
+      ;;
+    SKIP:protected-paths)
+      if command -v needs_human_flag >/dev/null 2>&1; then
+        needs_human_flag "pr:$n" "protected-paths" "high" \
+          "PR #$n touches protected paths -- human review required" \
+          "$title: this PR's diff touches protected path(s): $protected_hit. Auto-merge is blocked by the protected-paths guard (issue #94 Layer 2). A human must review and merge it manually."
       fi
       ;;
     *)
