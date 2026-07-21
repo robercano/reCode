@@ -373,6 +373,111 @@ outF="$(env -u GATES_FILE bash "$dirF/.claude/scripts/merge-ready.sh" "acme/repo
 check "F: PR merged (empty protectedPaths override disables the guard)" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outF"
 check "F: gh pr merge invoked despite touching .claude/**" grep -q "pr merge 15 -R acme/repo --merge --delete-branch" "$gh_logF"
 
+# ---------------------------------------------------------------------------
+# G. GATES_FILE actually SET (issue #94 Layer 2 crux, TESTS reviewer finding):
+#    scenarios A-F never run merge-ready.sh with GATES_FILE actually set --
+#    they all resolve the ROOT gates.json by DEFAULT. This scenario is the one
+#    that proves gates_rel="${GATES_FILE:-.claude/gates.json}" plus the
+#    `case "$gates_rel" in /*) ...; *) gates="$root/$gates_rel";; esac` split
+#    actually SELECTS which adapter's protectedPaths governs the guard.
+#
+#    ONE fixture, ONE PR (#16, touches .claude/scripts/x.sh), THREE runs that
+#    differ ONLY in GATES_FILE, with OPPOSITE outcomes:
+#      G1 - GATES_FILE unset            -> ROOT gates.json  (protectedPaths:[])
+#                                           -> guard DISABLED -> PR MERGES.
+#      G2 - GATES_FILE=<relative path>   -> SELF adapter (protectedPaths:[".claude/**"])
+#                                           via the `*)` branch (gates="$root/$gates_rel")
+#                                           -> guard ENABLED -> PR BLOCKED.
+#      G3 - GATES_FILE=<absolute path>   -> SAME self adapter, via the `/*)`
+#                                           branch this time -> guard ENABLED
+#                                           -> PR BLOCKED.
+#    G1-vs-G2 on the IDENTICAL fixture/PR, differing only in GATES_FILE, is the
+#    load-bearing assertion; G3 additionally proves the absolute-path branch.
+#
+#    Each run gets its OWN gh.log (via GH_LOG, read by the fake bot-gh.sh
+#    below) so G1's merge call can never pollute a "no merge happened" assertion
+#    on G2/G3 (mirrors scenario A's separate-log-per-run discipline). Assertions
+#    are specific JSON-shape / gh-call greps, never a raw substring match on the
+#    whole output (the post-merge local_sync line echoes the caller's own
+#    checked-out branch name -- the false positive that bit scenario E).
+# ---------------------------------------------------------------------------
+dirG="$(new_fixture scenarioG)"
+cat > "$dirG/.claude/gates.json" <<EOF
+{ "merge": { "baseBranch": "main" }, "protectedPaths": [], "notify": "printf 'fired\\n' >> $work/scenarioG-notify-fired.txt" }
+EOF
+mkdir -p "$dirG/.claude/self"
+cat > "$dirG/.claude/self/gates.json" <<EOF
+{ "merge": { "baseBranch": "main" }, "protectedPaths": [".claude/**"] }
+EOF
+labeled_markerG="$work/scenarioG-labeled.marker"
+cat > "$dirG/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+log="\${GH_LOG:-$work/scenarioG-default-gh.log}"
+printf '%s\n' "\$*" >> "\$log"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "16"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":16,"title":"Touch harness via adapter","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-16-adapter","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}],"files":[{"path":".claude/scripts/x.sh"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api)
+    case "\$*" in
+      *"-X POST"*"/issues/16/labels --input -")
+        touch "$labeled_markerG"
+        ;;
+      *"-q .labels[].name"*)
+        [ -f "$labeled_markerG" ] && printf 'needs-human\n'
+        ;;
+      *) : ;;
+    esac
+    ;;
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirG/.claude/scripts/bot-gh.sh"
+
+gh_logG1="$work/scenarioG-run1-gh.log"
+outG1="$(env -u GATES_FILE GH_LOG="$gh_logG1" bash "$dirG/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+gh_logG2="$work/scenarioG-run2-gh.log"
+outG2="$(GATES_FILE=.claude/self/gates.json GH_LOG="$gh_logG2" bash "$dirG/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+gh_logG3="$work/scenarioG-run3-gh.log"
+outG3="$(GATES_FILE="$dirG/.claude/self/gates.json" GH_LOG="$gh_logG3" bash "$dirG/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+check "G1: GATES_FILE unset -> ROOT adapter (protectedPaths:[]) -> guard DISABLED -> PR MERGES" \
+  bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outG1"
+check "G1: no protected-paths reason in output (guard disabled)" \
+  bash -c '! printf "%s\n" "$1" | grep -q "\"reason\":\"protected-paths\""' _ "$outG1"
+check "G1: gh pr merge invoked" \
+  grep -q "pr merge 16 -R acme/repo --merge --delete-branch" "$gh_logG1"
+
+check "G2: GATES_FILE=relative self-adapter path -> resolves protectedPaths:[\".claude/**\"] -> guard ENABLED -> PR BLOCKED (opposite of G1 on the SAME fixture/PR)" \
+  bash -c 'printf "%s\n" "$1" | grep -q "\"reason\":\"protected-paths\""' _ "$outG2"
+check "G2: no merge attempted for PR 16" \
+  bash -c '! grep -q "pr merge 16" "$1"' _ "$gh_logG2"
+check "G2: needs-human label add attempted (REST POST)" \
+  grep -qF -- "-X POST repos/acme/repo/issues/16/labels --input -" "$gh_logG2"
+
+check "G3: GATES_FILE=absolute self-adapter path (exercises the /* branch) also BLOCKS" \
+  bash -c 'printf "%s\n" "$1" | grep -q "\"reason\":\"protected-paths\""' _ "$outG3"
+check "G3: no merge attempted for PR 16 (absolute-path adapter selection)" \
+  bash -c '! grep -q "pr merge 16" "$1"' _ "$gh_logG3"
+check "G3: needs-human label add attempted (REST POST) via absolute-path adapter" \
+  grep -qF -- "-X POST repos/acme/repo/issues/16/labels --input -" "$gh_logG3"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "merge-ready.test.sh: PASS ($ok checks)"
