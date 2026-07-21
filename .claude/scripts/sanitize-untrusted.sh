@@ -3,10 +3,13 @@
 # prompt-injection hardening, Layer 1: "one shared helper so there is exactly
 # one implementation").
 #
-# STATUS: this is ONLY the primitive. It is NOT YET WIRED into any live loop
-# / driver path (issue-body ingestion, PR-comment ingestion, etc.) — nothing
-# in the harness calls this script yet. Do not assume any protection is
-# active until a follow-up issue #94 slice wires a caller to it.
+# STATUS: this is the shared primitive AND it is now WIRED — loop-event.sh's
+# driver prompts (issue #94 Layer 1) mandate that every fetched issue/PR/
+# comment/review text, and the plan-gate's fetched plan comment, be piped
+# through this script before being treated as scope, requirements, or
+# instructions by any orchestrator/implementer/reviewer agent. Only the
+# fenced output this script produces is passed along as DATA, never as
+# instructions.
 #
 # Reads untrusted text from stdin (default) or from a file path given as
 # $1, and writes a fenced, mechanically-sanitized version to stdout. Exits 0

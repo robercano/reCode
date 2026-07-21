@@ -101,6 +101,12 @@ check "scenario 2: prompt file mandates FOREGROUND-only spawn (run_in_background
 check "scenario 2: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf2"
 check "scenario 2: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf2"
 
+# --- untrusted-input clause (issue #94 Layer 1): the shared $common string
+# now mandates that fetched issue/PR/comment/review text be routed through
+# sanitize-untrusted.sh before being treated as scope/instructions.
+check "scenario 2: prompt file mandates routing fetched text through sanitize-untrusted.sh" bash -c 'grep -q "sanitize-untrusted.sh" "$1"' _ "$pf2"
+check "scenario 2: prompt file flags fetched issue/PR/comment/review text as UNTRUSTED" bash -c 'grep -qi "UNTRUSTED" "$1"' _ "$pf2"
+
 # ---------------------------------------------------------------------------
 # 3. action=feedback pr=N -> same contract, feedback wording, LOOP_MODEL honored.
 # ---------------------------------------------------------------------------
@@ -119,6 +125,11 @@ check "scenario 3: prompt file says ADDRESS FEEDBACK, and Do NOT merge" bash -c 
 check "scenario 3: prompt file mandates FOREGROUND-only spawn (run_in_background: false)" bash -c 'grep -qi "FOREGROUND" "$1" && grep -q "run_in_background: false" "$1"' _ "$pf3"
 check "scenario 3: prompt file forbids ending the turn before the work product exists on GitHub" bash -c 'grep -q "do NOT end your turn until the work product exists on GitHub" "$1"' _ "$pf3"
 check "scenario 3: prompt file mandates deleting debris on failure" bash -c 'grep -q "delete any local feat/issue-N-\* branch and worktree" "$1"' _ "$pf3"
+
+# Same untrusted-input clause, on the FEEDBACK prompt (also baked from the
+# shared $common string — proves the wiring is shared, not per-verdict).
+check "scenario 3: prompt file mandates routing fetched text through sanitize-untrusted.sh" bash -c 'grep -q "sanitize-untrusted.sh" "$1"' _ "$pf3"
+check "scenario 3: prompt file flags fetched issue/PR/comment/review text as UNTRUSTED" bash -c 'grep -qi "UNTRUSTED" "$1"' _ "$pf3"
 
 # ---------------------------------------------------------------------------
 # 3b. action=ci-fix pr=N (issue #96) -> same one-shot contract, CI-FIX
