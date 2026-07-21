@@ -715,10 +715,13 @@ check "(a) issue 50 (critical) is iterated/detailed BEFORE issue 3 (unlabeled)" 
   printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=50 "
 ' _ "$outPrioNum"
 
-# --- (b) unlabeled-last: issue 6 (unlabeled, eligible) only becomes
-# advance_ready because issue 5 (priority:low, LOWER number) already has a
-# branch (ineligible) -- proving unlabeled sorts after every labeled
-# candidate and is picked only once the labeled ones are exhausted. ---
+# --- (b) unlabeled-last: issue 5 (unlabeled, LOWER number) and issue 6
+# (priority:low, HIGHER number) are BOTH otherwise-eligible (no branch, no
+# open PR, not blocked) -- priority:low still outranks unlabeled despite
+# 6 > 5, so issue 6 must be iterated first and win advance_ready. A plain
+# `sort -n` revert would pick issue 5 first instead, so this genuinely
+# discriminates (unlike a shape where the lower-numbered candidate is made
+# ineligible, which would pass either way). ---
 dirUnlabeledLast="$work/unlabeled-last"
 build_plain_fixture "$dirUnlabeledLast"
 cat > "$dirUnlabeledLast/.claude/scripts/bot-gh.sh" <<'EOF'
@@ -736,8 +739,8 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '5\tplanned,module:test,priority:low\tLabeled but already branched candidate\n'
-          printf '6\tplanned,module:test\tUnlabeled candidate\n'
+          printf '5\tplanned,module:test\tUnlabeled lower-numbered candidate\n'
+          printf '6\tplanned,module:test,priority:low\tLabeled higher-numbered candidate\n'
         else
           printf '5\n6\n'
         fi
@@ -750,23 +753,27 @@ case "$1" in
 esac
 EOF
 chmod +x "$dirUnlabeledLast/.claude/scripts/bot-gh.sh"
-# Issue 5 already has a branch -> not eligible for advance_ready (in_flight
-# instead); issue 6 has none -> the only remaining eligible candidate.
-git -C "$dirUnlabeledLast" branch feat/issue-5-a main >/dev/null
+# Neither issue has a branch, an open PR, or a blocker -- both are fully
+# eligible, so the only thing that can decide the outcome is priority order.
 outUnlabeledLast="$(env -u GATES_FILE bash "$dirUnlabeledLast/.claude/scripts/loop-census.sh" "acme/repo")"
 
-check "(b) issue 5 (priority:low) is iterated before issue 6 (unlabeled)" bash -c '
-  printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=5 "
+check "(b) issue 6 (priority:low) is iterated before issue 5 (unlabeled)" bash -c '
+  printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=6 "
 ' _ "$outUnlabeledLast"
-check "(b) unlabeled issue 6 becomes advance_ready only because labeled issue 5 is ineligible (already branched)" bash -c \
+check "(b) priority:low issue 6 becomes advance_ready over lower-numbered unlabeled issue 5" bash -c \
   'printf "%s\n" "$1" | grep -qx "advance_ready=6"' _ "$outUnlabeledLast"
-check "(b) issue 5 shows up as in_flight, not advance_ready" bash -c \
-  'printf "%s\n" "$1" | grep -qx "in_flight=5"' _ "$outUnlabeledLast"
+check "(b) unlabeled issue 5 (otherwise eligible) is NOT advance_ready" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "advance_ready=5"' _ "$outUnlabeledLast"
+check "(b) unlabeled issue 5 is not in_flight either (genuinely eligible, just outranked)" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "in_flight=5"' _ "$outUnlabeledLast"
 
-# --- (c) blocked-high-priority skipped for unblocked-lower: issue 7
-# (priority:high) is "Blocked by #99" (still OPEN) -> skipped, emits
-# blocked=7 by=99; issue 8 (unlabeled, unblocked) becomes advance_ready
-# instead, even though 7 outranks it on priority. Reuses the real
+# --- (c) blocked-high-priority skipped for unblocked-lower: issue 70
+# (priority:high, HIGHER number) is "Blocked by #99" (still OPEN) -> skipped,
+# emits blocked=70 by=99; issue 8 (unlabeled, unblocked, LOWER number)
+# becomes advance_ready instead, even though 70 outranks it on priority.
+# Because 70 > 8, priority order and plain numeric order disagree on
+# iteration order (priority puts 70 first; `sort -n` would put 8 first),
+# so this genuinely discriminates a `sort -n` revert. Reuses the real
 # cockpit.sh --parse-blocking seam, exactly like the blocking-graph fixtures
 # above (scaffold_blocking_fixture copies it in verbatim). ---
 dirBlockedPrio="$work/blocked-priority"
@@ -786,16 +793,16 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '7\tplanned,module:test,priority:high\tBlocked high-priority candidate\n'
+          printf '70\tplanned,module:test,priority:high\tBlocked high-priority candidate\n'
           printf '8\tplanned,module:test\tUnblocked lower-priority candidate\n'
         else
           # all-open-issue-numbers fetch: 99 (the blocker) is still OPEN.
-          printf '7\n8\n99\n'
+          printf '70\n8\n99\n'
         fi
         ;;
       view)
         case "$3" in
-          7) echo '{"body":"Blocked by #99"}' ;;
+          70) echo '{"body":"Blocked by #99"}' ;;
           8) echo '{"body":""}' ;;
           *) echo '{"body":""}' ;;
         esac
@@ -810,13 +817,13 @@ chmod +x "$dirBlockedPrio/.claude/scripts/bot-gh.sh"
 errBlockedPrio="$work/blocked-priority.stderr"
 outBlockedPrio="$(run_blocking_fixture "$dirBlockedPrio" "$errBlockedPrio")"
 
-check "(c) issue 7 (priority:high, iterated first) is iterated before issue 8 (unlabeled)" bash -c '
-  printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=7 "
+check "(c) issue 70 (priority:high, iterated first) is iterated before issue 8 (unlabeled)" bash -c '
+  printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=70 "
 ' _ "$outBlockedPrio"
-check "(c) blocked=7 by=99 census line emitted (higher-priority candidate skipped)" bash -c \
-  'printf "%s\n" "$1" | grep -qx "blocked=7 by=99"' _ "$outBlockedPrio"
-check "(c) issue 7 (blocked) is NOT advance_ready despite outranking issue 8 on priority" bash -c \
-  '! printf "%s\n" "$1" | grep -qx "advance_ready=7"' _ "$outBlockedPrio"
+check "(c) blocked=70 by=99 census line emitted (higher-priority candidate skipped)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "blocked=70 by=99"' _ "$outBlockedPrio"
+check "(c) issue 70 (blocked) is NOT advance_ready despite outranking issue 8 on priority" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "advance_ready=70"' _ "$outBlockedPrio"
 check "(c) advance_ready instead picks the unblocked lower-priority issue 8" bash -c \
   'printf "%s\n" "$1" | grep -qx "advance_ready=8"' _ "$outBlockedPrio"
 

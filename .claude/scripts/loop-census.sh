@@ -491,8 +491,9 @@ while IFS=$'\t' read -r num labels title; do
     fi
   fi
 
-  # fallback_ready: lowest-numbered otherwise-eligible candidate, IGNORING the
-  # blocking-graph gate — used only if the gate leaves advance_ready="none".
+  # fallback_ready: first otherwise-eligible candidate in (priority, number)
+  # order, IGNORING the blocking-graph gate — used only if the gate leaves
+  # advance_ready="none".
   if [ "$eligible" -eq 1 ] && [ "$fallback_ready" = "none" ]; then
     fallback_ready="$num"
     fallback_plan_state="$plan_state"
