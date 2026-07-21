@@ -59,6 +59,7 @@ new_fixture() {
   # gh calls still landing only in this fixture's own logging bot-gh.sh.
   cp "$script_dir/needs-human.sh" "$dir/needs-human.sh"
   cp "$script_dir/notify.sh" "$dir/notify.sh"
+  cp "$script_dir/log-event.sh" "$dir/log-event.sh"
 
   cat > "$dir/loop-census.sh" <<EOF
 #!/usr/bin/env bash
@@ -105,15 +106,41 @@ EOF
     # canned output for the two calls the ceiling code actually reads stdout
     # from: `gh issue create` (needs a URL ending in a number) and
     # `gh issue view --json state --jq .state` (needs OPEN/CLOSED).
+    #
+    # Issue #169: needs-human.sh's label reads/writes now go through `gh api`
+    # (REST) instead of `gh pr/issue edit --*-label`/`gh pr|issue view --json
+    # labels`. This stub simulates GitHub's own per-issue/PR label state via
+    # marker FILES the REST add/remove touch/remove (keyed by issue/PR
+    # number, under ../state/gh-labels/), so the post-add CONFIRM read
+    # (issue #169's comment-gating invariant) sees the label actually
+    # "stuck" for the attempt-budget escalation scenarios below (5, 6).
     cat > "$dir/bot-gh.sh" <<'EOF'
 #!/usr/bin/env bash
 log="$(dirname "$0")/../state/gh-calls.log"
-mkdir -p "$(dirname "$log")"
+labels_dir="$(dirname "$0")/../state/gh-labels"
+mkdir -p "$(dirname "$log")" "$labels_dir"
 printf '%s\n' "$*" >> "$log"
 case "$1 $2" in
   "issue create") echo "https://github.com/acme/repo/issues/777" ;;
   "issue view") echo "${FAKE_ISSUE_STATE:-OPEN}" ;;
 esac
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"-X POST"*"/labels --input -"*)
+      num="$(printf '%s\n' "$*" | sed -E 's#.*/issues/([0-9]+)/labels --input -.*#\1#')"
+      touch "$labels_dir/$num"
+      ;;
+    *"-X DELETE"*"/labels/needs-human"*)
+      num="$(printf '%s\n' "$*" | sed -E 's#.*/issues/([0-9]+)/labels/needs-human.*#\1#')"
+      rm -f "$labels_dir/$num"
+      ;;
+    *"-q .labels[].name"*)
+      num="$(printf '%s\n' "$*" | sed -E 's#.*/issues/([0-9]+) .*#\1#')"
+      [ -f "$labels_dir/$num" ] && echo "needs-human"
+      ;;
+    *) : ;;
+  esac
+fi
 exit 0
 EOF
     chmod +x "$dir/bot-gh.sh"
@@ -250,8 +277,8 @@ node -e '
 out5="$(run_tick "$dir5")"
 check "scenario 5 (attempts 5 >= budget 5): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out5"
 check "scenario 5: diagnostic cites the attempt budget" bash -c 'printf "%s\n" "$1" | grep -q "attempt budget exceeded for issue=42"' _ "$out5"
-check "scenario 5: exactly 4 gh calls (label-presence read, label create, issue edit, issue comment)" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 4 ]' _ "$dir5"
-check "scenario 5: the issue itself (not a PR) was labeled needs-human" bash -c 'gh_calls "$1" | grep -q "^issue edit 42 --add-label needs-human"' _ "$dir5"
+check "scenario 5: exactly 5 gh calls (ensure-label create, label-presence read, label add, confirm read, issue comment -- issue #169 REST)" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 5 ]' _ "$dir5"
+check "scenario 5: the issue itself (not a PR) was labeled needs-human via REST" bash -c 'gh_calls "$1" | grep -qF -- "-X POST repos/acme/repo/issues/42/labels --input -"' _ "$dir5"
 check "scenario 5: escalated is now persisted true, attempts unchanged at 5" node -e '
   const fs = require("fs");
   const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
@@ -259,7 +286,7 @@ check "scenario 5: escalated is now persisted true, attempts unchanged at 5" nod
 ' "$dir5/../state/loop-issue-attempts.json"
 out5b="$(run_tick "$dir5")"
 check "scenario 5b (still over budget, second tick): verdict is still action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out5b"
-check "scenario 5b: no additional gh calls (escalated guard held) -- still exactly 4" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 4 ]' _ "$dir5"
+check "scenario 5b: no additional gh calls (escalated guard held) -- still exactly 5" bash -c '[ "$(gh_calls "$1" | wc -l | tr -d " ")" -eq 5 ]' _ "$dir5"
 
 # ---------------------------------------------------------------------------
 # 6. Per-issue attempt budget applies across advance AND feedback phases of
@@ -275,7 +302,7 @@ node -e '
 ' "$dir6"
 out6="$(run_tick "$dir6")"
 check "scenario 6 (feedback for issue 42's PR, budget already exhausted): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out6"
-check "scenario 6: the PR (17), not the issue, was labeled/commented needs-human" bash -c 'gh_calls "$1" | grep -q "^pr edit 17 --add-label needs-human" && gh_calls "$1" | grep -q "^pr comment 17"' _ "$dir6"
+check "scenario 6: the PR (17), not the issue, was labeled/commented needs-human" bash -c 'gh_calls "$1" | grep -qF -- "-X POST repos/acme/repo/issues/17/labels --input -" && gh_calls "$1" | grep -q "^pr comment 17"' _ "$dir6"
 
 # ---------------------------------------------------------------------------
 # 7. Daily action ceiling: UNDER the ceiling (default 50) -> advance
@@ -437,7 +464,7 @@ node -e '
 out11="$(run_tick "$dir11")"
 check "scenario 11 (ci-fix for issue 42's PR, budget already exhausted): verdict is action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out11"
 check "scenario 11: diagnostic cites the attempt budget for issue=42, not PR 23" bash -c 'printf "%s\n" "$1" | grep -q "attempt budget exceeded for issue=42"' _ "$out11"
-check "scenario 11: the PR (23), not the issue, was labeled/commented needs-human" bash -c 'gh_calls "$1" | grep -q "^pr edit 23 --add-label needs-human" && gh_calls "$1" | grep -q "^pr comment 23"' _ "$dir11"
+check "scenario 11: the PR (23), not the issue, was labeled/commented needs-human" bash -c 'gh_calls "$1" | grep -qF -- "-X POST repos/acme/repo/issues/23/labels --input -" && gh_calls "$1" | grep -q "^pr comment 23"' _ "$dir11"
 
 # ---------------------------------------------------------------------------
 # 12. Precedence (issue #96): a ci-fix candidate wins over an ALSO-ready
