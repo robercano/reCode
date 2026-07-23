@@ -42,7 +42,7 @@
       .statusbar b { color: var(--ink); font-weight: 600; }
       .statusbar .led { color: var(--ok); }
       .statusbar .led::before { content: "\25cf "; }
-      .statusbar .cursor { margin-left: auto; }
+      .statusbar .cursor { margin-left: auto; width: 8px; height: 14px; vertical-align: baseline; background: var(--amber); }
       .subbar {
         display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
         padding: 6px 18px; background: var(--bg);
@@ -57,7 +57,7 @@
         box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
       }
       .dots { display: inline-flex; gap: 6px; }
-      .dot { width: 11px; height: 11px; border-radius: 50%; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; }
       .dot.r { background: #e5534b; } .dot.y { background: #d4a72c; } .dot.g { background: #3fb950; }
       .term { padding: 26px 28px 40px; }
       .line { white-space: pre-wrap; word-break: break-word; }
