@@ -21,7 +21,9 @@
 #                               already rebased for the current base commit
 #                               (pr-rebase.sh, issue #96 part 3)
 #   planned_issues=N            open issues labelled `planned` AND one of the
-#                               adapter's module:* labels, one detail line each:
+#                               adapter's module:* labels, one detail line each
+#                               (candidates are ordered — see PRIORITY ORDERING
+#                               below — before this loop, in that same order):
 #     issue=<n> branch=<feat/issue-n-* or none> title=<title>
 #   in_flight=<n>                one line PER planned issue that has a
 #                               feat/issue-n-* branch (local or remote) but NO
@@ -46,9 +48,11 @@
 #                               (issue #97). Only the first open blocker per
 #                               candidate is reported — one is enough to
 #                               explain the skip; a candidate may have more.
-#   advance_ready=<n|none>      lowest-numbered planned issue with no branch,
-#                               only when open_prs=0 (the ADVANCE precondition)
-#                               AND not blocked by an open "Blocked by #N" edge
+#   advance_ready=<n|none>      highest-priority, then lowest-numbered, planned
+#                               issue with no branch, only when open_prs=0 (the
+#                               ADVANCE precondition) AND not blocked by an
+#                               open "Blocked by #N" edge — see PRIORITY
+#                               ORDERING below (issue #173)
 #   plan_wait=<n>                one line per candidate that would otherwise be
 #                               advance_ready but is awaiting owner review of a
 #                               posted plan (labelled `plan-review`, no
@@ -100,6 +104,19 @@
 # "optimized" STEP 0 away — or piped the cursor-advancing notify-poll.sh through
 # `tail -1` — reported "No actionable activity" while ADVANCE work sat ready.
 # A tick may claim "No actionable activity" ONLY when this census prints zeros.
+#
+# --- PRIORITY ORDERING (issue #173) -----------------------------------------
+# The planned-candidate TSV is ordered by (priority rank, issue number) before
+# advance_ready/detail/blocking/in_flight ever iterate it. Priority rank comes
+# straight from the labels already fetched (2nd TSV field) — critical=0,
+# high=1, medium=2, low=3, and NO priority:* label ranks LAST (4). Issue
+# number is the tiebreaker within a rank (and the sole ordering when every
+# candidate is unlabeled), so a label-free backlog sorts identically to the
+# pre-#173 `sort -n` and every downstream line (issue=/in_flight=/blocked=/
+# advance_ready=) is byte-identical to before this feature. Priority is
+# PREFERENCE only: the blocking-graph gate below still overrides it — a
+# blocked candidate is skipped regardless of how high its priority is; edges
+# are semantics, priority is just iteration order among what's unblocked.
 #
 # --- BLOCKING-GRAPH GATE (issue #97) ----------------------------------------
 # advance_ready additionally skips any otherwise-eligible candidate (branch=
@@ -352,9 +369,27 @@ echo "comment_fix_prs=$comment_fix_prs"
 rebase_prs=$(bash "$script_dir/pr-rebase.sh" "$repo" | grep -c . || true)
 echo "rebase_prs=$rebase_prs"
 
-# Open `planned` issues carrying any of the adapter's module labels, ascending.
+# Open `planned` issues carrying any of the adapter's module labels, ordered
+# by (priority rank, issue number) — see PRIORITY ORDERING above (issue
+# #173). Rank is derived from the labels field already in the TSV (no extra
+# gh call): prepend a rank column, sort numerically on (rank, number), then
+# strip the rank column back off so the downstream `while IFS=$'\t' read -r
+# num labels title` loop is unchanged. Titles are the LAST TSV field (may
+# contain spaces) and are left untouched by this transform.
 planned=$(gh issue list -R "$repo" --state open --label planned --json number,title,labels \
-  --jq '.[] | [.number, ([.labels[].name]|join(",")), .title] | @tsv' | sort -n)
+  --jq '.[] | [.number, ([.labels[].name]|join(",")), .title] | @tsv' \
+  | awk -F'\t' 'BEGIN { OFS = "\t" }
+    {
+      labels = $2
+      rank = 4
+      if (labels ~ /(^|,)priority:critical(,|$)/) rank = 0
+      else if (labels ~ /(^|,)priority:high(,|$)/) rank = 1
+      else if (labels ~ /(^|,)priority:medium(,|$)/) rank = 2
+      else if (labels ~ /(^|,)priority:low(,|$)/) rank = 3
+      print rank OFS $0
+    }' \
+  | sort -t $'\t' -k1,1n -k2,2n \
+  | cut -f2-)
 
 planned_count=0
 advance_ready="none"
@@ -456,8 +491,9 @@ while IFS=$'\t' read -r num labels title; do
     fi
   fi
 
-  # fallback_ready: lowest-numbered otherwise-eligible candidate, IGNORING the
-  # blocking-graph gate — used only if the gate leaves advance_ready="none".
+  # fallback_ready: first otherwise-eligible candidate in (priority, number)
+  # order, IGNORING the blocking-graph gate — used only if the gate leaves
+  # advance_ready="none".
   if [ "$eligible" -eq 1 ] && [ "$fallback_ready" = "none" ]; then
     fallback_ready="$num"
     fallback_plan_state="$plan_state"

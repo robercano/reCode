@@ -638,6 +638,196 @@ check "(d) no blocked= line emitted for a task-list-only reference" bash -c \
   '! printf "%s\n" "$1" | grep -q "^blocked="' _ "$outTasklist"
 
 # ---------------------------------------------------------------------------
+# Priority-label ordering (issue #173): candidates are ordered by (priority
+# rank, then issue number) BEFORE advance_ready/detail/blocking iterate them —
+# critical=0, high=1, medium=2, low=3, unlabeled=4 (last), number is the
+# tiebreaker. Three fixtures, one per acceptance scenario. None of these need
+# cockpit.sh: every candidate's stubbed issue body is empty, so the
+# --parse-blocking shell-out never fires except in the (c) blocked fixture
+# below, which copies cockpit.sh in exactly like the blocking-graph fixtures
+# above.
+# ---------------------------------------------------------------------------
+build_plain_fixture() {
+  # $1 = dir. Same shape as build_guard_fixture above (no branches, no open
+  # PRs) but factored out so the priority fixtures below can each supply
+  # their own bot-gh.sh issue-list body.
+  local dir="$1"
+  local scripts="$dir/.claude/scripts"
+  mkdir -p "$scripts"
+  cp "$census_src" "$scripts/loop-census.sh"
+  cp "$resolve_roots_src" "$scripts/resolve-roots.sh"
+  cat > "$dir/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+  for stub in pr-feedback pr-ci-fix pr-comment-fix pr-rebase; do
+    cat > "$scripts/$stub.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  done
+  chmod +x "$scripts"/*.sh
+  git -C "$dir" init -q -b main
+  git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+}
+
+# --- (a) priority beats number: issue 50 (priority:critical) must become
+# advance_ready over issue 3 (unlabeled, lower number) -- pure number order
+# would pick 3 first. ---
+dirPrioNum="$work/prio-beats-number"
+build_plain_fixture "$dirPrioNum"
+cat > "$dirPrioNum/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '3\tplanned,module:test\tLow-priority-in-number-order candidate\n'
+          printf '50\tplanned,module:test,priority:critical\tHigh-priority higher-numbered candidate\n'
+        else
+          printf '3\n50\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirPrioNum/.claude/scripts/bot-gh.sh"
+outPrioNum="$(env -u GATES_FILE bash "$dirPrioNum/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(a) priority-critical issue 50 becomes advance_ready over lower-numbered unlabeled issue 3" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=50"' _ "$outPrioNum"
+check "(a) issue 50 (critical) is iterated/detailed BEFORE issue 3 (unlabeled)" bash -c '
+  printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=50 "
+' _ "$outPrioNum"
+
+# --- (b) unlabeled-last: issue 5 (unlabeled, LOWER number) and issue 6
+# (priority:low, HIGHER number) are BOTH otherwise-eligible (no branch, no
+# open PR, not blocked) -- priority:low still outranks unlabeled despite
+# 6 > 5, so issue 6 must be iterated first and win advance_ready. A plain
+# `sort -n` revert would pick issue 5 first instead, so this genuinely
+# discriminates (unlike a shape where the lower-numbered candidate is made
+# ineligible, which would pass either way). ---
+dirUnlabeledLast="$work/unlabeled-last"
+build_plain_fixture "$dirUnlabeledLast"
+cat > "$dirUnlabeledLast/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '5\tplanned,module:test\tUnlabeled lower-numbered candidate\n'
+          printf '6\tplanned,module:test,priority:low\tLabeled higher-numbered candidate\n'
+        else
+          printf '5\n6\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirUnlabeledLast/.claude/scripts/bot-gh.sh"
+# Neither issue has a branch, an open PR, or a blocker -- both are fully
+# eligible, so the only thing that can decide the outcome is priority order.
+outUnlabeledLast="$(env -u GATES_FILE bash "$dirUnlabeledLast/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(b) issue 6 (priority:low) is iterated before issue 5 (unlabeled)" bash -c '
+  printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=6 "
+' _ "$outUnlabeledLast"
+check "(b) priority:low issue 6 becomes advance_ready over lower-numbered unlabeled issue 5" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=6"' _ "$outUnlabeledLast"
+check "(b) unlabeled issue 5 (otherwise eligible) is NOT advance_ready" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "advance_ready=5"' _ "$outUnlabeledLast"
+check "(b) unlabeled issue 5 is not in_flight either (genuinely eligible, just outranked)" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "in_flight=5"' _ "$outUnlabeledLast"
+
+# --- (c) blocked-high-priority skipped for unblocked-lower: issue 70
+# (priority:high, HIGHER number) is "Blocked by #99" (still OPEN) -> skipped,
+# emits blocked=70 by=99; issue 8 (unlabeled, unblocked, LOWER number)
+# becomes advance_ready instead, even though 70 outranks it on priority.
+# Because 70 > 8, priority order and plain numeric order disagree on
+# iteration order (priority puts 70 first; `sort -n` would put 8 first),
+# so this genuinely discriminates a `sort -n` revert. Reuses the real
+# cockpit.sh --parse-blocking seam, exactly like the blocking-graph fixtures
+# above (scaffold_blocking_fixture copies it in verbatim). ---
+dirBlockedPrio="$work/blocked-priority"
+scaffold_blocking_fixture "$dirBlockedPrio"
+cat > "$dirBlockedPrio/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '70\tplanned,module:test,priority:high\tBlocked high-priority candidate\n'
+          printf '8\tplanned,module:test\tUnblocked lower-priority candidate\n'
+        else
+          # all-open-issue-numbers fetch: 99 (the blocker) is still OPEN.
+          printf '70\n8\n99\n'
+        fi
+        ;;
+      view)
+        case "$3" in
+          70) echo '{"body":"Blocked by #99"}' ;;
+          8) echo '{"body":""}' ;;
+          *) echo '{"body":""}' ;;
+        esac
+        ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirBlockedPrio/.claude/scripts/bot-gh.sh"
+errBlockedPrio="$work/blocked-priority.stderr"
+outBlockedPrio="$(run_blocking_fixture "$dirBlockedPrio" "$errBlockedPrio")"
+
+check "(c) issue 70 (priority:high, iterated first) is iterated before issue 8 (unlabeled)" bash -c '
+  printf "%s\n" "$1" | grep -n "^issue=" | sort -t: -k1,1n | head -1 | grep -q "issue=70 "
+' _ "$outBlockedPrio"
+check "(c) blocked=70 by=99 census line emitted (higher-priority candidate skipped)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "blocked=70 by=99"' _ "$outBlockedPrio"
+check "(c) issue 70 (blocked) is NOT advance_ready despite outranking issue 8 on priority" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "advance_ready=70"' _ "$outBlockedPrio"
+check "(c) advance_ready instead picks the unblocked lower-priority issue 8" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=8"' _ "$outBlockedPrio"
+
+# ---------------------------------------------------------------------------
 # Stall detection (issue #98): loop-census.sh must emit `stalled=N age_min=M`
 # for an in_flight issue whose newest events.jsonl activity (task field either
 # "N" or "issue-N" -- both forms occur in real logs) is older than
