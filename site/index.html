@@ -31,32 +31,34 @@
       }
       a { color: var(--pink); text-decoration: none; }
       a:hover { text-decoration: underline; }
+      .hdr { position: sticky; top: 0; z-index: 10; }
       .statusbar {
         display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
-        padding: 9px 18px; background: var(--panel);
+        padding: 6px 18px; background: var(--panel);
         border-bottom: 1px solid var(--edge);
         font-size: 11.5px; color: var(--dim);
-        position: sticky; top: 0; z-index: 10;
       }
+      .statusbar .brand { display: inline-flex; align-items: center; }
       .statusbar b { color: var(--ink); font-weight: 600; }
       .statusbar .led { color: var(--ok); }
       .statusbar .led::before { content: "\25cf "; }
       .statusbar .cursor { margin-left: auto; }
+      .subbar {
+        display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+        padding: 6px 18px; background: var(--bg);
+        border-bottom: 1px solid var(--edge);
+        font-size: 11.5px; color: var(--dim);
+      }
+      .subbar .glyph { color: var(--pink); font-weight: 700; }
+      .subbar b { color: var(--ink); font-weight: 600; }
       .window {
         max-width: 900px; margin: 40px auto 24px; border: 1px solid var(--edge);
         border-radius: 8px; background: var(--panel); overflow: hidden;
         box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
       }
-      .titlebar {
-        display: flex; align-items: center; gap: 14px; padding: 10px 16px;
-        border-bottom: 1px solid var(--edge); font-size: 11.5px; color: var(--dim);
-        background: var(--panel);
-      }
       .dots { display: inline-flex; gap: 6px; }
       .dot { width: 11px; height: 11px; border-radius: 50%; }
       .dot.r { background: #e5534b; } .dot.y { background: #d4a72c; } .dot.g { background: #3fb950; }
-      .titlebar .path b { color: var(--ink); }
-      .titlebar .right { margin-left: auto; display: flex; gap: 14px; }
       .term { padding: 26px 28px 40px; }
       .line { white-space: pre-wrap; word-break: break-word; }
       .prompt { color: var(--pink); }
@@ -88,19 +90,22 @@
     </style>
   </head>
   <body>
-    <div class="statusbar">
-      <span class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></span>
-      <span><b>roberto@thesolidchain</b>: ~/reCode</span>
-      <span class="led">online</span>
-      <span>loop: <b>armed</b></span>
-      <span>region: <b>es-remote-1</b></span>
-      <span class="cursor" aria-hidden="true"></span>
-    </div>
-    <div class="window">
-      <div class="titlebar">
+    <header class="hdr">
+      <div class="statusbar">
+        <a class="brand" href="https://thesolidchain.com" aria-label="The Solid Chain"><svg viewBox="0 0 120 120" width="56" height="56" xmlns="http://www.w3.org/2000/svg"> <path fill="#e4dac2" fill-rule="evenodd" d="M 107.28 54.5 L 98.48 54.5 A 2.2 2.2 0 0 1 96.28 52.3 L 96.28 51.78 A 16.21 16.21 0 0 0 80.07 35.57 L 39.63 35.57 A 16.21 16.21 0 0 0 23.42 51.78 L 23.42 52.3 A 2.2 2.2 0 0 1 21.22 54.5 L 12.42 54.5 L 12.42 51.78 A 27.21 27.21 0 0 1 39.63 24.57 L 80.07 24.57 A 27.21 27.21 0 0 1 107.28 51.78 L 107.28 54.5 Z M 94.11 58.0 L 86.82 58.0 A 9.14 9.14 0 0 0 77.88 50.73 L 66.24 50.73 A 9.14 9.14 0 0 0 58.21 55.5 L 50.48 55.5 A 16.35 16.35 0 0 1 66.23 43.53 L 77.87 43.53 A 16.35 16.35 0 0 1 94.11 58.0 Z M 70.61 66.6 L 66.21 66.6 A 6.64 6.64 0 0 1 62.83 65.67 A 9.14 9.14 0 0 0 64.6 62.0 L 27.59 62.0 A 16.35 16.35 0 0 1 43.81 43.6 L 56.73 43.6 A 18.85 18.85 0 0 0 49.71 50.81 L 43.8 50.81 A 9.14 9.14 0 0 0 34.87 58.0 L 71.92 58.0 A 16.35 16.35 0 0 1 70.61 66.6 Z M 71.41 55.5 L 63.68 55.5 A 9.14 9.14 0 0 0 62.8 54.19 A 6.64 6.64 0 0 1 66.24 53.23 L 70.59 53.23 A 16.35 16.35 0 0 1 71.41 55.5 Z M 77.91 76.31 L 66.25 76.31 A 16.35 16.35 0 0 1 50.53 64.5 L 58.29 64.5 A 9.14 9.14 0 0 0 66.24 69.1 L 77.93 69.1 A 9.14 9.14 0 0 0 86.83 62.0 L 94.13 62.0 A 16.35 16.35 0 0 1 77.91 76.31 Z M 56.68 76.21 L 43.81 76.21 A 16.35 16.35 0 0 1 28.13 64.5 L 35.94 64.5 A 9.14 9.14 0 0 0 43.82 69.01 L 49.7 69.01 A 18.85 18.85 0 0 0 56.68 76.21 Z M 80.07 95.2 L 39.63 95.2 A 27.21 27.21 0 0 1 12.42 67.99 L 12.42 65.5 L 21.22 65.5 A 2.2 2.2 0 0 1 23.42 67.7 L 23.42 67.99 A 16.21 16.21 0 0 0 39.63 84.2 L 80.07 84.2 A 16.21 16.21 0 0 0 96.28 67.99 L 96.28 67.7 A 2.2 2.2 0 0 1 98.48 65.5 L 107.28 65.5 L 107.28 67.99 A 27.21 27.21 0 0 1 80.07 95.2 Z"/> </svg></a>
         <span class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></span>
-        <span class="path"><b>reCode</b> — session replay · 03:12 → 07:58 · no humans were awake</span>
+        <span><b>roberto@thesolidchain</b>: ~</span>
+        <span class="led">online</span>
+        <span>uptime: <b>20y+</b></span>
+        <span>region: <b>es-remote-1</b></span>
+        <span class="cursor" aria-hidden="true"></span>
       </div>
+      <div class="subbar">
+        <span class="glyph">&lt;/&gt;</span>
+        <span><b>reCode</b> — session replay · 03:12 → 07:58 · no humans were awake</span>
+      </div>
+    </header>
+    <div class="window">
       <div class="term">
         <div class="hero">
           <svg viewBox="0 0 120 120" role="img" aria-label="reCode logo">
