@@ -31,6 +31,17 @@
       }
       a { color: var(--pink); text-decoration: none; }
       a:hover { text-decoration: underline; }
+      .statusbar {
+        display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
+        padding: 9px 18px; background: var(--panel);
+        border-bottom: 1px solid var(--edge);
+        font-size: 11.5px; color: var(--dim);
+        position: sticky; top: 0; z-index: 10;
+      }
+      .statusbar b { color: var(--ink); font-weight: 600; }
+      .statusbar .led { color: var(--ok); }
+      .statusbar .led::before { content: "\25cf "; }
+      .statusbar .cursor { margin-left: auto; }
       .window {
         max-width: 900px; margin: 40px auto 24px; border: 1px solid var(--edge);
         border-radius: 8px; background: var(--panel); overflow: hidden;
@@ -39,7 +50,7 @@
       .titlebar {
         display: flex; align-items: center; gap: 14px; padding: 10px 16px;
         border-bottom: 1px solid var(--edge); font-size: 11.5px; color: var(--dim);
-        position: sticky; top: 0; background: var(--panel); z-index: 4;
+        background: var(--panel);
       }
       .dots { display: inline-flex; gap: 6px; }
       .dot { width: 11px; height: 11px; border-radius: 50%; }
@@ -77,11 +88,18 @@
     </style>
   </head>
   <body>
+    <div class="statusbar">
+      <span class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></span>
+      <span><b>roberto@thesolidchain</b>: ~/reCode</span>
+      <span class="led">online</span>
+      <span>loop: <b>armed</b></span>
+      <span>region: <b>es-remote-1</b></span>
+      <span class="cursor" aria-hidden="true"></span>
+    </div>
     <div class="window">
       <div class="titlebar">
         <span class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></span>
         <span class="path"><b>reCode</b> — session replay · 03:12 → 07:58 · no humans were awake</span>
-        <span class="right"><a href="https://github.com/robercano/reCode">github</a><a href="https://thesolidchain.com">thesolidchain.com</a></span>
       </div>
       <div class="term">
         <div class="hero">
@@ -140,13 +158,17 @@
         <div class="line reveal"><span class="prompt">:~/app$</span> <span class="typed">/orchestrator:setup</span>  <span class="comment"># 5-min interview: your gates, your modules, your rules</span></div>
         <div class="line reveal"><span class="prompt">:~/app$</span> <span class="typed">/pr-loop</span>             <span class="comment"># arm it</span></div>
         <div class="gap"></div>
+        <div class="line comment reveal"># Source, issues and stars:</div>
+        <div class="line reveal"><span class="prompt">:~/app$</span> <span class="typed">gh browse</span></div>
+        <div class="line out reveal">Opening <a href="https://github.com/robercano/reCode">github.com/robercano/reCode</a> …</div>
+        <div class="gap"></div>
         <div class="line reveal"><span class="prompt">:~/app$</span> <span class="cursor" aria-hidden="true"></span></div>
       </div>
     </div>
 
     <footer>
       <div class="fam"><span style="color: #ff7ab8">&lt;/&gt;</span> <b>reCode</b> · <span style="color: #d6ff7a">^^</span> reDeploy · <span style="color: #7ac4ff">&lt;=&gt;</span> reDeFi — <a href="https://thesolidchain.com">The Solid Chain</a></div>
-      <div>© 2026 Roberto Cano · reCode builds reCode: this page's repo runs the loop it describes.</div>
+      <div>© 2026 Roberto Cano · <a href="https://github.com/robercano/reCode">github.com/robercano/reCode</a> · reCode builds reCode: this page's repo runs the loop it describes.</div>
     </footer>
 
     <script>
