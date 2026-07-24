@@ -30,6 +30,20 @@
 #   7. an optional "## [Unreleased]" scaffold section at the top of the
 #      CHANGELOG (issue #176's optional CHANGELOG addition) stays ABOVE the
 #      newly-generated dated section rather than getting pushed below it.
+#   8. the REAL (non-dry-run) mutating path: a local `git init --bare` origin
+#      stands in for the network (mirrors worktree-cleanup.test.sh) and a
+#      fake bot-gh.sh stub installed at the fixture's own
+#      .claude/scripts/bot-gh.sh stands in for gh entirely (mirrors
+#      pr-rebase.test.sh's convention — release.sh's `gh()` always shells out
+#      to its own sibling bot-gh.sh, never $PATH). Asserts the version-bump
+#      commit landed, the tag was created, the push actually reached the bare
+#      origin (branch + tag), and the milestone-close / label-create /
+#      rollout-issue-create gh calls fired with the right args (including the
+#      rollout body's milestone-derived test-focus titles) — by inspecting
+#      the stub's own call log.
+#   9. the no-`--issue` real-path variant: milestone-close warns and skips
+#      (never crashes, never guesses), while the rollout companion issue is
+#      still filed with a graceful "titles unavailable" test-focus fallback.
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/release.test.sh
@@ -123,6 +137,67 @@ run_release() {
   # $1 = repo dir, rest = args to release.sh
   local repo="$1"; shift
   ( cd "$repo" && bash "$repo/.claude/scripts/release.sh" "$@" )
+}
+
+install_fake_bot_gh() {
+  # $1 = repo dir. Installs a FAKE bot-gh.sh at the fixture's
+  # .claude/scripts/bot-gh.sh — release.sh's own `gh() { bash
+  # "$script_dir/bot-gh.sh" "$@"; }` always shells out to its OWN sibling
+  # bot-gh.sh (resolved from release.sh's own location), never $PATH, so this
+  # is the one place a stub must live to intercept every gh call (mirrors
+  # pr-rebase.test.sh's / pr-comment-fix.test.sh's fake-bot-gh.sh convention).
+  # Logs every invocation, verbatim, to $RELEASE_TEST_GH_LOG (an env var the
+  # caller sets — never hardcoded, so parallel scenarios use separate logs)
+  # so the test can assert milestone-close / label-create / issue-create
+  # fired with the expected args. No real network/gh call, ever.
+  local repo="$1"
+  cat > "$repo/.claude/scripts/bot-gh.sh" <<'STUB'
+#!/usr/bin/env bash
+log_file="${RELEASE_TEST_GH_LOG:?RELEASE_TEST_GH_LOG must be set by the test}"
+printf '%s\n' "$*" >> "$log_file"
+case "$1" in
+  repo)
+    echo "acme/repo"
+    ;;
+  issue)
+    case "$2" in
+      view)
+        if printf '%s\n' "$*" | grep -q '\.milestone\.number'; then
+          echo "77"
+        elif printf '%s\n' "$*" | grep -q '\.milestone\.title'; then
+          echo "Release v1.2.0"
+        fi
+        ;;
+      list)
+        printf '%s\n' "Fix widget alignment" "Add gizmo support"
+        ;;
+      create)
+        echo "https://github.com/acme/repo/issues/999"
+        ;;
+      *)
+        echo "fake-bot-gh.sh: unexpected issue subcommand: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  api)
+    exit 0
+    ;;
+  *)
+    echo "fake-bot-gh.sh: unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+STUB
+  chmod +x "$repo/.claude/scripts/bot-gh.sh"
+}
+
+run_release_real() {
+  # $1 = repo dir, $2 = gh-call log file (absolute path), rest = args to
+  # release.sh. Exports RELEASE_TEST_GH_LOG for the fake bot-gh.sh stub above
+  # — install_fake_bot_gh must have already been run against $1.
+  local repo="$1" log="$2"; shift 2
+  ( cd "$repo" && RELEASE_TEST_GH_LOG="$log" bash "$repo/.claude/scripts/release.sh" "$@" )
 }
 
 # =============================================================================
@@ -282,6 +357,108 @@ check "scenario E: new dated section still lands above the prior 1.0.0 section" 
   n0=$(grep -n "^## \[1.0.0\]" "$2/order-e2.txt" | head -1 | cut -d: -f1)
   [ -n "$n1" ] && [ -n "$n0" ] && [ "$n1" -lt "$n0" ]
 ' _ "$changelog_e" "$work"
+
+# =============================================================================
+# Scenario F: the REAL (non-dry-run) mutating path — a local `git init --bare`
+# origin stands in for the network (mirrors worktree-cleanup.test.sh's own
+# bare-repo-as-origin pattern) and a fake bot-gh.sh stub (installed above)
+# stands in for gh entirely (mirrors pr-rebase.test.sh's convention). Asserts
+# every one of release.sh's real side effects actually happened: (a) the
+# version-bump commit landed, (b) the vX.Y.Z tag was created, (c) the push
+# actually reached the bare origin (branch AND tag), (d) the milestone-close,
+# label-create, and rollout-issue-create gh calls fired with the correct
+# args — including the rollout issue body carrying the milestone-derived
+# test-focus titles.
+# =============================================================================
+origin_bare="$work/origin.git"
+git init -q --bare "$origin_bare"
+
+repo_f="$work/repo-f"
+seed_fixture "$repo_f"
+git -C "$repo_f" remote add origin "$origin_bare"
+git -C "$repo_f" push -q origin main
+
+install_fake_bot_gh "$repo_f"
+gh_log_f="$work/gh-calls-f.log"
+: > "$gh_log_f"
+
+out_f="$(run_release_real "$repo_f" "$gh_log_f" v1.2.0 --issue 501 --repo acme/repo 2>&1)"
+rc_f=$?
+
+check "scenario F: exits 0" [ "$rc_f" -eq 0 ]
+
+check "scenario F: (a) version-bump commit landed (HEAD subject)" bash -c '
+  [ "$(git -C "$1" log -1 --pretty=%s)" = "release: v1.2.0" ]
+' _ "$repo_f"
+check "scenario F: (a) plugin.json version bump is IN the commit, not just on disk" bash -c '
+  git -C "$1" show HEAD:.claude/.claude-plugin/plugin.json | grep -q "\"version\": \"1.2.0\""
+' _ "$repo_f"
+check "scenario F: (a) marketplace.json version bump is IN the commit" bash -c '
+  git -C "$1" show HEAD:.claude/.claude-plugin/marketplace.json | grep -q "\"version\": \"1.2.0\""
+' _ "$repo_f"
+
+check "scenario F: (b) tag v1.2.0 was actually created locally" bash -c 'git -C "$1" tag --list | grep -qx v1.2.0' _ "$repo_f"
+
+check "scenario F: (c) push actually reached the bare origin (main branch commit)" bash -c '
+  [ "$(git -C "$1" log -1 --pretty=%s refs/heads/main)" = "release: v1.2.0" ]
+' _ "$origin_bare"
+check "scenario F: (c) push actually reached the bare origin (tag)" bash -c 'git -C "$1" tag --list | grep -qx v1.2.0' _ "$origin_bare"
+
+check "scenario F: (d) milestone-close API call fired against the resolved milestone number" bash -c '
+  grep -qF "api -X PATCH repos/acme/repo/milestones/77 -f state=closed" "$1"
+' _ "$gh_log_f"
+check "scenario F: (d) all three rollout labels created idempotently via gh api" bash -c '
+  grep -qF "labels -f name=feedback" "$1" &&
+  grep -qF "labels -f name=from:redeploy" "$1" &&
+  grep -qF "labels -f name=from:redefi" "$1"
+' _ "$gh_log_f"
+check "scenario F: (d) rollout issue created with the right title and feedback label" bash -c '
+  grep -qF "issue create" "$1" &&
+  grep -qF "Rollout & feedback: v1.2.0" "$1" &&
+  grep -qF -- "--label feedback" "$1"
+' _ "$gh_log_f"
+check "scenario F: rollout issue body carries the milestone-derived test-focus titles" bash -c '
+  grep -qF "Fix widget alignment" "$1" && grep -qF "Add gizmo support" "$1"
+' _ "$gh_log_f"
+
+# =============================================================================
+# Scenario G: REAL path with NO --issue given — the milestone-close step must
+# warn-and-skip (never crash, never guess a milestone), while the rollout
+# companion issue is STILL filed (it does not depend on milestone
+# resolution), falling back to the "titles unavailable" test-focus note.
+# =============================================================================
+origin_bare_g="$work/origin-g.git"
+git init -q --bare "$origin_bare_g"
+
+repo_g="$work/repo-g"
+seed_fixture "$repo_g"
+git -C "$repo_g" remote add origin "$origin_bare_g"
+git -C "$repo_g" push -q origin main
+
+install_fake_bot_gh "$repo_g"
+gh_log_g="$work/gh-calls-g.log"
+: > "$gh_log_g"
+
+out_g="$(run_release_real "$repo_g" "$gh_log_g" v1.3.0 --repo acme/repo 2>&1)"
+rc_g=$?
+
+check "scenario G: exits 0 even though no --issue was given" [ "$rc_g" -eq 0 ]
+check "scenario G: warns that no milestone was resolved / not closed automatically" bash -c '
+  printf "%s" "$1" | grep -qi "no milestone resolved"
+' _ "$out_g"
+check "scenario G: milestone-close API call was NEVER made (nothing to resolve it from)" bash -c '
+  ! grep -q "milestones/" "$1"
+' _ "$gh_log_g"
+check "scenario G: rollout issue is STILL filed regardless of milestone resolution" bash -c '
+  grep -qF "issue create" "$1" && grep -qF "Rollout & feedback: v1.3.0" "$1"
+' _ "$gh_log_g"
+check "scenario G: test-focus list falls back to the titles-unavailable note" bash -c '
+  grep -qF "milestone issue titles unavailable" "$1"
+' _ "$gh_log_g"
+check "scenario G: version was still bumped and pushed for real (only milestone-close is skipped)" bash -c '
+  [ "$(git -C "$1" log -1 --pretty=%s refs/heads/main)" = "release: v1.3.0" ] &&
+  git -C "$1" tag --list | grep -qx v1.3.0
+' _ "$origin_bare_g"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

@@ -214,12 +214,14 @@ fi
 # --- step 3: commit, tag, push -----------------------------------------------
 git -C "$root" add -- "$plugin_json" "$marketplace_json" "$changelog_md" \
   || { echo "release.sh: git add failed" >&2; exit 1; }
-git -C "$root" commit -q -m "release: $VERSION" \
+# -c commit.gpgSign=false / tag.gpgSign=false: override an operator's global
+# gpgsign defaults for THESE invocations only (never writes to any gitconfig)
+# — an unattended release commit/tag doesn't need GPG signing, and an
+# operator with `commit.gpgsign=true`/`tag.gpgsign=true` and no agent
+# configured would otherwise hang here waiting on a signature. Applied
+# symmetrically to both the commit and the tag.
+git -C "$root" -c commit.gpgSign=false commit -q -m "release: $VERSION" \
   || { echo "release.sh: git commit failed" >&2; exit 1; }
-# -c tag.gpgSign=false: override an operator's global gpgsign default for
-# THIS invocation only (never writes to any gitconfig) — a lightweight
-# release tag doesn't need GPG signing, and forcing it here means this
-# script works unattended even when signing isn't set up / has no agent.
 git -C "$root" -c tag.gpgSign=false tag "$VERSION" \
   || { echo "release.sh: git tag failed" >&2; exit 1; }
 git -C "$root" push origin HEAD \
