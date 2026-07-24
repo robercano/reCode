@@ -1251,6 +1251,23 @@ check "(milestone-complete) event logged for the drained milestone" bash -c \
 check "(milestone-complete) idempotent -- exactly one event after three census runs" bash -c \
   '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 1 ]' _ "$eventsComplete"
 
+# --- MILESTONE-COMPLETE ROTATION SURVIVAL (issue #174 review fix): a scan-of-
+# events.jsonl idempotency guard breaks the moment log-event.sh's own
+# retention cap (EVENTS_MAX_LINES, default 2000) rotates the marker line back
+# out of the log -- inevitable over the multi-day idle gap this feature is
+# built around. Simulate that by wiping the marker straight out of
+# events.jsonl (strictly worse than real rotation, which only evicts it
+# eventually) and confirm a 4th census run still does NOT re-log: idempotency
+# must be tracked in the separate, never-rotated
+# .claude/state/milestone-complete-logged.json sidecar, not events.jsonl. ---
+: > "$eventsComplete"
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsComplete" bash "$dirComplete/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+
+check "(milestone-complete, rotation survival) no duplicate event once the events.jsonl marker line is gone (simulated rotation)" bash -c \
+  '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 0 ]' _ "$eventsComplete"
+check "(milestone-complete, rotation survival) sidecar ledger still remembers milestone 1 as already logged" bash -c \
+  'grep -q "1" "$1"' _ "$dirComplete/.claude/state/milestone-complete-logged.json"
+
 # ---------------------------------------------------------------------------
 # sort -V regression lock (issue #174 follow-up): two open milestones titled
 # "v1.9" and "v1.10", where LEXICAL and VERSION order genuinely DIVERGE
@@ -1305,6 +1322,57 @@ check "(sort -V regression) advance_ready=15 (v1.9's candidate), not issue 16 (v
   'printf "%s\n" "$1" | grep -qx "advance_ready=15"' _ "$outSortV"
 check "(sort -V regression) issue 16 (out-of-scope v1.10 candidate) is never detailed" bash -c \
   '! printf "%s\n" "$1" | grep -q "^issue=16 "' _ "$outSortV"
+
+# ---------------------------------------------------------------------------
+# space-in-title coverage (issue #174 follow-up): milestone titles are
+# free-form ("Sprint 1", not just "vX.Y" strings) -- the header comment
+# explicitly cites "Sprint 1" < "Sprint 2" as supported. Confirm a spaced
+# title round-trips correctly through both TSVs (jq's @tsv escapes embedded
+# whitespace-adjacent characters safely; a title is still one field) and that
+# exact-match milestone scoping works unchanged. ---
+dirSpaceTitle="$work/milestone-space-title"
+build_milestone_fixture "$dirSpaceTitle"
+cat > "$dirSpaceTitle/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tSprint 1\t1\t0\n'
+    printf '2\tSprint 2\t1\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '25\tplanned,module:test\tSprint 1\tSprint-1 candidate\n'
+          printf '26\tplanned,module:test\tSprint 2\tSprint-2 candidate\n'
+        else
+          printf '25\n26\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirSpaceTitle/.claude/scripts/bot-gh.sh"
+outSpaceTitle="$(env -u GATES_FILE bash "$dirSpaceTitle/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(space-in-title) milestone=Sprint 1 (spaced title survives both TSV round-trips intact)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=Sprint 1"' _ "$outSpaceTitle"
+check "(space-in-title) advance_ready=25 (Sprint 1's candidate), not issue 26 (Sprint 2)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=25"' _ "$outSpaceTitle"
+check "(space-in-title) issue 26 (out-of-scope Sprint 2 candidate) is never detailed" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^issue=26 "' _ "$outSpaceTitle"
 
 # ---------------------------------------------------------------------------
 # never-populated guard negative test (issue #174 follow-up): a milestone

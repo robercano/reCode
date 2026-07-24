@@ -179,12 +179,20 @@
 # >= 1, i.e. genuinely drained rather than never-populated) without any extra
 # gh call. This is the ONE deliberate exception to this script's read-only /
 # re-run-safe contract (see the file-level comment below): it appends to
-# events.jsonl via log-event.sh. To stay idempotent under re-runs (no
-# duplicate event every idle tick), it FIRST scans events.jsonl for an
-# existing milestone-complete event carrying that milestone's title, and
-# only logs when none is found — approach (b) from the issue's acceptance
-# criteria, chosen because it needs no change to loop-tick.sh's control flow
-# and keeps the guard co-located with the detection logic that needs it.
+# events.jsonl via log-event.sh. A drained milestone typically stays
+# state=open for days (the idle gap after it drains IS the PO-feedback
+# phase), so census re-observes the SAME drained milestone on every tick
+# through that whole window — idempotency has to survive that. events.jsonl
+# itself is NOT a valid ledger for that check: log-event.sh caps it to the
+# last EVENTS_MAX_LINES (default 2000) lines, oldest-first, so a scan-based
+# "is it already in events.jsonl" guard eventually loses its own marker line
+# to rotation and re-logs a duplicate. Idempotency is instead tracked in a
+# small, NEVER-rotated sidecar file (`.claude/state/milestone-complete-
+# logged.json`, keyed by milestone NUMBER — stable, unlike a title an owner
+# could edit), with the whole check-then-log critical section serialized by
+# a real `flock` (same TOCTOU class loop-tick.sh's advance lock closes,
+# issue #81) so two overlapping census/cockpit invocations can't both
+# observe "not yet logged" and both append.
 #
 # --- BLOCKING-GRAPH GATE (issue #97) ----------------------------------------
 # advance_ready additionally skips any otherwise-eligible candidate (branch=
@@ -256,8 +264,9 @@
 # Invoke as `bash .claude/scripts/loop-census.sh` (pre-approve that exact
 # command). Read-only: advances no cursor, mutates nothing — safe to re-run.
 # The SOLE exception is the milestone-complete event append (issue #174, see
-# MILESTONE SCOPING above) — an idempotent, guarded events.jsonl write, never
-# a stdout/behavior change; every other line above stays a pure read.
+# MILESTONE SCOPING above) — an events.jsonl write guarded to fire once per
+# milestone by a separate, never-rotated sidecar ledger, never a stdout/
+# behavior change; every other line above stays a pure read.
 set -euo pipefail
 
 # Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
@@ -354,7 +363,7 @@ events_file="${CLAUDE_EVENTS_FILE:-$root/.claude/state/events.jsonl}"
 # SCOPING above): census must never abort, and an empty result here makes
 # every downstream milestone check a no-op, falling back to today's unscoped
 # behavior.
-milestones_tsv=$(gh api "repos/$repo/milestones?state=open" \
+milestones_tsv=$(gh api --paginate "repos/$repo/milestones?state=open" \
   --jq '.[] | [.number, .title, .open_issues, .closed_issues] | @tsv' 2>/dev/null) || true
 
 # Version-sort ascending by title (2nd TSV field) — natural/`sort -V`
@@ -370,38 +379,51 @@ fi
 # A milestone is "complete" when the REST fetch's own open_issues/
 # closed_issues counters show it fully drained (open_issues==0) AND it
 # genuinely had issues to drain (closed_issues>=1 — never fires for an empty/
-# never-populated milestone). Guarded against duplicate logging by scanning
-# events_file FIRST for an existing milestone-complete event carrying this
-# milestone's title before appending — safe to re-run every tick, exactly
-# like every other check in this script, EXCEPT this one intentionally
-# mutates events.jsonl (via log-event.sh) as its side effect.
+# never-populated milestone). Idempotency is tracked in a dedicated,
+# never-rotated sidecar file (NOT events.jsonl — see the MILESTONE-COMPLETE
+# EVENT note above for why a rotation-subject log can't be the ledger),
+# keyed by milestone number, with the check-then-log critical section
+# serialized by flock against concurrent census/cockpit invocations.
+milestone_state_file="${CLAUDE_MILESTONE_STATE_FILE:-$root/.claude/state/milestone-complete-logged.json}"
+milestone_lock_file="${CLAUDE_MILESTONE_LOCK_FILE:-$root/.claude/state/milestone-complete.flock}"
 if [ -n "$milestones_tsv" ]; then
+  mkdir -p "$(dirname "$milestone_state_file")" 2>/dev/null || true
   while IFS=$'\t' read -r ms_num ms_title ms_open ms_closed; do
     [ -z "${ms_title:-}" ] && continue
+    case "$ms_num" in ''|*[!0-9]*) continue ;; esac
     case "$ms_open" in ''|*[!0-9]*) continue ;; esac
     case "$ms_closed" in ''|*[!0-9]*) continue ;; esac
     if [ "$ms_open" -eq 0 ] && [ "$ms_closed" -ge 1 ]; then
-      already_logged=$(CLAUDE_MS_EVENTS_FILE="$events_file" CLAUDE_MS_TITLE="$ms_title" node -e '
-        const fs = require("fs");
-        const file = process.env.CLAUDE_MS_EVENTS_FILE;
-        const title = process.env.CLAUDE_MS_TITLE;
-        let found = false;
-        try {
-          const text = fs.readFileSync(file, "utf8");
-          for (const line of text.split("\n")) {
-            if (!line.trim()) continue;
-            let o;
-            try { o = JSON.parse(line); } catch (e) { continue; }
-            if (o.phase === "milestone-complete" && o.task === title) { found = true; break; }
-          }
-        } catch (e) { /* no file yet -> not logged */ }
-        console.log(found ? "yes" : "no");
-      ' 2>/dev/null) || already_logged="no"
-      if [ "$already_logged" != "yes" ]; then
-        CLAUDE_EVENTS_FILE="$events_file" bash "$script_dir/log-event.sh" \
-          --role census --task "$ms_title" --phase milestone-complete \
-          --detail "milestone drained (all issues closed)" >/dev/null 2>&1 || true
-      fi
+      (
+        exec 8>"$milestone_lock_file"
+        flock -x 8
+        already_logged=$(CLAUDE_MS_STATE_FILE="$milestone_state_file" CLAUDE_MS_NUM="$ms_num" node -e '
+          const fs = require("fs");
+          const file = process.env.CLAUDE_MS_STATE_FILE;
+          const num = process.env.CLAUDE_MS_NUM;
+          let logged = [];
+          try { logged = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { logged = []; }
+          if (!Array.isArray(logged)) logged = [];
+          console.log(logged.includes(num) ? "yes" : "no");
+        ' 2>/dev/null) || already_logged="no"
+        if [ "$already_logged" != "yes" ]; then
+          CLAUDE_EVENTS_FILE="$events_file" bash "$script_dir/log-event.sh" \
+            --role census --task "$ms_title" --phase milestone-complete \
+            --detail "milestone drained (all issues closed)" >/dev/null 2>&1 || true
+          CLAUDE_MS_STATE_FILE="$milestone_state_file" CLAUDE_MS_NUM="$ms_num" node -e '
+            const fs = require("fs");
+            const file = process.env.CLAUDE_MS_STATE_FILE;
+            const num = process.env.CLAUDE_MS_NUM;
+            let logged = [];
+            try { logged = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { logged = []; }
+            if (!Array.isArray(logged)) logged = [];
+            if (!logged.includes(num)) logged.push(num);
+            const tmp = file + ".tmp." + process.pid;
+            fs.writeFileSync(tmp, JSON.stringify(logged));
+            fs.renameSync(tmp, file);
+          ' 2>/dev/null || true
+        fi
+      )
     fi
   done <<< "$milestones_tsv"
 fi
