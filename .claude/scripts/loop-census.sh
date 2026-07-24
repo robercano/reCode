@@ -383,7 +383,13 @@ fi
 # never-rotated sidecar file (NOT events.jsonl — see the MILESTONE-COMPLETE
 # EVENT note above for why a rotation-subject log can't be the ledger),
 # keyed by milestone number, with the check-then-log critical section
-# serialized by flock against concurrent census/cockpit invocations.
+# serialized by flock against concurrent census/cockpit invocations. The
+# whole thing runs under this script's own `set -euo pipefail`, so lock
+# acquisition (`exec 8>…`/`flock -x 8`) is explicitly guarded (`|| exit 0`)
+# and the enclosing subshell invocation ends in `|| true`: a lock/fs failure
+# (permission denied, missing dir, disk full) must degrade to "skip logging
+# this tick" — never abort census before it prints advance_ready=/
+# planned_issues=/etc., which loop-tick.sh depends on for every run.
 milestone_state_file="${CLAUDE_MILESTONE_STATE_FILE:-$root/.claude/state/milestone-complete-logged.json}"
 milestone_lock_file="${CLAUDE_MILESTONE_LOCK_FILE:-$root/.claude/state/milestone-complete.flock}"
 if [ -n "$milestones_tsv" ]; then
@@ -395,8 +401,8 @@ if [ -n "$milestones_tsv" ]; then
     case "$ms_closed" in ''|*[!0-9]*) continue ;; esac
     if [ "$ms_open" -eq 0 ] && [ "$ms_closed" -ge 1 ]; then
       (
-        exec 8>"$milestone_lock_file"
-        flock -x 8
+        exec 8>"$milestone_lock_file" 2>/dev/null || exit 0
+        flock -x 8 2>/dev/null || exit 0
         already_logged=$(CLAUDE_MS_STATE_FILE="$milestone_state_file" CLAUDE_MS_NUM="$ms_num" node -e '
           const fs = require("fs");
           const file = process.env.CLAUDE_MS_STATE_FILE;
@@ -423,7 +429,7 @@ if [ -n "$milestones_tsv" ]; then
             fs.renameSync(tmp, file);
           ' 2>/dev/null || true
         fi
-      )
+      ) || true
     fi
   done <<< "$milestones_tsv"
 fi

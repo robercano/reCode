@@ -1268,6 +1268,22 @@ check "(milestone-complete, rotation survival) no duplicate event once the event
 check "(milestone-complete, rotation survival) sidecar ledger still remembers milestone 1 as already logged" bash -c \
   'grep -q "1" "$1"' _ "$dirComplete/.claude/state/milestone-complete-logged.json"
 
+# --- MILESTONE-COMPLETE LOCK-FAILURE NEVER ABORTS CENSUS (issue #174 review
+# fix): a prior version of the idempotency fix opened the flock fd
+# (`exec 8>…`) and acquired it (`flock -x 8`) with no failure guard, under
+# this script's own `set -euo pipefail` -- if the lock file can't be opened
+# (unwritable state dir, missing parent, disk full) the subshell aborted and
+# that nonzero exit propagated to census itself, killing the WHOLE run
+# before it printed advance_ready=/planned_issues=/etc. Point the lock at an
+# unwritable path and confirm census still completes normally instead of
+# dying. ---
+outLockFail="$(env -u GATES_FILE CLAUDE_MILESTONE_LOCK_FILE="/nonexistent-dir-$$/lock.flock" \
+  bash "$dirComplete/.claude/scripts/loop-census.sh" "acme/repo")"
+check "(milestone-complete, lock failure) census still completes (advance_ready= line present) when the lock file can't be opened" bash -c \
+  'printf "%s\n" "$1" | grep -q "^advance_ready="' _ "$outLockFail"
+check "(milestone-complete, lock failure) census still completes (planned_issues= line present) when the lock file can't be opened" bash -c \
+  'printf "%s\n" "$1" | grep -q "^planned_issues="' _ "$outLockFail"
+
 # ---------------------------------------------------------------------------
 # sort -V regression lock (issue #174 follow-up): two open milestones titled
 # "v1.9" and "v1.10", where LEXICAL and VERSION order genuinely DIVERGE
