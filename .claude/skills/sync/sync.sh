@@ -238,7 +238,7 @@ check_deploy_lag() {
   fi
   echo "  deploy-lag: .claude/state/loop-runs.log — last recorded run: $last_line"
   local last_ts
-  last_ts="$(printf '%s' "$last_line" | grep -o 'ts=[^ ]*' | head -1 | cut -d= -f2)"
+  last_ts="$(printf '%s' "$last_line" | grep -o 'ts=[^ ]*' | head -1 | cut -d= -f2 || true)"
   if [ -z "$last_ts" ]; then
     echo "  deploy-lag: could not parse a ts= field from the last entry — inspect the file yourself before restarting"
     return 0

@@ -45,22 +45,30 @@
 # scenarios 11-16 cover them:
 #   11. environment check: .env/GH_BOT_TOKEN presence (found / missing key / no .env at
 #       all — and the token VALUE itself is never echoed into the output) and installed
-#       plugin version vs. the issue #136 floor (>= ok, < too-old, both compared off a
-#       synthetic `.claude-plugin/plugin.json` fixture).
+#       plugin version vs. the issue #136 floor (>= at floor ok, above floor ok, < too-old,
+#       a malformed non-numeric component degrades to "verify manually" rather than a wrong
+#       compare, and a plugin.json missing the "version" field entirely degrades to "could
+#       not parse" — all compared off synthetic `.claude-plugin/plugin.json` fixtures).
 #   12. missing-labels check: expected `module:<name>` labels + `needs-human` are derived
 #       from the TARGET's `.claude/gates.json` `modules[]` and printed as exact
 #       `bot-gh.sh label create` advisory commands (never run); no adapter present
-#       degrades to "cannot derive labels" rather than a crash.
+#       degrades to "cannot derive labels" rather than a crash. Both scenario 12 and 12b
+#       pin `GATES_FILE` to their own fixture's adapter path (absolute) so the assertions
+#       hold regardless of an ambient `GATES_FILE` leaking in from the caller's environment.
 #   13. observability-plumbing check: `.claude/state/{worker-tools,events}.jsonl` reported
-#       absent / present-but-empty / present-with-activity, referencing issue #137 for the
-#       gap case, without ever attempting to create/fix those files.
+#       absent / present-but-empty / present-with-activity (both files, not just
+#       worker-tools.jsonl), referencing issue #137 for the gap case, without ever
+#       attempting to create/fix those files.
 #   14. deploy-lag check: `.claude/state/loop-runs.log` absent / empty / a recent ts=
-#       (looks ACTIVE, wait) / an old ts= (looks idle, safe to restart) all produce the
+#       (looks ACTIVE, wait) / an old ts= (looks idle, safe to restart) / a last line with
+#       no parseable `ts=` field at all (must still exit 0 and print the "could not parse"
+#       fallback, not abort the whole script under `set -euo pipefail`) all produce the
 #       expected re-arm/restart guidance without sync.sh touching the file or any unit.
 #   15. self-hosting quiets the remediation-flavored advisories (module/needs-human label
 #       creation) while still running the plain informational reads (env, observability,
 #       deploy-lag) with no crash and exit 0 — mirrors the self_hosting short-circuit
-#       scenario 9 already asserts for stale-vendor.
+#       scenario 9 already asserts for stale-vendor. Pins `GATES_FILE` to its own fixture's
+#       adapter for the same ambient-env-isolation reason as scenario 12.
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/sync-managed-files.test.sh
@@ -380,6 +388,34 @@ check_output "s11d: below-floor plugin version flagged" "$out11d" \
 check_output "s11: live bot-identity advisory printed, not run" "$out11a" \
   "ADVISORY (live, network — not run by sync.sh) — verify bot identity + repo access: bash \${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh api user --jq .login"
 
+# 11e. Above-floor plugin version (e.g. a later release than the #136 MIN_PLUGIN_VERSION
+# floor) is reported OK too, not just the exact-floor case s11a already covers.
+plugin_v_above="$work/plugin-v-above"
+build_plugin_fixture_with_version "$plugin_v_above" "0.3.0"
+out11e="$(bash "$plugin_v_above/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11e: above-floor plugin version reported OK" "$out11e" \
+  "env: plugin version — v0.3.0 >= required v0.2.2"
+
+# 11f. Malformed version field (non-numeric component) degrades to "verify manually"
+# rather than a wrong lexical/numeric compare (version_ge's return-2 "unparseable" path).
+plugin_v_malformed="$work/plugin-v-malformed"
+build_plugin_fixture "$plugin_v_malformed"
+mkdir -p "$plugin_v_malformed/.claude-plugin"
+printf '{\n  "name": "orchestrator",\n  "version": "0.2.2-beta"\n}\n' \
+  >"$plugin_v_malformed/.claude-plugin/plugin.json"
+out11f="$(bash "$plugin_v_malformed/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11f: malformed version component -> verify manually, no crash" "$out11f" \
+  "could not compare \"0.2.2-beta\" against \"0.2.2\""
+
+# 11g. Missing "version" field in plugin.json entirely -> "could not parse" message.
+plugin_v_missing="$work/plugin-v-missing"
+build_plugin_fixture "$plugin_v_missing"
+mkdir -p "$plugin_v_missing/.claude-plugin"
+printf '{\n  "name": "orchestrator"\n}\n' >"$plugin_v_missing/.claude-plugin/plugin.json"
+out11g="$(bash "$plugin_v_missing/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11g: missing version field -> could not parse message, no crash" "$out11g" \
+  "env: plugin version — could not parse a \"version\" field from"
+
 # ---------------------------------------------------------------------------
 # Scenario 12: missing-labels check (issue #141 item 3) — derived from the target's
 # .claude/gates.json modules[], printed as exact bot-gh.sh advisory commands.
@@ -389,7 +425,14 @@ mkdir -p "$t12/.claude"
 cat >"$t12/.claude/gates.json" <<'JSON'
 {"project":{"name":"x"},"modules":[{"name":"foo","description":"Foo module"},{"name":"bar","description":"Bar module"}],"gates":{}}
 JSON
-out12="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t12" 2>&1)"
+# Pin GATES_FILE to this fixture's OWN adapter (absolute path — sync.sh/derive_module_labels
+# takes an absolute GATES_FILE as-is, same convention as gate.sh, see gate.test.sh's
+# write_gates_file/run_gate). Scenarios 12/12b/15 must be deterministic regardless of an
+# ambient GATES_FILE leaking in from the caller's environment (e.g. the self-hosted test
+# gate runs *.test.sh with GATES_FILE=.claude/self/gates.json already exported) — without
+# this pin, derive_module_labels would resolve the ambient adapter relative to $t12 instead
+# of this fixture's own gates.json and silently fail to derive any labels.
+out12="$(GATES_FILE="$t12/.claude/gates.json" bash "$plugin_v_ok/skills/sync/sync.sh" "$t12" 2>&1)"
 check_output "s12: module:foo label advisory derived" "$out12" \
   'bot-gh.sh label create "module:foo" --description "Foo module" --force'
 check_output "s12: module:bar label advisory derived" "$out12" \
@@ -400,7 +443,10 @@ check "s12: no labels actually created (advisory only, no network call)" test 1 
 
 t12b="$work/consumer12b"
 mkdir -p "$t12b"
-out12b="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t12b" 2>&1)"
+# Pin GATES_FILE to a path that deliberately doesn't exist under this fixture, so "no
+# adapter found" is asserted regardless of what the ambient environment's GATES_FILE points
+# at (same isolation rationale as scenario 12 above).
+out12b="$(GATES_FILE="$t12b/.claude/gates.json" bash "$plugin_v_ok/skills/sync/sync.sh" "$t12b" 2>&1)"
 check_output "s12b: no adapter -> cannot derive labels, no crash" "$out12b" \
   "labels: cannot derive labels — no adapter found"
 
@@ -427,6 +473,19 @@ check_output "s13c: present-with-activity reported distinctly" "$out13c" \
   "observability: .claude/state/worker-tools.jsonl — present, 1 line(s)"
 check "s13: sync never creates the observability state files itself" \
   test ! -e "$t13/.claude/state/events.jsonl"
+
+# 13d/13e. events.jsonl gets the same present-but-empty / present-with-activity coverage
+# worker-tools.jsonl already has above — the loop over both files in
+# check_observability_plumbing is otherwise only exercised via the "absent" branch (s13a).
+: >"$t13/.claude/state/events.jsonl"
+out13d="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t13" 2>&1)"
+check_output "s13d: events.jsonl present-but-empty reported distinctly" "$out13d" \
+  "observability: .claude/state/events.jsonl — present but empty"
+
+printf '{"event":"phase-change"}\n' >>"$t13/.claude/state/events.jsonl"
+out13e="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t13" 2>&1)"
+check_output "s13e: events.jsonl present-with-activity reported distinctly" "$out13e" \
+  "observability: .claude/state/events.jsonl — present, 1 line(s)"
 
 # ---------------------------------------------------------------------------
 # Scenario 14: deploy-lag check (issue #141 item 5) — .claude/state/loop-runs.log
@@ -457,6 +516,19 @@ out14d="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
 check_output "s14d: old run -> looks idle, safe to restart" "$out14d" \
   "loop looks idle — looks safe to re-arm/restart"
 
+# 14e. Last line has no parseable ts= field at all — a correctness regression fixed by
+# this issue #141 review round: under `set -euo pipefail`, the `grep -o 'ts=...' | ... |
+# cut` pipeline used to be unguarded, so a last line with no ts= token made `grep` exit 1
+# and pipefail abort the WHOLE script before the "could not parse a ts=" fallback message
+# ever ran. Assert sync still exits 0 and prints that fallback message instead of dying.
+printf 'pid=123 session=abc result=exit rc=0 (no timestamp field at all)\n' \
+  >"$t14/.claude/state/loop-runs.log"
+out14e="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
+rc14e=$?
+check "s14e: unparseable ts= field -> sync still exits 0" test "$rc14e" -eq 0
+check_output "s14e: unparseable ts= field -> could not parse message printed" "$out14e" \
+  "deploy-lag: could not parse a ts= field from the last entry"
+
 # ---------------------------------------------------------------------------
 # Scenario 15: self-hosting safety for the new sync v2 checks — reuses the t9
 # self-hosting fixture from scenario 9 (plugin_root == target_root/.claude). The
@@ -467,7 +539,12 @@ check_output "s14d: old run -> looks idle, safe to restart" "$out14d" \
 cat >"$t9/.claude/gates.json" <<'JSON'
 {"project":{"name":"recode"},"modules":[{"name":"harness","description":"Orchestrator machinery"}],"gates":{}}
 JSON
-out15="$(bash "$t9/.claude/skills/sync/sync.sh" "$t9" 2>&1)"
+# Pin GATES_FILE to this self-hosting fixture's OWN adapter (absolute path — same isolation
+# rationale as scenario 12) so this scenario is deterministic regardless of an ambient
+# GATES_FILE (e.g. the real self-hosted test gate exports GATES_FILE=.claude/self/gates.json
+# before invoking this file, which would otherwise make derive_module_labels look in the
+# wrong place relative to $t9 and change which advisory lines print).
+out15="$(GATES_FILE="$t9/.claude/gates.json" bash "$t9/.claude/skills/sync/sync.sh" "$t9" 2>&1)"
 rc15=$?
 check "s15: self-hosting sync still exits 0 with the new checks wired in" test "$rc15" -eq 0
 check_output "s15: self-hosting quiets the module-label creation advisory" "$out15" \
