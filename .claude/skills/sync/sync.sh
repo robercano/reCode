@@ -9,6 +9,14 @@
 # files. This script does ONLY non-interactive, non-network comparison/copy work — the
 # prose flow (explaining results, offering to merge a conflict) lives in SKILL.md.
 #
+# Issue #141 ("sync v2") extends this offline contract with four more DETECT-AND-REPORT
+# checks (deploy-lag, environment, missing-labels, observability-plumbing) — same
+# philosophy as detect_stale_vendor_copies below: read-only, never mutate anything that
+# isn't sync's to manage, exit 0 for every diagnostic. Anything that needs the network
+# (bot identity, label creation) is NOT run here — sync.sh only prints the exact advisory
+# command; the live step is documented in SKILL.md and executed by the agent via
+# bot-gh.sh, never inline in this script.
+#
 # Usage:
 #   sync.sh [target-repo-root]
 #
@@ -69,6 +77,11 @@ MANAGED_FILES=(
   "claude-rc.service|.claude/systemd/claude-rc.service|@orchestrator-managed claude-rc-service v"
   "arm-loop.sh|.claude/scripts/arm-loop.sh|@orchestrator-managed arm-loop v"
 )
+
+# Minimum plugin version the issue #141 environment check requires — this IS "the #136
+# release" (issue #136 shipped as plugin version 0.2.2). Bump this alongside any future
+# release that the sync v2 environment check should start requiring.
+MIN_PLUGIN_VERSION="0.2.2"
 
 # --- stale-vendor detection (issue #134) --------------------------------------------
 # Prior to issue #134, this plugin vendored its own runtime subtrees — `agents/`,
@@ -203,6 +216,197 @@ detect_stale_vendor_copies() {
   return $((1 - any_found))
 }
 
+# --- deploy-lag / loop-runs.log check (issue #141 item 5) ---------------------------
+# The stale-vendor migration caveat above tells the operator to restart the pr-loop/
+# claude-rc systemd units after cleaning up — but ONLY between drivers (a running driver
+# holds its old script in memory; killing it mid-run wastes/loses work). This function
+# gives that decision an offline signal: read $target_root/.claude/state/loop-runs.log
+# (the run ledger loop-daemon.sh appends one line per driver to, `ts=<ISO8601>` field)
+# and report how long ago the last driver ran. Report-only — never mutates anything,
+# never restarts anything itself — exit 0 always.
+check_deploy_lag() {
+  local log="$target_root/.claude/state/loop-runs.log"
+  if [ ! -f "$log" ]; then
+    echo "  deploy-lag: .claude/state/loop-runs.log — not found; usually means the loop was never armed here, but a first driver run in progress hasn't appended a line yet either, so a missing ledger cannot prove no driver is active — before re-arming/restarting the pr-loop/claude-rc systemd units (issue #131), verify independently (e.g. \`systemctl --user status 'pr-loop-driver-*'\`) rather than trusting a missing file alone"
+    return 0
+  fi
+  local last_line
+  last_line="$(tail -n 1 "$log" 2>/dev/null || true)"
+  if [ -z "$last_line" ]; then
+    echo "  deploy-lag: .claude/state/loop-runs.log — present but empty; no COMPLETED driver runs recorded yet — this ledger only records FINISHED runs (see below), so an empty file cannot prove the very first driver isn't currently mid-run; before re-arming/restarting the pr-loop/claude-rc systemd units (issue #131), verify independently that no driver is currently active (e.g. \`systemctl --user status 'pr-loop-driver-*'\`) rather than trusting an empty ledger alone"
+    return 0
+  fi
+  echo "  deploy-lag: .claude/state/loop-runs.log — last recorded run: $last_line"
+  local last_ts
+  last_ts="$(printf '%s' "$last_line" | grep -o 'ts=[^ ]*' | head -1 | cut -d= -f2 || true)"
+  if [ -z "$last_ts" ]; then
+    echo "  deploy-lag: could not parse a ts= field from the last entry — inspect the file yourself before restarting"
+    return 0
+  fi
+  local last_epoch now_epoch age_s
+  last_epoch="$(date -u -d "$last_ts" +%s 2>/dev/null || true)"
+  if [ -z "$last_epoch" ]; then
+    echo "  deploy-lag: could not parse timestamp \"$last_ts\" — inspect the file yourself before restarting"
+    return 0
+  fi
+  now_epoch="$(date -u +%s)"
+  age_s=$((now_epoch - last_epoch))
+  if [ "$age_s" -lt 0 ]; then age_s=0; fi
+  # NOT an active/idle verdict (issue #141 review round): loop-daemon.sh only appends this
+  # line AFTER the driver it describes has already exited (see append_ledger's call site),
+  # so every entry here is by construction a FINISHED run — its recency can't prove a NEW
+  # driver hasn't started since. Recency alone must never be read as "safe to restart".
+  echo "  deploy-lag: that run started ~${age_s}s ago and has since completed — this ledger only records FINISHED runs, so its recency cannot prove a driver isn't running right now; before re-arming/restarting the pr-loop/claude-rc systemd units (issue #131), verify independently that no driver is currently active (e.g. \`systemctl --user status 'pr-loop-driver-*'\`) rather than trusting this timestamp alone"
+}
+
+# --- version compare helper (issue #141 item 2) --------------------------------------
+version_ge() {
+  # $1 = actual dotted version (e.g. "0.2.2"), $2 = minimum required (e.g. "0.2.2").
+  # Component-wise numeric compare, reusing is_sane_version's bounded-digit discipline
+  # per component so a malformed/non-numeric component (e.g. a "-beta" suffix) degrades
+  # to "unknown" (return 2) instead of a wrong lexical/numeric compare.
+  # Returns: 0 = actual >= min, 1 = actual < min, 2 = unparseable.
+  local actual="$1" min="$2"
+  local -a a_parts m_parts
+  IFS='.' read -r -a a_parts <<<"$actual"
+  IFS='.' read -r -a m_parts <<<"$min"
+  local len=${#a_parts[@]}
+  [ "${#m_parts[@]}" -gt "$len" ] && len=${#m_parts[@]}
+  local i=0 av mv
+  while [ "$i" -lt "$len" ]; do
+    av="${a_parts[$i]:-0}"
+    mv="${m_parts[$i]:-0}"
+    is_sane_version "$av" || return 2
+    is_sane_version "$mv" || return 2
+    if [ "$av" -gt "$mv" ]; then return 0; fi
+    if [ "$av" -lt "$mv" ]; then return 1; fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# --- environment check (issue #141 item 2) --------------------------------------------
+# Offline parts only: (a) does $target_root/.env exist and carry a GH_BOT_TOKEN=
+# assignment (grep for the KEY only — the value is NEVER read/printed); (b) is the
+# installed plugin (plugin_root, resolved above — works identically in self-host and
+# plugin-cache layouts) at >= MIN_PLUGIN_VERSION. The live bot-identity/repo-access check
+# needs the network, so this function only PRINTS the exact advisory command for the
+# agent to run via bot-gh.sh (SKILL.md documents that live step) — it never runs it here.
+check_environment() {
+  local env_file="$target_root/.env"
+  if [ ! -f "$env_file" ]; then
+    echo "  env: .env — not found at $target_root/.env; GH_BOT_TOKEN cannot be verified offline (see .claude/scripts/bot-gh.sh setup notes)"
+  elif grep -qE '^GH_BOT_TOKEN=' "$env_file" 2>/dev/null; then
+    echo "  env: .env — GH_BOT_TOKEN= assignment found (value not inspected)"
+  else
+    echo "  env: .env — present but no GH_BOT_TOKEN= assignment found; bot-gh.sh calls will fail until it's added"
+  fi
+
+  local plugin_json="$plugin_root/.claude-plugin/plugin.json"
+  if [ ! -f "$plugin_json" ]; then
+    echo "  env: plugin version — cannot read $plugin_json; plugin install looks unusual"
+  else
+    local installed_version
+    installed_version="$(node -e '
+      try {
+        const p = require(process.argv[1]);
+        process.stdout.write(typeof p.version === "string" ? p.version : "");
+      } catch (e) { process.stdout.write(""); }
+    ' "$plugin_json" 2>/dev/null || true)"
+    if [ -z "$installed_version" ]; then
+      echo "  env: plugin version — could not parse a \"version\" field from $plugin_json"
+    else
+      local vge_rc=0
+      version_ge "$installed_version" "$MIN_PLUGIN_VERSION" || vge_rc=$?
+      case "$vge_rc" in
+        0) echo "  env: plugin version — v$installed_version >= required v$MIN_PLUGIN_VERSION (the issue #136 release) — OK" ;;
+        1) echo "  env: plugin version — v$installed_version is BELOW required v$MIN_PLUGIN_VERSION (the issue #136 release) — update the plugin before relying on sync v2 behavior" ;;
+        *) echo "  env: plugin version — could not compare \"$installed_version\" against \"$MIN_PLUGIN_VERSION\" (unexpected format) — verify manually" ;;
+      esac
+    fi
+  fi
+
+  echo "  env: ADVISORY (live, network — not run by sync.sh) — verify bot identity + repo access: bash \${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh api user --jq .login   (and a 'repo view' on this repo)"
+}
+
+# --- missing-labels check (issue #141 item 3) -----------------------------------------
+# Offline: derive the expected label set from the TARGET's adapter (module:<name> per
+# .claude/gates.json modules[].name, plus needs-human) and print the exact create
+# commands — same pattern as .claude/skills/setup/SKILL.md's "Create the module +
+# approval labels" step. Never queries GitHub and never creates anything itself; SKILL.md
+# documents the agent-performed live step (query which labels exist via bot-gh.sh,
+# create only the missing ones).
+derive_module_labels() {
+  # Prints "module:<name><TAB><description>" per module, or nothing (exit 1) if no
+  # adapter parses. Honors $GATES_FILE (same convention as gate.sh), relative to
+  # $target_root; falls back to .claude/gates.json.
+  local gates_ref="${GATES_FILE:-.claude/gates.json}"
+  local gates_path
+  case "$gates_ref" in
+    /*) gates_path="$gates_ref" ;;
+    *) gates_path="$target_root/$gates_ref" ;;
+  esac
+  [ -f "$gates_path" ] || return 1
+  node -e '
+    try {
+      const g = require(process.argv[1]);
+      if (!g || !Array.isArray(g.modules)) process.exit(1);
+      for (const m of g.modules) {
+        if (m && m.name) process.stdout.write("module:" + m.name + "\t" + (m.description || "") + "\n");
+      }
+    } catch (e) { process.exit(1); }
+  ' "$gates_path" 2>/dev/null
+}
+
+check_missing_labels() {
+  local labels rc=0
+  labels="$(derive_module_labels)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$labels" ]; then
+    echo "  labels: cannot derive labels — no adapter found (checked \$GATES_FILE, .claude/gates.json)"
+    return 0
+  fi
+  if [ "$self_hosting" -eq 1 ]; then
+    # Self-hosting: this repo's own module/needs-human labels are already owner-managed —
+    # printing "create these" advisories every run would be pure noise (design intent:
+    # an advisory that implies remediation degrades to a quiet verdict in self-host).
+    echo "  labels: self-hosting — skipping the module/needs-human label advisory (this repo's own labels are already managed by the owner)"
+    return 0
+  fi
+  echo "  labels: ADVISORY (live, network — not run by sync.sh) — query existing labels via bot-gh.sh, then create only what's missing:"
+  local name desc
+  while IFS=$'\t' read -r name desc; do
+    [ -n "$name" ] || continue
+    echo "  labels:   bash \${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh label create \"$name\" --description \"$desc\" --force"
+  done <<<"$labels"
+  echo "  labels:   bash \${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh label create \"needs-human\" --description \"Loop is blocked on owner judgment -- see the issue/PR body/comments\" --color b60205 --force"
+}
+
+# --- observability-plumbing check (issue #141 item 4, cf. issue #137) -----------------
+# DETECT don't fix: stat the two state files worker-tool/event observability lands in and
+# report present-with-activity / present-but-empty / absent. Never attempts to ship the
+# #137 hook itself — that's out of scope here, this only tells the human the gap exists.
+check_observability_plumbing() {
+  local f path lines mtime now age_h
+  for f in worker-tools.jsonl events.jsonl; do
+    path="$target_root/.claude/state/$f"
+    if [ ! -f "$path" ]; then
+      echo "  observability: .claude/state/$f — absent; this is the observability gap tracked by issue #137 (worker-tool-mirror hook not yet wired into this repo) — sync does not fix this, only reports it"
+    elif [ -s "$path" ]; then
+      lines="$(wc -l <"$path" 2>/dev/null | tr -d '[:space:]')"
+      mtime="$(stat -c %Y "$path" 2>/dev/null || true)"
+      if [ -n "$mtime" ]; then
+        now="$(date -u +%s)"
+        age_h=$(( (now - mtime) / 3600 ))
+        echo "  observability: .claude/state/$f — present, $lines line(s), last modified ~${age_h}h ago — looks wired up"
+      else
+        echo "  observability: .claude/state/$f — present, $lines line(s) — looks wired up"
+      fi
+    else
+      echo "  observability: .claude/state/$f — present but empty; no events recorded yet (freshly created, or the issue #137 gap) — worth a human glance"
+    fi
+  done
+}
+
 # --- 1. managed files: compare marker version + content, act per the ladder below --
 had_broken_install=0
 
@@ -293,6 +497,16 @@ else
   fi
   echo "  stale-vendor: none found — .claude/{agents,commands,hooks,scripts,skills} are not vendored locally (as expected; served from \${CLAUDE_PLUGIN_ROOT})"
 fi
+
+# --- 1c. deploy-lag / environment / labels / observability checks (issue #141) -------
+echo "  --- deploy-lag ---"
+check_deploy_lag
+echo "  --- environment ---"
+check_environment
+echo "  --- labels ---"
+check_missing_labels
+echo "  --- observability ---"
+check_observability_plumbing
 
 # --- 2. user-owned files: report only, never write ----------------------------------
 for f in "${USER_OWNED_FILES[@]}"; do
