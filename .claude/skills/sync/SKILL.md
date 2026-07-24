@@ -104,11 +104,14 @@ version-marked managed files, not the "create if absent" ci files.
 
    It then prints four more offline sections (issue #141, "sync v2") — each report-only, never mutates
    anything, always exits 0 regardless of what it finds:
-   - `deploy-lag:` — reads `.claude/state/loop-runs.log` (the loop daemon's run ledger) and reports whether
-     the last driver run looks recent (**may still be ACTIVE**) or idle (**looks safe to restart**). This is
-     the offline half of the "re-arm/restart ONLY between drivers" guidance the migration caveat above
-     already gives — use it to decide *when*, not *whether*, to restart. `not found` means the loop doesn't
-     look armed here at all.
+   - `deploy-lag:` — reads `.claude/state/loop-runs.log` (the loop daemon's run ledger) and reports how long
+     ago the last recorded driver run started. The ledger only ever logs a run AFTER it has already finished,
+     so its recency can never prove a driver isn't running right now — sync.sh therefore never claims
+     "active" or "safe to restart" from this alone; it always tells the operator to verify independently
+     (e.g. `systemctl --user status 'pr-loop-driver-*'`) before re-arming/restarting the pr-loop/claude-rc
+     systemd units (issue #131). `not found` usually means the loop was never armed here, but — same caveat —
+     a first driver run in progress hasn't appended a line yet either, so this too is never read as proof no
+     driver is active.
    - `env:` — (a) whether `.env` exists and carries a `GH_BOT_TOKEN=` key (the token's **value** is never
      read or printed, only whether the key is present); (b) whether the installed plugin version (read from
      `.claude-plugin/plugin.json`) is at least the floor this sync ships (currently the issue #136 release,
@@ -166,8 +169,9 @@ version-marked managed files, not the "create if absent" ci files.
    touched by sync — those stay exactly as the human left them. If any `stale-vendor` line was printed,
    surface it prominently (don't bury it in the managed-file summary) along with the migration caveat about
    restarting the armed systemd units after the human cleans up a stale local copy. Also summarize the sync
-   v2 sections: deploy-lag verdict (active vs. idle — and whether you actually restarted anything, and when),
-   the environment check (token key present? plugin version floor met?), which labels (if any) you created
+   v2 sections: deploy-lag (age of the last completed run, plus whether you independently verified no driver
+   is currently active before restarting anything, and when), the environment check (token key present?
+   plugin version floor met?), which labels (if any) you created
    after the live existence check, and the observability-plumbing verdict (flag issue #137 by number if
    either state file is absent/empty — don't attempt to fix it here).
 

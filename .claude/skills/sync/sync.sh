@@ -227,13 +227,13 @@ detect_stale_vendor_copies() {
 check_deploy_lag() {
   local log="$target_root/.claude/state/loop-runs.log"
   if [ ! -f "$log" ]; then
-    echo "  deploy-lag: .claude/state/loop-runs.log — not found; loop does not look armed here (nothing to check before a restart, but confirm with the operator before assuming that)"
+    echo "  deploy-lag: .claude/state/loop-runs.log — not found; usually means the loop was never armed here, but a first driver run in progress hasn't appended a line yet either, so a missing ledger cannot prove no driver is active — before re-arming/restarting the pr-loop/claude-rc systemd units (issue #131), verify independently (e.g. \`systemctl --user status 'pr-loop-driver-*'\`) rather than trusting a missing file alone"
     return 0
   fi
   local last_line
   last_line="$(tail -n 1 "$log" 2>/dev/null || true)"
   if [ -z "$last_line" ]; then
-    echo "  deploy-lag: .claude/state/loop-runs.log — present but empty; no driver runs recorded yet, restarting the loop units now should be safe"
+    echo "  deploy-lag: .claude/state/loop-runs.log — present but empty; no COMPLETED driver runs recorded yet — this ledger only records FINISHED runs (see below), so an empty file cannot prove the very first driver isn't currently mid-run; before re-arming/restarting the pr-loop/claude-rc systemd units (issue #131), verify independently that no driver is currently active (e.g. \`systemctl --user status 'pr-loop-driver-*'\`) rather than trusting an empty ledger alone"
     return 0
   fi
   echo "  deploy-lag: .claude/state/loop-runs.log — last recorded run: $last_line"
@@ -252,11 +252,11 @@ check_deploy_lag() {
   now_epoch="$(date -u +%s)"
   age_s=$((now_epoch - last_epoch))
   if [ "$age_s" -lt 0 ]; then age_s=0; fi
-  if [ "$age_s" -lt 300 ]; then
-    echo "  deploy-lag: last driver run started ~${age_s}s ago — a driver may still be ACTIVE; re-arm/restart the pr-loop/claude-rc systemd units ONLY BETWEEN drivers (issue #131) — wait and re-check loop-runs.log before restarting"
-  else
-    echo "  deploy-lag: last driver run started ~${age_s}s ago and the loop looks idle — looks safe to re-arm/restart the pr-loop/claude-rc systemd units now (issue #131); still worth a final glance at loop-runs.log before pulling the trigger"
-  fi
+  # NOT an active/idle verdict (issue #141 review round): loop-daemon.sh only appends this
+  # line AFTER the driver it describes has already exited (see append_ledger's call site),
+  # so every entry here is by construction a FINISHED run — its recency can't prove a NEW
+  # driver hasn't started since. Recency alone must never be read as "safe to restart".
+  echo "  deploy-lag: that run started ~${age_s}s ago and has since completed — this ledger only records FINISHED runs, so its recency cannot prove a driver isn't running right now; before re-arming/restarting the pr-loop/claude-rc systemd units (issue #131), verify independently that no driver is currently active (e.g. \`systemctl --user status 'pr-loop-driver-*'\`) rather than trusting this timestamp alone"
 }
 
 # --- version compare helper (issue #141 item 2) --------------------------------------

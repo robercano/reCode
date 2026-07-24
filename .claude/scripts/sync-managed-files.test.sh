@@ -59,11 +59,13 @@
 #       absent / present-but-empty / present-with-activity (both files, not just
 #       worker-tools.jsonl), referencing issue #137 for the gap case, without ever
 #       attempting to create/fix those files.
-#   14. deploy-lag check: `.claude/state/loop-runs.log` absent / empty / a recent ts=
-#       (looks ACTIVE, wait) / an old ts= (looks idle, safe to restart) / a last line with
-#       no parseable `ts=` field at all (must still exit 0 and print the "could not parse"
-#       fallback, not abort the whole script under `set -euo pipefail`) all produce the
-#       expected re-arm/restart guidance without sync.sh touching the file or any unit.
+#   14. deploy-lag check: `.claude/state/loop-runs.log` absent / empty / a recent ts= / an
+#       old ts= / a last line with no parseable `ts=` field at all (must still exit 0 and
+#       print the "could not parse" fallback, not abort the whole script under `set
+#       -euo pipefail`) all produce report-only guidance without sync.sh touching the file
+#       or any unit — and, since the ledger only ever logs FINISHED runs (issue #141 review
+#       round), neither a recent nor an old ts= is ever read as an "active" or "safe to
+#       restart" verdict; both point the operator at an independent liveness check instead.
 #   15. self-hosting quiets the remediation-flavored advisories (module/needs-human label
 #       creation) while still running the plain informational reads (env, observability,
 #       deploy-lag) with no crash and exit 0 — mirrors the self_hosting short-circuit
@@ -416,6 +418,22 @@ out11g="$(bash "$plugin_v_missing/skills/sync/sync.sh" "$t11" 2>&1)"
 check_output "s11g: missing version field -> could not parse message, no crash" "$out11g" \
   "env: plugin version — could not parse a \"version\" field from"
 
+# 11h. Shorter version string than the floor ("0.2" vs required "0.2.2") -- version_ge's
+# missing-component-defaults-to-0 path -- must compare as BELOW, not "unparseable".
+plugin_v_short="$work/plugin-v-short"
+build_plugin_fixture_with_version "$plugin_v_short" "0.2"
+out11h="$(bash "$plugin_v_short/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11h: shorter version below floor -> BELOW, not unparseable" "$out11h" \
+  "env: plugin version — v0.2 is BELOW required v0.2.2"
+
+# 11i. Longer version string than the floor ("0.2.2.1" vs required "0.2.2") -- the extra
+# trailing component must compare as >= 0, not push the comparison the wrong way.
+plugin_v_long="$work/plugin-v-long"
+build_plugin_fixture_with_version "$plugin_v_long" "0.2.2.1"
+out11i="$(bash "$plugin_v_long/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11i: longer version at floor -> OK, not BELOW" "$out11i" \
+  "env: plugin version — v0.2.2.1 >= required v0.2.2"
+
 # ---------------------------------------------------------------------------
 # Scenario 12: missing-labels check (issue #141 item 3) — derived from the target's
 # .claude/gates.json modules[], printed as exact bot-gh.sh advisory commands.
@@ -439,7 +457,37 @@ check_output "s12: module:bar label advisory derived" "$out12" \
   'bot-gh.sh label create "module:bar" --description "Bar module" --force'
 check_output "s12: needs-human label advisory with color" "$out12" \
   'bot-gh.sh label create "needs-human" --description "Loop is blocked on owner judgment -- see the issue/PR body/comments" --color b60205 --force'
-check "s12: no labels actually created (advisory only, no network call)" test 1 -eq 1
+
+# Real regression guard (not just string-matching the printed advisory): stub `bot-gh.sh`
+# and `gh` so any invocation -- accidental or otherwise -- leaves evidence in a marker
+# file, then assert a fresh sync.sh run over the SAME fixture never touched either stub.
+# Today the label-create commands are pure printed text (never executed), but this is what
+# actually proves "advisory only, no network call" instead of just re-asserting it.
+# Covers the two realistic regression shapes: (a) a bare `bot-gh.sh`/`gh` invocation
+# resolved via PATH lookup, and (b) the EXACT `${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/
+# bot-gh.sh` construction already sitting in the advisory string -- if that were ever
+# copy-pasted into a real `bash ...` call, it would resolve under whatever
+# CLAUDE_PLUGIN_ROOT is set to, so the stub is ALSO placed at that path and
+# CLAUDE_PLUGIN_ROOT pointed at it (sync.sh itself never reads this var -- it derives its
+# own plugin_root from $script_dir -- so exporting it here cannot mask a real regression).
+label_stub_dir="$work/label-stub-bin"
+mkdir -p "$label_stub_dir"
+label_stub_root="$work/label-stub-root"
+mkdir -p "$label_stub_root/scripts"
+label_stub_marker="$work/label-stub-called"
+rm -f "$label_stub_marker"
+for stub_path in "$label_stub_dir/bot-gh.sh" "$label_stub_dir/gh" "$label_stub_root/scripts/bot-gh.sh"; do
+  cat >"$stub_path" <<STUB
+#!/usr/bin/env bash
+echo "\$0 \$*" >>"$label_stub_marker"
+exit 0
+STUB
+  chmod +x "$stub_path"
+done
+PATH="$label_stub_dir:$PATH" CLAUDE_PLUGIN_ROOT="$label_stub_root" GATES_FILE="$t12/.claude/gates.json" \
+  bash "$plugin_v_ok/skills/sync/sync.sh" "$t12" >/dev/null 2>&1
+check "s12: no labels actually created (advisory only, bot-gh.sh/gh stub never invoked)" \
+  test ! -f "$label_stub_marker"
 
 t12b="$work/consumer12b"
 mkdir -p "$t12b"
@@ -494,27 +542,35 @@ check_output "s13e: events.jsonl present-with-activity reported distinctly" "$ou
 t14="$work/consumer14"
 mkdir -p "$t14/.claude/state"
 out14a="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
-check_output "s14a: no loop-runs.log -> loop does not look armed" "$out14a" \
-  "deploy-lag: .claude/state/loop-runs.log — not found; loop does not look armed here"
+check_output "s14a: no loop-runs.log -> not found, usually means never armed" "$out14a" \
+  "deploy-lag: .claude/state/loop-runs.log — not found; usually means the loop was never armed here"
+check_output "s14a: no loop-runs.log -> same honest verify-independently instruction" "$out14a" \
+  "verify independently (e.g. \`systemctl --user status 'pr-loop-driver-*'\`)"
 
 : >"$t14/.claude/state/loop-runs.log"
 out14b="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
-check_output "s14b: empty ledger -> safe to restart now" "$out14b" \
+check_output "s14b: empty ledger -> present but empty" "$out14b" \
   "deploy-lag: .claude/state/loop-runs.log — present but empty"
+check_output "s14b: empty ledger -> same honest message, no false 'safe to restart' claim" "$out14b" \
+  "verify independently that no driver is currently active"
+check_no_output "s14b: empty ledger -> never asserts restarting should be safe" "$out14b" \
+  "restarting the loop units now should be safe"
 
 recent_ts="$(date -u +%FT%TZ)"
 printf 'pid=123 session=abc verdict=advance-issue=1 ts=%s result=exit rc=0\n' "$recent_ts" \
   >"$t14/.claude/state/loop-runs.log"
 out14c="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
-check_output "s14c: recent run -> may still be ACTIVE, restart ONLY between drivers" "$out14c" \
-  "may still be ACTIVE; re-arm/restart the pr-loop/claude-rc systemd units ONLY BETWEEN drivers"
+check_output "s14c: recent run -> never claims active/idle, tells operator to verify independently" "$out14c" \
+  "this ledger only records FINISHED runs, so its recency cannot prove a driver isn't running right now"
 
 old_ts="$(date -u -d '-3600 seconds' +%FT%TZ)"
 printf 'pid=123 session=abc verdict=advance-issue=1 ts=%s result=exit rc=0\n' "$old_ts" \
   >"$t14/.claude/state/loop-runs.log"
 out14d="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
-check_output "s14d: old run -> looks idle, safe to restart" "$out14d" \
-  "loop looks idle — looks safe to re-arm/restart"
+check_output "s14d: old run -> same honest message, no false 'safe to restart' claim" "$out14d" \
+  "verify independently that no driver is currently active"
+check_no_output "s14d: old run -> never asserts idle is safe to restart" "$out14d" \
+  "looks safe to re-arm/restart"
 
 # 14e. Last line has no parseable ts= field at all — a correctness regression fixed by
 # this issue #141 review round: under `set -euo pipefail`, the `grep -o 'ts=...' | ... |
