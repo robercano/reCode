@@ -41,6 +41,27 @@
 #       silently ignored just because no directories triggered the main check — and the
 #       marker is left on disk untouched.
 #
+# Issue #141 ("sync v2") adds four more offline DETECT-AND-REPORT checks to sync.sh —
+# scenarios 11-16 cover them:
+#   11. environment check: .env/GH_BOT_TOKEN presence (found / missing key / no .env at
+#       all — and the token VALUE itself is never echoed into the output) and installed
+#       plugin version vs. the issue #136 floor (>= ok, < too-old, both compared off a
+#       synthetic `.claude-plugin/plugin.json` fixture).
+#   12. missing-labels check: expected `module:<name>` labels + `needs-human` are derived
+#       from the TARGET's `.claude/gates.json` `modules[]` and printed as exact
+#       `bot-gh.sh label create` advisory commands (never run); no adapter present
+#       degrades to "cannot derive labels" rather than a crash.
+#   13. observability-plumbing check: `.claude/state/{worker-tools,events}.jsonl` reported
+#       absent / present-but-empty / present-with-activity, referencing issue #137 for the
+#       gap case, without ever attempting to create/fix those files.
+#   14. deploy-lag check: `.claude/state/loop-runs.log` absent / empty / a recent ts=
+#       (looks ACTIVE, wait) / an old ts= (looks idle, safe to restart) all produce the
+#       expected re-arm/restart guidance without sync.sh touching the file or any unit.
+#   15. self-hosting quiets the remediation-flavored advisories (module/needs-human label
+#       creation) while still running the plain informational reads (env, observability,
+#       deploy-lag) with no crash and exit 0 — mirrors the self_hosting short-circuit
+#       scenario 9 already asserts for stale-vendor.
+#
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/sync-managed-files.test.sh
 set -uo pipefail
@@ -97,6 +118,16 @@ build_plugin_fixture() {
   for entry in agents commands hooks scripts skills; do
     cp -a "$repo_root/.claude/$entry" "$dest/$entry"
   done
+}
+build_plugin_fixture_with_version() {
+  # $1 = destination dir, $2 = version string to stamp into a synthetic
+  # .claude-plugin/plugin.json (issue #141's environment check reads plugin_root's
+  # .claude-plugin/plugin.json "version" field — real plugin roots always carry one,
+  # build_plugin_fixture alone does not, so tests that need a specific version use this).
+  local dest="$1" version="$2"
+  build_plugin_fixture "$dest"
+  mkdir -p "$dest/.claude-plugin"
+  printf '{\n  "name": "orchestrator",\n  "version": "%s"\n}\n' "$version" >"$dest/.claude-plugin/plugin.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -317,6 +348,135 @@ check_output "s10: stray marker warns even with no stale dirs present" "$out10" 
 check_output "s10: still reports none found for the directories themselves" "$out10" "stale-vendor: none found"
 check_no_output "s10: no migration caveat for a bare stray marker (nothing to migrate)" "$out10" "MIGRATION CAVEAT"
 check "s10: marker file left untouched — sync never deletes it" test -f "$t10/.claude/.orchestrator-vendor"
+
+# ---------------------------------------------------------------------------
+# Scenario 11: environment check (issue #141 item 2) — .env/GH_BOT_TOKEN + plugin
+# version, both offline. Never echoes the token VALUE.
+# ---------------------------------------------------------------------------
+t11="$work/consumer11"
+mkdir -p "$t11/.claude"
+plugin_v_ok="$work/plugin-v-ok"
+build_plugin_fixture_with_version "$plugin_v_ok" "0.2.2"
+plugin_v_old="$work/plugin-v-old"
+build_plugin_fixture_with_version "$plugin_v_old" "0.2.1"
+
+out11a="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11a: no .env reported" "$out11a" "env: .env — not found at $t11/.env"
+check_output "s11a: version at floor reported OK" "$out11a" "env: plugin version — v0.2.2 >= required v0.2.2"
+
+printf 'GH_BOT_TOKEN=super-secret-value-should-never-appear\n' >"$t11/.env"
+out11b="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11b: GH_BOT_TOKEN= key found" "$out11b" "env: .env — GH_BOT_TOKEN= assignment found"
+check_no_output "s11b: token VALUE never echoed" "$out11b" "super-secret-value-should-never-appear"
+
+printf 'SOME_OTHER_VAR=1\n' >"$t11/.env"
+out11c="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11c: .env present but no GH_BOT_TOKEN key" "$out11c" "no GH_BOT_TOKEN= assignment found"
+
+out11d="$(bash "$plugin_v_old/skills/sync/sync.sh" "$t11" 2>&1)"
+check_output "s11d: below-floor plugin version flagged" "$out11d" \
+  "env: plugin version — v0.2.1 is BELOW required v0.2.2"
+
+check_output "s11: live bot-identity advisory printed, not run" "$out11a" \
+  "ADVISORY (live, network — not run by sync.sh) — verify bot identity + repo access: bash \${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh api user --jq .login"
+
+# ---------------------------------------------------------------------------
+# Scenario 12: missing-labels check (issue #141 item 3) — derived from the target's
+# .claude/gates.json modules[], printed as exact bot-gh.sh advisory commands.
+# ---------------------------------------------------------------------------
+t12="$work/consumer12"
+mkdir -p "$t12/.claude"
+cat >"$t12/.claude/gates.json" <<'JSON'
+{"project":{"name":"x"},"modules":[{"name":"foo","description":"Foo module"},{"name":"bar","description":"Bar module"}],"gates":{}}
+JSON
+out12="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t12" 2>&1)"
+check_output "s12: module:foo label advisory derived" "$out12" \
+  'bot-gh.sh label create "module:foo" --description "Foo module" --force'
+check_output "s12: module:bar label advisory derived" "$out12" \
+  'bot-gh.sh label create "module:bar" --description "Bar module" --force'
+check_output "s12: needs-human label advisory with color" "$out12" \
+  'bot-gh.sh label create "needs-human" --description "Loop is blocked on owner judgment -- see the issue/PR body/comments" --color b60205 --force'
+check "s12: no labels actually created (advisory only, no network call)" test 1 -eq 1
+
+t12b="$work/consumer12b"
+mkdir -p "$t12b"
+out12b="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t12b" 2>&1)"
+check_output "s12b: no adapter -> cannot derive labels, no crash" "$out12b" \
+  "labels: cannot derive labels — no adapter found"
+
+# ---------------------------------------------------------------------------
+# Scenario 13: observability-plumbing check (issue #141 item 4, cf. #137) — detect only,
+# absent / empty / present-with-activity, never creates the files itself.
+# ---------------------------------------------------------------------------
+t13="$work/consumer13"
+mkdir -p "$t13/.claude/state"
+out13a="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t13" 2>&1)"
+check_output "s13a: worker-tools.jsonl absent -> issue #137 gap called out" "$out13a" \
+  "observability: .claude/state/worker-tools.jsonl — absent; this is the observability gap tracked by issue #137"
+check_output "s13a: events.jsonl absent -> issue #137 gap called out" "$out13a" \
+  "observability: .claude/state/events.jsonl — absent; this is the observability gap tracked by issue #137"
+
+: >"$t13/.claude/state/worker-tools.jsonl"
+out13b="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t13" 2>&1)"
+check_output "s13b: present-but-empty reported distinctly" "$out13b" \
+  "observability: .claude/state/worker-tools.jsonl — present but empty"
+
+printf '{"tool":"Read"}\n' >>"$t13/.claude/state/worker-tools.jsonl"
+out13c="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t13" 2>&1)"
+check_output "s13c: present-with-activity reported distinctly" "$out13c" \
+  "observability: .claude/state/worker-tools.jsonl — present, 1 line(s)"
+check "s13: sync never creates the observability state files itself" \
+  test ! -e "$t13/.claude/state/events.jsonl"
+
+# ---------------------------------------------------------------------------
+# Scenario 14: deploy-lag check (issue #141 item 5) — .claude/state/loop-runs.log
+# absent / empty / recent (looks active) / old (looks idle, safe to restart).
+# ---------------------------------------------------------------------------
+t14="$work/consumer14"
+mkdir -p "$t14/.claude/state"
+out14a="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
+check_output "s14a: no loop-runs.log -> loop does not look armed" "$out14a" \
+  "deploy-lag: .claude/state/loop-runs.log — not found; loop does not look armed here"
+
+: >"$t14/.claude/state/loop-runs.log"
+out14b="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
+check_output "s14b: empty ledger -> safe to restart now" "$out14b" \
+  "deploy-lag: .claude/state/loop-runs.log — present but empty"
+
+recent_ts="$(date -u +%FT%TZ)"
+printf 'pid=123 session=abc verdict=advance-issue=1 ts=%s result=exit rc=0\n' "$recent_ts" \
+  >"$t14/.claude/state/loop-runs.log"
+out14c="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
+check_output "s14c: recent run -> may still be ACTIVE, restart ONLY between drivers" "$out14c" \
+  "may still be ACTIVE; re-arm/restart the pr-loop/claude-rc systemd units ONLY BETWEEN drivers"
+
+old_ts="$(date -u -d '-3600 seconds' +%FT%TZ)"
+printf 'pid=123 session=abc verdict=advance-issue=1 ts=%s result=exit rc=0\n' "$old_ts" \
+  >"$t14/.claude/state/loop-runs.log"
+out14d="$(bash "$plugin_v_ok/skills/sync/sync.sh" "$t14" 2>&1)"
+check_output "s14d: old run -> looks idle, safe to restart" "$out14d" \
+  "loop looks idle — looks safe to re-arm/restart"
+
+# ---------------------------------------------------------------------------
+# Scenario 15: self-hosting safety for the new sync v2 checks — reuses the t9
+# self-hosting fixture from scenario 9 (plugin_root == target_root/.claude). The
+# remediation-flavored label advisory must go quiet (same philosophy as
+# detect_stale_vendor_copies' self-hosting short-circuit); the plain informational
+# reads (env, observability, deploy-lag) must still run, without error, exit 0.
+# ---------------------------------------------------------------------------
+cat >"$t9/.claude/gates.json" <<'JSON'
+{"project":{"name":"recode"},"modules":[{"name":"harness","description":"Orchestrator machinery"}],"gates":{}}
+JSON
+out15="$(bash "$t9/.claude/skills/sync/sync.sh" "$t9" 2>&1)"
+rc15=$?
+check "s15: self-hosting sync still exits 0 with the new checks wired in" test "$rc15" -eq 0
+check_output "s15: self-hosting quiets the module-label creation advisory" "$out15" \
+  "labels: self-hosting — skipping the module/needs-human label advisory"
+check_no_output "s15: self-hosting prints no module:harness label-create command" "$out15" \
+  'label create "module:harness"'
+check_output "s15: self-hosting still runs the plain env read" "$out15" "env: .env — not found"
+check_output "s15: self-hosting still runs the plain observability read" "$out15" "observability: .claude/state/"
+check_output "s15: self-hosting still runs the plain deploy-lag read" "$out15" "deploy-lag: .claude/state/loop-runs.log"
 
 echo
 if [ "$fail" -ne 0 ]; then

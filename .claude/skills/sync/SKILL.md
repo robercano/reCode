@@ -102,10 +102,38 @@ version-marked managed files, not the "create if absent" ci files.
    lines — see "Stale-vendor detection" above — for any leftover local copy of the pre-#134 vendored tree,
    or `stale-vendor: none found` if there is none.
 
+   It then prints four more offline sections (issue #141, "sync v2") — each report-only, never mutates
+   anything, always exits 0 regardless of what it finds:
+   - `deploy-lag:` — reads `.claude/state/loop-runs.log` (the loop daemon's run ledger) and reports whether
+     the last driver run looks recent (**may still be ACTIVE**) or idle (**looks safe to restart**). This is
+     the offline half of the "re-arm/restart ONLY between drivers" guidance the migration caveat above
+     already gives — use it to decide *when*, not *whether*, to restart. `not found` means the loop doesn't
+     look armed here at all.
+   - `env:` — (a) whether `.env` exists and carries a `GH_BOT_TOKEN=` key (the token's **value** is never
+     read or printed, only whether the key is present); (b) whether the installed plugin version (read from
+     `.claude-plugin/plugin.json`) is at least the floor this sync ships (currently the issue #136 release,
+     `0.2.2`) — `OK` / `BELOW required` / unparseable. It also prints one **ADVISORY** line for the live,
+     network bot-identity check — sync.sh never runs it; see "Live steps the agent performs" below.
+   - `labels:` — derives the expected `module:<name>` labels (one per `.claude/gates.json` `modules[].name`,
+     honoring `$GATES_FILE` the same way `gate.sh` does) plus `needs-human`, and prints the exact
+     `bot-gh.sh label create ...` commands as **ADVISORY** lines — it never queries or creates labels itself.
+     No adapter parses -> `cannot derive labels`. Self-hosting quiets this section entirely (see below).
+   - `observability:` — stats `.claude/state/worker-tools.jsonl` and `.claude/state/events.jsonl` and reports
+     `absent` (referencing issue #137, the tracked gap — sync does **not** attempt to fix it), `present but
+     empty`, or `present, N line(s)` (looks wired up). Detection only.
+
+   **Self-hosting:** when this plugin's own repo runs sync.sh against itself, `deploy-lag`/`env`/
+   `observability` still run as plain informational reads (there's nothing misleading about reporting this
+   repo's own state), but the `labels:` section — which *implies* remediation ("go create these") — goes
+   quiet with a one-line "already managed by the owner" note instead of repeating advisory commands for
+   labels the repo obviously already has, the same way `detect_stale_vendor_copies` goes quiet on its own
+   canonical tree.
+
 3. **Report a diff summary.** Relay the script's per-file summary verbatim to the user (it's already in the
    created/up-to-date/restamped/conflict/kept/skipped/error vocabulary above). Call out clearly which line, if
    any, changed on disk (`restamped`) versus which are informational only, and call out `error` lines as a
-   plugin-install problem rather than a repo problem.
+   plugin-install problem rather than a repo problem. Relay the four `deploy-lag`/`env`/`labels`/
+   `observability` sections too — they're display order and can be summarized after the managed-file table.
 
 4. **Handle conflicts explicitly — never silently overwrite.** For every `conflict / needs-merge` line, tell
    the user which file it is, that it has local edits diverging from the last pristine version it was stamped
@@ -119,12 +147,29 @@ version-marked managed files, not the "create if absent" ci files.
    Under no circumstances write to a `conflict` file without the user's explicit go-ahead in this step —
    `sync.sh` itself never does, and neither should you.
 
-5. **Hand off.** Summarize: which managed files were checked, which were restamped, which need a human
+5. **Live steps the agent performs (issue #141).** sync.sh stays offline by design — these two steps pair
+   with its `env:`/`labels:` ADVISORY lines and are the ONLY parts of sync v2 that touch the network. Run
+   them yourself, as the agent, via `bot-gh.sh` (never bare `gh`):
+   - **Bot identity/repo access** — run the exact command sync.sh printed:
+     `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh api user --jq .login`, plus a `repo view` on this
+     repo. If either fails, don't fail the whole sync — report "action needed" and point at the one-time
+     setup notes in `.claude/scripts/bot-gh.sh` (same treatment as setup's step 7).
+   - **Label existence + create-missing** — query which labels already exist (e.g.
+     `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh label list`), diff that against sync.sh's derived
+     `module:<name>` + `needs-human` set, and run the create command **only** for the ones actually missing
+     — sync.sh already printed the exact command for each; don't invent new ones or run them unconditionally
+     (most repos will have most labels already; a good sync run creates zero-to-few).
+
+6. **Hand off.** Summarize: which managed files were checked, which were restamped, which need a human
    merge decision (and what you did about it, if anything), and which are already current. Remind the user
    that user-owned files (`gates.json`, `CLAUDE.md`, `settings.local.json`, `.claude/state/`) are never
    touched by sync — those stay exactly as the human left them. If any `stale-vendor` line was printed,
    surface it prominently (don't bury it in the managed-file summary) along with the migration caveat about
-   restarting the armed systemd units after the human cleans up a stale local copy.
+   restarting the armed systemd units after the human cleans up a stale local copy. Also summarize the sync
+   v2 sections: deploy-lag verdict (active vs. idle — and whether you actually restarted anything, and when),
+   the environment check (token key present? plugin version floor met?), which labels (if any) you created
+   after the live existence check, and the observability-plumbing verdict (flag issue #137 by number if
+   either state file is absent/empty — don't attempt to fix it here).
 
 ## Reference
 - `.claude/skills/setup/templates/MANIFEST.md` — the template -> destination map and ownership classes this
