@@ -1251,6 +1251,171 @@ check "(milestone-complete) event logged for the drained milestone" bash -c \
 check "(milestone-complete) idempotent -- exactly one event after three census runs" bash -c \
   '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 1 ]' _ "$eventsComplete"
 
+# ---------------------------------------------------------------------------
+# sort -V regression lock (issue #174 follow-up): two open milestones titled
+# "v1.9" and "v1.10", where LEXICAL and VERSION order genuinely DIVERGE
+# (lexically "v1.10" < "v1.9" since '1' < '9' at the third character; only
+# `sort -V`'s numeric-aware comparison puts v1.9 first). Each has its own
+# qualifying planned+module candidate -- issue 15 -> v1.9, issue 16 -> v1.10,
+# fed to the fake `api` stub in v1.10-first order so a correct `sort -V`
+# inside loop-census.sh is what has to reorder them, not accidental input
+# order. If the "V" modifier were ever dropped from the `sort -k2,2V` call,
+# plain lexical sort would pick v1.10 first and this whole block would flip.
+# ---------------------------------------------------------------------------
+dirSortV="$work/milestone-sort-v"
+build_milestone_fixture "$dirSortV"
+cat > "$dirSortV/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.10\t1\t0\n'
+    printf '2\tv1.9\t1\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '15\tplanned,module:test\tv1.9\tLower-version candidate\n'
+          printf '16\tplanned,module:test\tv1.10\tHigher-version candidate\n'
+        else
+          printf '15\n16\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirSortV/.claude/scripts/bot-gh.sh"
+outSortV="$(env -u GATES_FILE bash "$dirSortV/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(sort -V regression) milestone=v1.9 (lower VERSION wins over lexically-earlier-looking v1.10)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=v1.9"' _ "$outSortV"
+check "(sort -V regression) advance_ready=15 (v1.9's candidate), not issue 16 (v1.10)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=15"' _ "$outSortV"
+check "(sort -V regression) issue 16 (out-of-scope v1.10 candidate) is never detailed" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^issue=16 "' _ "$outSortV"
+
+# ---------------------------------------------------------------------------
+# never-populated guard negative test (issue #174 follow-up): a milestone
+# REST stub reports open_issues==0 AND closed_issues==0 -- brand-new, never
+# populated with any issues at all -- with no candidates targeting it. The
+# milestone-complete guard requires closed_issues>=1 (genuinely drained)
+# alongside open_issues==0, so this must log ZERO milestone-complete events;
+# a guard that fired on open==0 alone (ignoring closed>=1) would wrongly
+# treat "never populated" as "complete".
+# ---------------------------------------------------------------------------
+dirNeverPop="$work/milestone-never-populated"
+build_milestone_fixture "$dirNeverPop"
+cat > "$dirNeverPop/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv3.0\t0\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list) : ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirNeverPop/.claude/scripts/bot-gh.sh"
+eventsNeverPop="$work/milestone-never-populated-events.jsonl"
+: > "$eventsNeverPop"
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsNeverPop" bash "$dirNeverPop/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsNeverPop" bash "$dirNeverPop/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+
+check "(never-populated guard) never-populated milestone (open=0, closed=0) logs zero milestone-complete events" bash -c \
+  '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 0 ]' _ "$eventsNeverPop"
+
+# ---------------------------------------------------------------------------
+# un-drained milestone negative test (issue #174 follow-up): an OPEN
+# milestone (open_issues>0) genuinely in scope -- it has its own qualifying
+# planned+module candidate, so milestone= is non-vacuous (this isn't just an
+# empty/fallback state) -- yet still un-drained. The milestone-complete guard
+# must not fire: zero events logged while the milestone is still in play.
+# ---------------------------------------------------------------------------
+dirUndrained="$work/milestone-undrained"
+build_milestone_fixture "$dirUndrained"
+cat > "$dirUndrained/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.0\t2\t1\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '60\tplanned,module:test\tv1.0\tIn-play candidate\n'
+        else
+          printf '60\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirUndrained/.claude/scripts/bot-gh.sh"
+eventsUndrained="$work/milestone-undrained-events.jsonl"
+: > "$eventsUndrained"
+outUndrained="$(env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsUndrained" bash "$dirUndrained/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(un-drained) milestone=v1.0 genuinely in scope (non-vacuous -- has its own qualifying candidate)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=v1.0"' _ "$outUndrained"
+check "(un-drained) advance_ready=60 (the in-scope milestone's qualifying candidate)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=60"' _ "$outUndrained"
+check "(un-drained) zero milestone-complete events logged (milestone still open, not genuinely drained)" bash -c \
+  '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 0 ]' _ "$eventsUndrained"
+
+# ---------------------------------------------------------------------------
+# no-leak assertion for the truly-milestone-less path (issue #174 follow-up):
+# reuses fixture1's ALREADY-captured $out (its bot-gh.sh has no `api` case at
+# all -- an unhandled `gh api ...` call falls into the catch-all `exit 1`,
+# exactly the "no api stub" shape this check calls for). The existing
+# `grep -qx` positive checks above only assert specific lines are PRESENT;
+# they would not catch an EXTRA leaked `milestone=`/`milestone_open=` line
+# sitting elsewhere in the same output, so this asserts their absence
+# directly.
+# ---------------------------------------------------------------------------
+check "(no-leak) pre-milestone fixture (no api stub) never leaks a milestone= line" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^milestone="' _ "$out"
+check "(no-leak) pre-milestone fixture (no api stub) never leaks a milestone_open= line" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^milestone_open="' _ "$out"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-census.test.sh: PASS ($ok checks)"
