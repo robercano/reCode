@@ -63,6 +63,17 @@
 #                               non-"none" advance_ready when plan.gate !=
 #                               "off" (issue #100) — tells the tick which
 #                               driver prompt variant to build.
+#   milestone=<title>            the CURRENT open milestone in scope (issue
+#   milestone_open=<n>          #174) — see MILESTONE SCOPING below. Emitted
+#                               ONLY when a milestone is actually in scope
+#                               (immediately after `planned_issues=`, before
+#                               the per-issue `issue=`/detail lines — see
+#                               MILESTONE SCOPING for why this position was
+#                               chosen). Absent entirely on the fallback path
+#                               (no qualifying open milestone, or no
+#                               milestones at all), so census output for a
+#                               repo that doesn't use milestones stays
+#                               byte-identical to before this feature.
 #   main_dirty=yes|no           `git -C $root status --porcelain` is non-empty
 #                               AFTER excluding (a) sandbox-mask phantom paths
 #                               (device-node masks, see below) and (b) the
@@ -117,6 +128,63 @@
 # PREFERENCE only: the blocking-graph gate below still overrides it — a
 # blocked candidate is skipped regardless of how high its priority is; edges
 # are semantics, priority is just iteration order among what's unblocked.
+#
+# --- MILESTONE SCOPING (issue #174) -----------------------------------------
+# Milestones represent versions (SCRUM sprints): the loop must drain the
+# CURRENT milestone before it wanders into a future one. "Current" is derived
+# FRESH every run (no persistent cursor) as: among the repo's OPEN milestones
+# (state=open), the one with the lowest version-ish title (natural/`sort -V`
+# semantics — v1.0 < v1.1 < v2.0, "Sprint 1" < "Sprint 2") that has AT LEAST
+# ONE open candidate — same predicate the census already uses (planned label
+# + a module: label). When that milestone drains (0 qualifying candidates),
+# THIS SAME re-derivation picks the next-lowest qualifying open milestone as
+# current on the very next tick automatically — no bookkeeping. An idle gap
+# after a milestone drains, before the owner labels the next milestone's
+# issues `planned`, is intended: the owner controls phase boundaries by when
+# they add that label.
+#
+# SCOPE: the candidate set for ADVANCE (planned_issues/issue=/in_flight=/
+# stalled=/blocked=/plan_wait=/advance_ready=) is filtered down to ONLY the
+# current milestone's issues — applied as a FILTER on top of the existing
+# (priority, number) ordering (issue #173), never disturbing it. Feedback/
+# merge-phase counts (open_prs/feedback_prs/ci_fix_prs/comment_fix_prs/
+# rebase_prs) are completely UNAFFECTED: open PRs are always serviced
+# regardless of milestone.
+#
+# FALLBACK (graceful degradation): if NO open milestone has a qualifying
+# candidate — including the common case of a repo that doesn't use
+# milestones at all, where the REST fetch below returns an empty set — census
+# falls back to TODAY'S unscoped behavior (every planned+module candidate,
+# repo-wide). This is why `milestone=`/`milestone_open=` are emitted ONLY
+# when a milestone is actually in scope: it keeps output for a
+# milestone-less repo byte-identical to before this feature, rather than
+# printing an empty/sentinel milestone line every tick.
+#
+# WHERE milestone=/milestone_open= SIT: immediately after `planned_issues=`,
+# before the per-candidate `issue=` detail lines — grouped with the other
+# scope-summary fact (planned_issues is already the SCOPED count once a
+# milestone is in play) rather than interleaved among per-issue lines.
+#
+# gh 2.4.0 CONSTRAINT: this gh version has no `gh milestone` subcommand and no
+# `gh api graphql` — milestone data is fetched with a plain REST `gh api`
+# call (`repos/{owner}/{repo}/milestones?state=open`), always routed through
+# bot-gh.sh like every other gh call here. Per-issue milestone association
+# reuses the EXISTING `gh issue list --json ...` call that already fetches
+# the planned+module candidates — a `milestone` field is simply added to its
+# --json/--jq, rather than issuing a second per-milestone issue query.
+#
+# MILESTONE-COMPLETE EVENT: the milestones REST response already reports
+# `open_issues`/`closed_issues` per milestone, so "the last issue in a
+# milestone closes" is detected directly (open_issues==0 with closed_issues
+# >= 1, i.e. genuinely drained rather than never-populated) without any extra
+# gh call. This is the ONE deliberate exception to this script's read-only /
+# re-run-safe contract (see the file-level comment below): it appends to
+# events.jsonl via log-event.sh. To stay idempotent under re-runs (no
+# duplicate event every idle tick), it FIRST scans events.jsonl for an
+# existing milestone-complete event carrying that milestone's title, and
+# only logs when none is found — approach (b) from the issue's acceptance
+# criteria, chosen because it needs no change to loop-tick.sh's control flow
+# and keeps the guard co-located with the detection logic that needs it.
 #
 # --- BLOCKING-GRAPH GATE (issue #97) ----------------------------------------
 # advance_ready additionally skips any otherwise-eligible candidate (branch=
@@ -187,6 +255,9 @@
 # Repo derived from the git remote; override with $1. Bot login via $BOT_LOGIN.
 # Invoke as `bash .claude/scripts/loop-census.sh` (pre-approve that exact
 # command). Read-only: advances no cursor, mutates nothing — safe to re-run.
+# The SOLE exception is the milestone-complete event append (issue #174, see
+# MILESTONE SCOPING above) — an idempotent, guarded events.jsonl write, never
+# a stdout/behavior change; every other line above stays a pure read.
 set -euo pipefail
 
 # Two-root derivation (issue #63): script_dir = sibling scripts, root = consumer project.
@@ -273,6 +344,67 @@ plan_mode=$(node -e '
 case "$plan_mode" in off|label|always) ;; *) plan_mode=off ;; esac
 
 events_file="${CLAUDE_EVENTS_FILE:-$root/.claude/state/events.jsonl}"
+
+# --- milestone REST fetch (issue #174) ---------------------------------------
+# gh 2.4.0 has no `gh milestone` subcommand and no `gh api graphql` — plain
+# REST, always through the bot-gh.sh wrapper. `2>/dev/null || true` degrades
+# gracefully (empty $milestones_tsv) on ANY failure — a repo with no
+# milestones, a stubbed bot-gh.sh in tests that doesn't implement `api`, or a
+# transient gh error — which is exactly the FALLBACK path (see MILESTONE
+# SCOPING above): census must never abort, and an empty result here makes
+# every downstream milestone check a no-op, falling back to today's unscoped
+# behavior.
+milestones_tsv=$(gh api "repos/$repo/milestones?state=open" \
+  --jq '.[] | [.number, .title, .open_issues, .closed_issues] | @tsv' 2>/dev/null) || true
+
+# Version-sort ascending by title (2nd TSV field) — natural/`sort -V`
+# semantics (v1.0 < v1.1 < v2.0, "Sprint 1" < "Sprint 2"). GNU coreutils sort
+# supports "V" as a per-key modifier (`-k2,2V`), so this needs no manual
+# swap-sort-swap dance.
+milestones_sorted=""
+if [ -n "$milestones_tsv" ]; then
+  milestones_sorted=$(printf '%s\n' "$milestones_tsv" | sort -t $'\t' -k2,2V)
+fi
+
+# --- milestone-complete event (issue #174) — THE ONE read-only exception ----
+# A milestone is "complete" when the REST fetch's own open_issues/
+# closed_issues counters show it fully drained (open_issues==0) AND it
+# genuinely had issues to drain (closed_issues>=1 — never fires for an empty/
+# never-populated milestone). Guarded against duplicate logging by scanning
+# events_file FIRST for an existing milestone-complete event carrying this
+# milestone's title before appending — safe to re-run every tick, exactly
+# like every other check in this script, EXCEPT this one intentionally
+# mutates events.jsonl (via log-event.sh) as its side effect.
+if [ -n "$milestones_tsv" ]; then
+  while IFS=$'\t' read -r ms_num ms_title ms_open ms_closed; do
+    [ -z "${ms_title:-}" ] && continue
+    case "$ms_open" in ''|*[!0-9]*) continue ;; esac
+    case "$ms_closed" in ''|*[!0-9]*) continue ;; esac
+    if [ "$ms_open" -eq 0 ] && [ "$ms_closed" -ge 1 ]; then
+      already_logged=$(CLAUDE_MS_EVENTS_FILE="$events_file" CLAUDE_MS_TITLE="$ms_title" node -e '
+        const fs = require("fs");
+        const file = process.env.CLAUDE_MS_EVENTS_FILE;
+        const title = process.env.CLAUDE_MS_TITLE;
+        let found = false;
+        try {
+          const text = fs.readFileSync(file, "utf8");
+          for (const line of text.split("\n")) {
+            if (!line.trim()) continue;
+            let o;
+            try { o = JSON.parse(line); } catch (e) { continue; }
+            if (o.phase === "milestone-complete" && o.task === title) { found = true; break; }
+          }
+        } catch (e) { /* no file yet -> not logged */ }
+        console.log(found ? "yes" : "no");
+      ' 2>/dev/null) || already_logged="no"
+      if [ "$already_logged" != "yes" ]; then
+        CLAUDE_EVENTS_FILE="$events_file" bash "$script_dir/log-event.sh" \
+          --role census --task "$ms_title" --phase milestone-complete \
+          --detail "milestone drained (all issues closed)" >/dev/null 2>&1 || true
+      fi
+    fi
+  done <<< "$milestones_tsv"
+fi
 
 # --- stall detection helper (issue #98) --------------------------------------
 # $1 = issue number. Prints the age in whole minutes of the NEWEST
@@ -374,10 +506,13 @@ echo "rebase_prs=$rebase_prs"
 # #173). Rank is derived from the labels field already in the TSV (no extra
 # gh call): prepend a rank column, sort numerically on (rank, number), then
 # strip the rank column back off so the downstream `while IFS=$'\t' read -r
-# num labels title` loop is unchanged. Titles are the LAST TSV field (may
-# contain spaces) and are left untouched by this transform.
-planned=$(gh issue list -R "$repo" --state open --label planned --json number,title,labels \
-  --jq '.[] | [.number, ([.labels[].name]|join(",")), .title] | @tsv' \
+# num labels milestone_title title` loop is unchanged. The `milestone` field
+# (issue #174) is fetched via the SAME --json/--jq as the rest of this TSV
+# (never a separate per-milestone issue query — see the gh 2.4.0 note in
+# MILESTONE SCOPING above), placed BEFORE title so title stays the LAST TSV
+# field (may contain spaces) and is left untouched by this transform.
+planned=$(gh issue list -R "$repo" --state open --label planned --json number,title,labels,milestone \
+  --jq '.[] | [.number, ([.labels[].name]|join(",")), (.milestone.title // ""), .title] | @tsv' \
   | awk -F'\t' 'BEGIN { OFS = "\t" }
     {
       labels = $2
@@ -391,6 +526,33 @@ planned=$(gh issue list -R "$repo" --state open --label planned --json number,ti
   | sort -t $'\t' -k1,1n -k2,2n \
   | cut -f2-)
 
+# --- current-milestone detection (issue #174) -------------------------------
+# Walk the version-sorted open milestones ascending; the FIRST one with at
+# least one qualifying candidate (module-label hit, same predicate as the
+# main loop below) becomes "current". Stays empty (fallback: unscoped, exactly
+# today's behavior) when $milestones_sorted is empty (no milestones at all —
+# byte-identical output) or when no open milestone has a qualifying candidate.
+current_milestone=""
+if [ -n "$milestones_sorted" ]; then
+  while IFS=$'\t' read -r ms_num ms_title ms_open ms_closed; do
+    [ -z "${ms_title:-}" ] && continue
+    qualifying=0
+    while IFS=$'\t' read -r pnum plabels pmilestone ptitle; do
+      [ -z "${pnum:-}" ] && continue
+      [ "$pmilestone" = "$ms_title" ] || continue
+      hit=0
+      while IFS= read -r ml; do
+        case ",$plabels," in *",$ml,"*) hit=1; break;; esac
+      done <<< "$module_labels"
+      [ "$hit" -eq 1 ] && qualifying=$((qualifying + 1))
+    done <<< "$planned"
+    if [ "$qualifying" -ge 1 ]; then
+      current_milestone="$ms_title"
+      break
+    fi
+  done <<< "$milestones_sorted"
+fi
+
 planned_count=0
 advance_ready="none"
 fallback_ready="none"
@@ -401,8 +563,16 @@ blocked_lines=""
 plan_wait_lines=""
 advance_plan_state=""
 fallback_plan_state=""
-while IFS=$'\t' read -r num labels title; do
+while IFS=$'\t' read -r num labels milestone_title title; do
   [ -z "${num:-}" ] && continue
+  # Milestone scoping (issue #174): when a current milestone is in scope,
+  # the ADVANCE candidate set is filtered down to ONLY its issues — a plain
+  # skip here, applied on top of the (priority, number) ordering already
+  # established above, never disturbing it. A no-op when current_milestone
+  # is empty (fallback: unscoped, today's behavior).
+  if [ -n "$current_milestone" ] && [ "$milestone_title" != "$current_milestone" ]; then
+    continue
+  fi
   hit=0
   while IFS= read -r ml; do
     case ",$labels," in *",$ml,"*) hit=1; break;; esac
@@ -559,6 +729,16 @@ if [ "$advance_ready" = "none" ] && [ "$fallback_ready" != "none" ]; then
 fi
 
 echo "planned_issues=$planned_count"
+# milestone=/milestone_open= (issue #174): only when a milestone is actually
+# in scope — see the position rationale in MILESTONE SCOPING above. Absent
+# entirely on the fallback path, preserving byte-identical output for repos
+# that don't use milestones. milestone_open reuses $planned_count directly:
+# once a milestone is in scope, planned_count IS that milestone's qualifying
+# count (the filter above already scoped it), so no separate count is kept.
+if [ -n "$current_milestone" ]; then
+  echo "milestone=$current_milestone"
+  echo "milestone_open=$planned_count"
+fi
 [ -n "$detail" ] && printf '%s' "$detail"
 [ -n "$in_flight" ] && printf '%s' "$in_flight"
 [ -n "$stalled_lines" ] && printf '%s' "$stalled_lines"
