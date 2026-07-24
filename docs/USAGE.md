@@ -485,6 +485,58 @@ reCode deploy-lag incident, issue #131).
 > after `/plugin marketplace update`. Caught 2026-07-06: a `hooks/hooks.json` schema fix merged to `main` but
 > didn't reach an already-installed consumer until the version string was bumped too.
 
+## Release cycle
+The maintainer note above says to bump `plugin.json`'s version "on every real change" — issue #176
+formalizes WHEN and HOW that bump actually happens for a planned batch of work, replacing the ad-hoc
+process from issue #136 (closed; treat this section as its successor).
+
+**The milestone IS the release unit.** Each release milestone (e.g. "v0.3.0 — consumer rollout") contains
+one special issue, titled `Release vX.Y.Z` (template: `.github/ISSUE_TEMPLATE/release.md`), whose body
+declares **"Blocked by #…, #…, #…"** listing every OTHER open issue currently in that milestone. This
+reuses issue #97's blocking-graph gate — already load-bearing for the loop's ADVANCE step (see
+"Autonomous loop & the issue queue" above) — as the release gate itself: **no new state machine.** The
+census will not advance the release issue until every sibling in the milestone has merged, so as long as
+that "Blocked by" line is kept current (a one-line `bot-gh.sh issue list --milestone ... --state open`
+query — see the template), the release issue self-schedules for whenever the milestone is actually done.
+
+**The cut.** Once unblocked and labelled `planned`, the release issue is implemented like any other issue
+— its implementer runs `bash .claude/scripts/release.sh vX.Y.Z --issue <N>`, which:
+1. bumps the `version` field in both `.claude/.claude-plugin/plugin.json` and
+   `.claude/.claude-plugin/marketplace.json`,
+2. generates a dated, Keep-a-Changelog-style entry in `.claude/.claude-plugin/CHANGELOG.md` from merged PR
+   titles since the last git tag (falling back to the full commit history when there is no prior tag —
+   e.g. this repo's very first release),
+3. tags `vX.Y.Z`, commits the bumps + changelog, and pushes both,
+4. "publishes" per the runbook above — the driver cannot run the interactive `/plugin marketplace update`
+   slash command, and package-publish commands are policy-denied, so it prints that command as the
+   **manual owner follow-up** instead of attempting it,
+5. closes the milestone,
+6. auto-files a `Rollout & feedback: vX.Y.Z` companion issue (below).
+
+Supports `--dry-run` for testability: it performs the real file transforms (version bump + changelog
+generation) so they can be inspected, but only PRINTS every git/gh side effect (tag, push, milestone
+close, issue file) instead of executing it — see `.claude/scripts/release.test.sh`.
+
+**The rollout & feedback companion.** The auto-filed `Rollout & feedback: vX.Y.Z` issue is deliberately
+**census-invisible**: no milestone, and no `planned` label, until the owner triages it — the loop will
+never pick it up on its own. It carries:
+- a consumer-sync checklist for reDeploy and reDeFi via `/orchestrator:sync` (sync v2's offline checks —
+  deploy-lag, environment, labels, observability — issue #141),
+- test-focus areas derived from the released milestone's issue titles,
+- a running section to accumulate feedback back-references as consumers report issues.
+
+**Label conventions.** The companion issue is labelled `feedback`; incoming feedback that traces back to a
+specific consumer is additionally tagged `from:redeploy` or `from:redefi` (both labels, plus `feedback`
+itself, are created idempotently by `release.sh` at file time if they don't already exist). The version
+being rolled out is always noted in the issue body. Owner triage — adding `planned` and, if warranted, a
+milestone — is what turns a piece of feedback into loop-eligible work; until then it just sits in the
+inbox.
+
+**Hotfix path.** A bug found after release doesn't reopen the old milestone — file a `vX.Y.Z+1`
+micro-milestone containing just that one bug issue, label it `planned`, let the loop fix it normally, then
+cut the patch release through the exact same `Release vX.Y.Z+1` → `release.sh` machinery above (its
+"Blocked by" list will just be the one bug issue).
+
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
   at PR time. Cleanest/auditable.
