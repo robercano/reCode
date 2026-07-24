@@ -4,6 +4,11 @@ All notable changes to the `orchestrator` plugin are documented in this file. Fo
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions track `plugin.json` /
 `marketplace.json`.
 
+## [Unreleased]
+Entries land here as work merges; `.claude/scripts/release.sh` (issue #176) turns this into a dated
+`## [X.Y.Z] - YYYY-MM-DD` section — ahead of the prior release, below this scaffold — at cut time. See
+`docs/USAGE.md` → "Release cycle".
+
 ## [0.2.2] - 2026-07-17
 
 ### Changed
