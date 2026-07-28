@@ -620,7 +620,7 @@ while IFS=$'\t' read -r num labels milestone_title title; do
   # match, when present, always wins over a remote-only one.
   local_branch=""
   remote_branch=""
-  branch_lines=$(git -C "$root" branch -a --list "*feat/issue-$num-*" | sed 's/^[* ]*//') || true
+  branch_lines=$(git -C "$root" branch -a --list "*feat/issue-$num-*" | sed 's/^[+* ]*//') || true
   if [ -n "$branch_lines" ]; then
     while IFS= read -r bl; do
       [ -z "$bl" ] && continue

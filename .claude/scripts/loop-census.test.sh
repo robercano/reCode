@@ -1500,6 +1500,126 @@ check "(no-leak) pre-milestone fixture (no api stub) never leaks a milestone= li
 check "(no-leak) pre-milestone fixture (no api stub) never leaks a milestone_open= line" bash -c \
   '! printf "%s\n" "$1" | grep -q "^milestone_open="' _ "$out"
 
+# ---------------------------------------------------------------------------
+# "+"-worktree-marker normalization (issue #181): `git branch -a` prefixes a
+# branch with "+" (instead of "*") when it is checked out in ANOTHER, linked
+# worktree rather than the repo's own current checkout -- exactly what every
+# driver leaves behind while its PR is open (the driver's worktree stays
+# alive). Pre-fix, branch_lines only stripped a leading "*"/space
+# (`sed 's/^[* ]*//'`), so such a branch was captured as "+ feat/issue-N-..."
+# -- an extra literal "+ " that then fails the open-PR headRefName match
+# ("$b"|*"/$b"), misreporting a healthy open-PR issue as in_flight (and, if
+# its events are stale, also as falsely stalled).
+#
+# Fixture: two planned+module:test issues, each with its own branch and an
+# open PR already filed under that branch's bare name, plus deliberately
+# STALE events for both (to prove staleness never even gets consulted once
+# the open-PR match succeeds):
+#   200  branch checked out in a LINKED worktree (git worktree add) -> git
+#        branch -a marks it "+ feat/issue-200-a" in the main fixture repo.
+#        This is the actual bug shape (branch #181).
+#   201  branch checked out as the fixture repo's OWN current branch -> git
+#        branch -a marks it "* feat/issue-201-b". Regression control: the
+#        plain "*" marker was already stripped pre-fix, so this must stay
+#        correctly classified with the fix in place too.
+# Both must come back with their BARE branch name (no leading "+"/"*"/space),
+# NOT in_flight, and NOT stalled.
+# ---------------------------------------------------------------------------
+dirWtMarker="$work/worktree-marker"
+scriptsWtMarker="$dirWtMarker/.claude/scripts"
+mkdir -p "$scriptsWtMarker"
+cp "$census_src" "$scriptsWtMarker/loop-census.sh"
+cp "$resolve_roots_src" "$scriptsWtMarker/resolve-roots.sh"
+cat > "$dirWtMarker/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" },
+  "budget": { "stall_minutes": 2 }
+}
+EOF
+cat > "$scriptsWtMarker/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsWtMarker/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsWtMarker/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsWtMarker/pr-rebase.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsWtMarker/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      printf '%s\n' "feat/issue-200-a"
+      printf '%s\n' "feat/issue-201-b"
+    else
+      echo 2
+    fi
+    ;;
+  issue)
+    printf '200\tplanned,module:test\t\tWorktree-marker issue two hundred\n'
+    printf '201\tplanned,module:test\t\tCurrent-checkout-marker issue two hundred one\n'
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$scriptsWtMarker"/*.sh
+git -C "$dirWtMarker" init -q -b main
+git -C "$dirWtMarker" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+git -C "$dirWtMarker" branch feat/issue-200-a main >/dev/null
+# Linked worktree: checks out feat/issue-200-a OUTSIDE the main fixture repo,
+# which is what makes git branch -a mark it "+" rather than leaving it
+# unmarked or marking it "*" (that marker is reserved for the repo's OWN
+# current checkout, exercised by issue 201 below).
+git -C "$dirWtMarker" worktree add -q "$work/wt200" feat/issue-200-a >/dev/null
+# Repo's own current checkout -> "*" marker (issue 201's regression control).
+git -C "$dirWtMarker" checkout -q -b feat/issue-201-b main >/dev/null
+
+# Sanity-check the fixture BEFORE trusting it: prove git branch -a genuinely
+# emits the "+"- and "*"-prefixed lines this test depends on, so a fixture
+# regression (e.g. worktree add silently failing) can't masquerade as a
+# passing (or a misleadingly failing) census assertion below.
+rawBranchesWtMarker="$(git -C "$dirWtMarker" branch -a)"
+check "worktree-marker sanity: git branch -a emits a literal '+'-prefixed line for the linked-worktree branch" bash -c \
+  'printf "%s\n" "$1" | grep -qx "+ feat/issue-200-a"' _ "$rawBranchesWtMarker"
+check "worktree-marker sanity: git branch -a emits a literal '*'-prefixed line for the current-checkout branch" bash -c \
+  'printf "%s\n" "$1" | grep -qx "* feat/issue-201-b"' _ "$rawBranchesWtMarker"
+
+eventsWtMarker="$work/worktree-marker-events.jsonl"
+stale_ts_wt="$(date -u -d '-45 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+{
+  printf '{"ts":"%s","role":"implementer","model":"sonnet","task":"200","phase":"implementing","lens":"","detail":""}\n' "$stale_ts_wt"
+  printf '{"ts":"%s","role":"implementer","model":"sonnet","task":"201","phase":"implementing","lens":"","detail":""}\n' "$stale_ts_wt"
+} > "$eventsWtMarker"
+
+outWtMarker="$(env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsWtMarker" bash "$scriptsWtMarker/loop-census.sh" "acme/repo")"
+
+check "worktree-marker (issue #181): issue 200's '+'-marked branch is reported bare (no leading '+')" bash -c \
+  'printf "%s\n" "$1" | grep -q "^issue=200 branch=feat/issue-200-a "' _ "$outWtMarker"
+check "worktree-marker (issue #181): issue 200 (healthy open PR under its '+'-marked branch) is NOT in_flight" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "in_flight=200"' _ "$outWtMarker"
+check "worktree-marker (issue #181): issue 200 is NOT stalled despite stale events (open-PR match short-circuits staleness)" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^stalled=200 "' _ "$outWtMarker"
+check "worktree-marker regression control: issue 201's '*'-marked branch is reported bare (no leading '*')" bash -c \
+  'printf "%s\n" "$1" | grep -q "^issue=201 branch=feat/issue-201-b "' _ "$outWtMarker"
+check "worktree-marker regression control: issue 201 (healthy open PR under its '*'-marked branch) is NOT in_flight" bash -c \
+  '! printf "%s\n" "$1" | grep -qx "in_flight=201"' _ "$outWtMarker"
+check "worktree-marker regression control: issue 201 is NOT stalled despite stale events" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^stalled=201 "' _ "$outWtMarker"
+check "worktree-marker: zero in_flight lines total (both issues already have open PRs)" bash -c \
+  '[ "$(printf "%s\n" "$1" | grep -c "^in_flight=")" -eq 0 ]' _ "$outWtMarker"
+check "worktree-marker: zero stalled lines total" bash -c \
+  '[ "$(printf "%s\n" "$1" | grep -c "^stalled=")" -eq 0 ]' _ "$outWtMarker"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-census.test.sh: PASS ($ok checks)"
