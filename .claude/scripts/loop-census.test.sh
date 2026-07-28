@@ -39,6 +39,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 census_src="$script_dir/loop-census.sh"
 resolve_roots_src="$script_dir/resolve-roots.sh"
 cockpit_src="$script_dir/cockpit.sh"
+log_event_src="$script_dir/log-event.sh"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/loop-census-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -136,8 +137,10 @@ EOF
 #     issues 43 and 100 already have one; issue 42 and 44 do not (issue 4 has
 #     no branch, so it can't have a PR either).
 #   - `pr list ... --json number ...`:       open PR count (2, matching above).
-#   - `issue list ...`:                      TSV `num<TAB>labels<TAB>title`
-#     for the five planned+module:test issues.
+#   - `issue list ...`:                      TSV `num<TAB>labels<TAB>milestone<TAB>title`
+#     for the five planned+module:test issues (milestone field empty here —
+#     none of these issues are milestone-scoped; see issue #174's dedicated
+#     milestone-scoping fixtures further below).
 cat > "$scripts_dir/bot-gh.sh" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -156,11 +159,11 @@ case "$1" in
     fi
     ;;
   issue)
-    printf '4\tplanned,module:test\tIssue four\n'
-    printf '42\tplanned,module:test\tIssue forty two\n'
-    printf '43\tplanned,module:test\tIssue forty three\n'
-    printf '44\tplanned,module:test\tIssue forty four\n'
-    printf '100\tplanned,module:test\tIssue one hundred\n'
+    printf '4\tplanned,module:test\t\tIssue four\n'
+    printf '42\tplanned,module:test\t\tIssue forty two\n'
+    printf '43\tplanned,module:test\t\tIssue forty three\n'
+    printf '44\tplanned,module:test\t\tIssue forty four\n'
+    printf '100\tplanned,module:test\t\tIssue one hundred\n'
     ;;
   *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
 esac
@@ -346,8 +349,8 @@ case "$1" in
     fi
     ;;
   issue)
-    printf '5\tplanned,module:test\tIssue five\n'
-    printf '6\tplanned,module:test\tIssue six\n'
+    printf '5\tplanned,module:test\t\tIssue five\n'
+    printf '6\tplanned,module:test\t\tIssue six\n'
     ;;
   *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
 esac
@@ -461,8 +464,8 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '20\tplanned,module:test\tCandidate twenty\n'
-          printf '21\tplanned,module:test\tCandidate twenty one\n'
+          printf '20\tplanned,module:test\t\tCandidate twenty\n'
+          printf '21\tplanned,module:test\t\tCandidate twenty one\n'
         else
           # all-open-issue-numbers fetch: 99 (the blocker) is still OPEN.
           printf '20\n21\n99\n'
@@ -511,8 +514,8 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '20\tplanned,module:test\tCandidate twenty\n'
-          printf '21\tplanned,module:test\tCandidate twenty one\n'
+          printf '20\tplanned,module:test\t\tCandidate twenty\n'
+          printf '21\tplanned,module:test\t\tCandidate twenty one\n'
         else
           # all-open-issue-numbers fetch: 99 (the blocker) is now CLOSED —
           # absent from this list entirely.
@@ -561,8 +564,8 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '30\tplanned,module:test\tCandidate thirty\n'
-          printf '31\tplanned,module:test\tCandidate thirty one\n'
+          printf '30\tplanned,module:test\t\tCandidate thirty\n'
+          printf '31\tplanned,module:test\t\tCandidate thirty one\n'
         else
           printf '30\n31\n'
         fi
@@ -611,7 +614,7 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '40\tplanned,module:test\tTracker forty\n'
+          printf '40\tplanned,module:test\t\tTracker forty\n'
         else
           printf '40\n41\n'
         fi
@@ -693,8 +696,8 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '3\tplanned,module:test\tLow-priority-in-number-order candidate\n'
-          printf '50\tplanned,module:test,priority:critical\tHigh-priority higher-numbered candidate\n'
+          printf '3\tplanned,module:test\t\tLow-priority-in-number-order candidate\n'
+          printf '50\tplanned,module:test,priority:critical\t\tHigh-priority higher-numbered candidate\n'
         else
           printf '3\n50\n'
         fi
@@ -739,8 +742,8 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '5\tplanned,module:test\tUnlabeled lower-numbered candidate\n'
-          printf '6\tplanned,module:test,priority:low\tLabeled higher-numbered candidate\n'
+          printf '5\tplanned,module:test\t\tUnlabeled lower-numbered candidate\n'
+          printf '6\tplanned,module:test,priority:low\t\tLabeled higher-numbered candidate\n'
         else
           printf '5\n6\n'
         fi
@@ -793,8 +796,8 @@ case "$1" in
     case "$2" in
       list)
         if printf '%s\n' "$*" | grep -q -- '--label'; then
-          printf '70\tplanned,module:test,priority:high\tBlocked high-priority candidate\n'
-          printf '8\tplanned,module:test\tUnblocked lower-priority candidate\n'
+          printf '70\tplanned,module:test,priority:high\t\tBlocked high-priority candidate\n'
+          printf '8\tplanned,module:test\t\tUnblocked lower-priority candidate\n'
         else
           # all-open-issue-numbers fetch: 99 (the blocker) is still OPEN.
           printf '70\n8\n99\n'
@@ -886,10 +889,10 @@ case "$1" in
     fi
     ;;
   issue)
-    printf '80\tplanned,module:test\tStale issue eighty\n'
-    printf '81\tplanned,module:test\tFresh issue eighty one\n'
-    printf '82\tplanned,module:test\tNo-events issue eighty two\n'
-    printf '90\tplanned,module:test\tStale-but-has-PR issue ninety\n'
+    printf '80\tplanned,module:test\t\tStale issue eighty\n'
+    printf '81\tplanned,module:test\t\tFresh issue eighty one\n'
+    printf '82\tplanned,module:test\t\tNo-events issue eighty two\n'
+    printf '90\tplanned,module:test\t\tStale-but-has-PR issue ninety\n'
     ;;
   *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
 esac
@@ -978,6 +981,524 @@ out_detached="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo"
 check "fixture with HEAD detached: main_head=detached" bash -c 'printf "%s\n" "$1" | grep -qx "main_head=detached"' _ "$out_detached"
 check "fixture with HEAD detached: main_dirty still no (working tree itself is clean)" bash -c 'printf "%s\n" "$1" | grep -qx "main_dirty=no"' _ "$out_detached"
 git -C "$fixture" checkout -q main
+
+# ---------------------------------------------------------------------------
+# Milestone scoping (issue #174): milestones represent versions (SCRUM
+# sprints) -- the census's ADVANCE candidate set must scope to the CURRENT
+# open milestone (lowest version-sorted open milestone with >=1 qualifying
+# planned+module candidate), recomputed fresh every run, falling back to
+# today's unscoped behavior when no open milestone qualifies (including the
+# common case of a repo with no milestones at all, exercised implicitly by
+# every fixture ABOVE this point in the file, none of which stub the `api`
+# subcommand -- their bot-gh.sh falls through to the unhandled-args case,
+# which degrades gracefully to an empty $milestones_tsv).
+#
+# build_milestone_fixture: same no-branch/no-open-PR shape as
+# build_plain_fixture above, but also copies in log-event.sh (needed by the
+# milestone-complete-event scenario) since these fixtures' own bot-gh.sh
+# additionally answers the `api .../milestones?state=open` REST call.
+# ---------------------------------------------------------------------------
+build_milestone_fixture() {
+  local dir="$1"
+  local scripts="$dir/.claude/scripts"
+  mkdir -p "$scripts"
+  cp "$census_src" "$scripts/loop-census.sh"
+  cp "$resolve_roots_src" "$scripts/resolve-roots.sh"
+  cp "$log_event_src" "$scripts/log-event.sh"
+  cat > "$dir/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+  for stub in pr-feedback pr-ci-fix pr-comment-fix pr-rebase; do
+    cat > "$scripts/$stub.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  done
+  chmod +x "$scripts"/*.sh
+  git -C "$dir" init -q -b main
+  git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+}
+
+# --- SCOPING: two open milestones, both with a qualifying candidate -- only
+# the LOWER-versioned milestone's issue may advance. Issue 5 (LOWER number)
+# is deliberately assigned to the HIGHER-version milestone (v2.0), and issue
+# 10 (HIGHER number) to the LOWER-version milestone (v1.0): a scoping-unaware
+# revert (plain priority/number order, ignoring milestone) would pick issue 5
+# first, so this genuinely discriminates. ---
+dirScoping="$work/milestone-scoping"
+build_milestone_fixture "$dirScoping"
+cat > "$dirScoping/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.0\t1\t0\n'
+    printf '2\tv2.0\t1\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '5\tplanned,module:test\tv2.0\tHigher-milestone lower-numbered candidate\n'
+          printf '10\tplanned,module:test\tv1.0\tLower-milestone higher-numbered candidate\n'
+        else
+          printf '5\n10\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirScoping/.claude/scripts/bot-gh.sh"
+outScoping="$(env -u GATES_FILE bash "$dirScoping/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(scoping) current milestone is v1.0 (lowest version-sorted open milestone with a qualifying candidate)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=v1.0"' _ "$outScoping"
+check "(scoping) milestone_open=1 (only v1.0's own candidate counted)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone_open=1"' _ "$outScoping"
+check "(scoping) advance_ready is issue 10 (v1.0-scoped), not issue 5 (lower-numbered but v2.0)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=10"' _ "$outScoping"
+check "(scoping) issue 5 (out-of-scope v2.0 candidate) is never even detailed/counted" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^issue=5 "' _ "$outScoping"
+check "(scoping) planned_issues=1 (scoped count, not the repo-wide 2)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "planned_issues=1"' _ "$outScoping"
+
+# --- FALLBACK: an open milestone exists, but NO candidate targets it -- must
+# fall back to today's unscoped behavior (no milestone= line, the unassigned
+# candidate still advances). ---
+dirFallback="$work/milestone-fallback"
+build_milestone_fixture "$dirFallback"
+cat > "$dirFallback/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.0\t3\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '20\tplanned,module:test\t\tUnassigned candidate\n'
+        else
+          printf '20\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirFallback/.claude/scripts/bot-gh.sh"
+outFallback="$(env -u GATES_FILE bash "$dirFallback/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(fallback) no milestone= line when no open milestone has a qualifying candidate" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^milestone="' _ "$outFallback"
+check "(fallback) advance_ready falls back to the unscoped candidate (today's behavior)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=20"' _ "$outFallback"
+check "(fallback) planned_issues=1 counted (unscoped)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "planned_issues=1"' _ "$outFallback"
+
+# --- RECOMPUTE-ON-DRAIN (a): v1.0 is fully drained (no qualifying candidate
+# left) while v2.0 DOES have one -- v2.0 becomes current automatically, no
+# persistent cursor needed. ---
+dirDrainA="$work/milestone-drain-recompute"
+build_milestone_fixture "$dirDrainA"
+cat > "$dirDrainA/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.0\t0\t2\n'
+    printf '2\tv2.0\t1\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '30\tplanned,module:test\tv2.0\tNext-milestone candidate\n'
+        else
+          printf '30\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirDrainA/.claude/scripts/bot-gh.sh"
+outDrainA="$(env -u GATES_FILE bash "$dirDrainA/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(recompute-on-drain) v1.0 drained -> v2.0 becomes current automatically" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=v2.0"' _ "$outDrainA"
+check "(recompute-on-drain) advance_ready advances v2.0's candidate (issue 30)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=30"' _ "$outDrainA"
+
+# --- RECOMPUTE-ON-DRAIN (b): v1.0 drained, v2.0 open but its issues are NOT
+# YET labeled `planned` -- the loop must IDLE (advance_ready=none), never
+# advance into the next milestone early. ---
+dirDrainB="$work/milestone-drain-idle"
+build_milestone_fixture "$dirDrainB"
+cat > "$dirDrainB/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.0\t0\t2\n'
+    printf '2\tv2.0\t1\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      # v2.0's issue exists but isn't labeled `planned` yet -- the real
+      # `--label planned` GitHub-side filter this call uses would exclude it
+      # regardless of --label being present, so the planned TSV is empty.
+      list) : ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirDrainB/.claude/scripts/bot-gh.sh"
+outDrainB="$(env -u GATES_FILE bash "$dirDrainB/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(recompute-on-drain, idle) no qualifying milestone -- no milestone= line" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^milestone="' _ "$outDrainB"
+check "(recompute-on-drain, idle) loop idles rather than advancing into the unlabeled milestone" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=none"' _ "$outDrainB"
+check "(recompute-on-drain, idle) planned_issues=0" bash -c \
+  'printf "%s\n" "$1" | grep -qx "planned_issues=0"' _ "$outDrainB"
+
+# --- MILESTONE-COMPLETE event (issue #174): a fully-drained milestone
+# (open_issues=0, closed_issues>=1) logs ONE milestone-complete event via
+# log-event.sh -- and re-running census repeatedly must NOT append a
+# duplicate, preserving the read-only/re-run-safe contract for every other
+# line this script prints (this write is the single deliberate exception). ---
+dirComplete="$work/milestone-complete"
+build_milestone_fixture "$dirComplete"
+cat > "$dirComplete/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.0\t0\t2\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list) : ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirComplete/.claude/scripts/bot-gh.sh"
+eventsComplete="$work/milestone-complete-events.jsonl"
+: > "$eventsComplete"
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsComplete" bash "$dirComplete/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsComplete" bash "$dirComplete/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsComplete" bash "$dirComplete/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+
+check "(milestone-complete) event logged for the drained milestone" bash -c \
+  'grep -q "\"phase\":\"milestone-complete\"" "$1" && grep -q "\"task\":\"v1.0\"" "$1"' _ "$eventsComplete"
+check "(milestone-complete) idempotent -- exactly one event after three census runs" bash -c \
+  '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 1 ]' _ "$eventsComplete"
+
+# --- MILESTONE-COMPLETE ROTATION SURVIVAL (issue #174 review fix): a scan-of-
+# events.jsonl idempotency guard breaks the moment log-event.sh's own
+# retention cap (EVENTS_MAX_LINES, default 2000) rotates the marker line back
+# out of the log -- inevitable over the multi-day idle gap this feature is
+# built around. Simulate that by wiping the marker straight out of
+# events.jsonl (strictly worse than real rotation, which only evicts it
+# eventually) and confirm a 4th census run still does NOT re-log: idempotency
+# must be tracked in the separate, never-rotated
+# .claude/state/milestone-complete-logged.json sidecar, not events.jsonl. ---
+: > "$eventsComplete"
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsComplete" bash "$dirComplete/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+
+check "(milestone-complete, rotation survival) no duplicate event once the events.jsonl marker line is gone (simulated rotation)" bash -c \
+  '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 0 ]' _ "$eventsComplete"
+check "(milestone-complete, rotation survival) sidecar ledger still remembers milestone 1 as already logged" bash -c \
+  'grep -q "1" "$1"' _ "$dirComplete/.claude/state/milestone-complete-logged.json"
+
+# --- MILESTONE-COMPLETE LOCK-FAILURE NEVER ABORTS CENSUS (issue #174 review
+# fix): a prior version of the idempotency fix opened the flock fd
+# (`exec 8>…`) and acquired it (`flock -x 8`) with no failure guard, under
+# this script's own `set -euo pipefail` -- if the lock file can't be opened
+# (unwritable state dir, missing parent, disk full) the subshell aborted and
+# that nonzero exit propagated to census itself, killing the WHOLE run
+# before it printed advance_ready=/planned_issues=/etc. Point the lock at an
+# unwritable path and confirm census still completes normally instead of
+# dying. ---
+outLockFail="$(env -u GATES_FILE CLAUDE_MILESTONE_LOCK_FILE="/nonexistent-dir-$$/lock.flock" \
+  bash "$dirComplete/.claude/scripts/loop-census.sh" "acme/repo")"
+check "(milestone-complete, lock failure) census still completes (advance_ready= line present) when the lock file can't be opened" bash -c \
+  'printf "%s\n" "$1" | grep -q "^advance_ready="' _ "$outLockFail"
+check "(milestone-complete, lock failure) census still completes (planned_issues= line present) when the lock file can't be opened" bash -c \
+  'printf "%s\n" "$1" | grep -q "^planned_issues="' _ "$outLockFail"
+
+# ---------------------------------------------------------------------------
+# sort -V regression lock (issue #174 follow-up): two open milestones titled
+# "v1.9" and "v1.10", where LEXICAL and VERSION order genuinely DIVERGE
+# (lexically "v1.10" < "v1.9" since '1' < '9' at the third character; only
+# `sort -V`'s numeric-aware comparison puts v1.9 first). Each has its own
+# qualifying planned+module candidate -- issue 15 -> v1.9, issue 16 -> v1.10,
+# fed to the fake `api` stub in v1.10-first order so a correct `sort -V`
+# inside loop-census.sh is what has to reorder them, not accidental input
+# order. If the "V" modifier were ever dropped from the `sort -k2,2V` call,
+# plain lexical sort would pick v1.10 first and this whole block would flip.
+# ---------------------------------------------------------------------------
+dirSortV="$work/milestone-sort-v"
+build_milestone_fixture "$dirSortV"
+cat > "$dirSortV/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.10\t1\t0\n'
+    printf '2\tv1.9\t1\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '15\tplanned,module:test\tv1.9\tLower-version candidate\n'
+          printf '16\tplanned,module:test\tv1.10\tHigher-version candidate\n'
+        else
+          printf '15\n16\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirSortV/.claude/scripts/bot-gh.sh"
+outSortV="$(env -u GATES_FILE bash "$dirSortV/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(sort -V regression) milestone=v1.9 (lower VERSION wins over lexically-earlier-looking v1.10)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=v1.9"' _ "$outSortV"
+check "(sort -V regression) advance_ready=15 (v1.9's candidate), not issue 16 (v1.10)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=15"' _ "$outSortV"
+check "(sort -V regression) issue 16 (out-of-scope v1.10 candidate) is never detailed" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^issue=16 "' _ "$outSortV"
+
+# ---------------------------------------------------------------------------
+# space-in-title coverage (issue #174 follow-up): milestone titles are
+# free-form ("Sprint 1", not just "vX.Y" strings) -- the header comment
+# explicitly cites "Sprint 1" < "Sprint 2" as supported. Confirm a spaced
+# title round-trips correctly through both TSVs (jq's @tsv escapes embedded
+# whitespace-adjacent characters safely; a title is still one field) and that
+# exact-match milestone scoping works unchanged. ---
+dirSpaceTitle="$work/milestone-space-title"
+build_milestone_fixture "$dirSpaceTitle"
+cat > "$dirSpaceTitle/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tSprint 1\t1\t0\n'
+    printf '2\tSprint 2\t1\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '25\tplanned,module:test\tSprint 1\tSprint-1 candidate\n'
+          printf '26\tplanned,module:test\tSprint 2\tSprint-2 candidate\n'
+        else
+          printf '25\n26\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirSpaceTitle/.claude/scripts/bot-gh.sh"
+outSpaceTitle="$(env -u GATES_FILE bash "$dirSpaceTitle/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(space-in-title) milestone=Sprint 1 (spaced title survives both TSV round-trips intact)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=Sprint 1"' _ "$outSpaceTitle"
+check "(space-in-title) advance_ready=25 (Sprint 1's candidate), not issue 26 (Sprint 2)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=25"' _ "$outSpaceTitle"
+check "(space-in-title) issue 26 (out-of-scope Sprint 2 candidate) is never detailed" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^issue=26 "' _ "$outSpaceTitle"
+
+# ---------------------------------------------------------------------------
+# never-populated guard negative test (issue #174 follow-up): a milestone
+# REST stub reports open_issues==0 AND closed_issues==0 -- brand-new, never
+# populated with any issues at all -- with no candidates targeting it. The
+# milestone-complete guard requires closed_issues>=1 (genuinely drained)
+# alongside open_issues==0, so this must log ZERO milestone-complete events;
+# a guard that fired on open==0 alone (ignoring closed>=1) would wrongly
+# treat "never populated" as "complete".
+# ---------------------------------------------------------------------------
+dirNeverPop="$work/milestone-never-populated"
+build_milestone_fixture "$dirNeverPop"
+cat > "$dirNeverPop/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv3.0\t0\t0\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list) : ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirNeverPop/.claude/scripts/bot-gh.sh"
+eventsNeverPop="$work/milestone-never-populated-events.jsonl"
+: > "$eventsNeverPop"
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsNeverPop" bash "$dirNeverPop/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsNeverPop" bash "$dirNeverPop/.claude/scripts/loop-census.sh" "acme/repo" >/dev/null
+
+check "(never-populated guard) never-populated milestone (open=0, closed=0) logs zero milestone-complete events" bash -c \
+  '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 0 ]' _ "$eventsNeverPop"
+
+# ---------------------------------------------------------------------------
+# un-drained milestone negative test (issue #174 follow-up): an OPEN
+# milestone (open_issues>0) genuinely in scope -- it has its own qualifying
+# planned+module candidate, so milestone= is non-vacuous (this isn't just an
+# empty/fallback state) -- yet still un-drained. The milestone-complete guard
+# must not fire: zero events logged while the milestone is still in play.
+# ---------------------------------------------------------------------------
+dirUndrained="$work/milestone-undrained"
+build_milestone_fixture "$dirUndrained"
+cat > "$dirUndrained/.claude/scripts/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  api)
+    printf '1\tv1.0\t2\t1\n'
+    ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo 0
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '60\tplanned,module:test\tv1.0\tIn-play candidate\n'
+        else
+          printf '60\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirUndrained/.claude/scripts/bot-gh.sh"
+eventsUndrained="$work/milestone-undrained-events.jsonl"
+: > "$eventsUndrained"
+outUndrained="$(env -u GATES_FILE CLAUDE_EVENTS_FILE="$eventsUndrained" bash "$dirUndrained/.claude/scripts/loop-census.sh" "acme/repo")"
+
+check "(un-drained) milestone=v1.0 genuinely in scope (non-vacuous -- has its own qualifying candidate)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "milestone=v1.0"' _ "$outUndrained"
+check "(un-drained) advance_ready=60 (the in-scope milestone's qualifying candidate)" bash -c \
+  'printf "%s\n" "$1" | grep -qx "advance_ready=60"' _ "$outUndrained"
+check "(un-drained) zero milestone-complete events logged (milestone still open, not genuinely drained)" bash -c \
+  '[ "$(grep -c "\"phase\":\"milestone-complete\"" "$1")" -eq 0 ]' _ "$eventsUndrained"
+
+# ---------------------------------------------------------------------------
+# no-leak assertion for the truly-milestone-less path (issue #174 follow-up):
+# reuses fixture1's ALREADY-captured $out (its bot-gh.sh has no `api` case at
+# all -- an unhandled `gh api ...` call falls into the catch-all `exit 1`,
+# exactly the "no api stub" shape this check calls for). The existing
+# `grep -qx` positive checks above only assert specific lines are PRESENT;
+# they would not catch an EXTRA leaked `milestone=`/`milestone_open=` line
+# sitting elsewhere in the same output, so this asserts their absence
+# directly.
+# ---------------------------------------------------------------------------
+check "(no-leak) pre-milestone fixture (no api stub) never leaks a milestone= line" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^milestone="' _ "$out"
+check "(no-leak) pre-milestone fixture (no api stub) never leaks a milestone_open= line" bash -c \
+  '! printf "%s\n" "$1" | grep -q "^milestone_open="' _ "$out"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
