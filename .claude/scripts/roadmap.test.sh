@@ -170,6 +170,14 @@ check "empty fixtures dir renders 'No unmilestoned feedback issues'" bash -c 'pr
 # 4. gh/network-unavailable degrade path: ROADMAP_GH_BIN stubbed to fail every
 #    call. Must still exit 0 and render "unavailable" placeholders instead of
 #    crashing (mirrors cockpit.sh's own degrade contract).
+#    NOTE (issue #175 review finding #5): unlike every other case in this
+#    suite, this one does NOT pass --fixtures, so roadmap.sh's branch-listing
+#    step falls through to a REAL, un-stubbed `git -C "$root" branch -a
+#    --list` against this actual checkout (there is no ROADMAP_BRANCHES_BIN
+#    seam to stub it, only ROADMAP_GH_BIN for milestones/issues/PRs). This is
+#    harmless -- read-only, no network, no mutation -- but it does mean this
+#    one assertion isn't fully hermetic; called out here rather than adding a
+#    new stub seam just for this.
 # ---------------------------------------------------------------------------
 fail_gh="$work/fail-gh.sh"
 cat > "$fail_gh" <<'EOF'

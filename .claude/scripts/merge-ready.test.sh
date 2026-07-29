@@ -8,6 +8,18 @@
 # comment, `pr merge`) that flows through the real needs-human.sh seam this
 # script sources.
 #
+# Scenarios K/L/M (issue #175 review finding #2) additionally drive the
+# post-merge roadmap commit/push leg with a REAL local git repo + a local
+# bare "origin" remote (the same hermetic pattern worktree.test.sh /
+# release.test.sh / worktree-cleanup.test.sh / loop-census.test.sh already
+# use for exercising a real git push) instead of the "no eligible local
+# checkout" stub path scenarios H/I take: K asserts a real diff is committed
+# AND pushed to the bare origin; L asserts a footer-only (timestamp) diff is
+# correctly treated as "no changes" and never committed (issue #175 finding
+# #3); M asserts a REJECTED push (simulated via a bare-repo pre-receive hook)
+# rolls local $base back so it is never left diverged from origin (issue
+# #175 finding #1b), while the merge itself still succeeds.
+#
 # Issue #169: needs-human.sh's label reads/writes now go through `gh api`
 # (REST) instead of `gh pr edit --*-label`/`gh pr view --json labels`. The
 # fake bot-gh.sh below simulates GitHub's own label state via a marker FILE
@@ -634,6 +646,261 @@ outJ="$(env -u GATES_FILE bash "$dirJ/.claude/scripts/merge-ready.sh" "acme/repo
 
 check "J: verdict is skip:no-owner-review (no merge happened)" bash -c 'printf "%s\n" "$1" | grep -q "\"reason\":\"no-owner-review\""' _ "$outJ"
 check "J: roadmap.sh was NEVER invoked on a skip-only run (no marker file)" bash -c '[ ! -f "$1" ]' _ "$roadmap_markerJ"
+
+# ---------------------------------------------------------------------------
+# init_git_repo_fixture <fixture-dir> <origin-bare-dir>: turns a fixture dir
+# (already created via new_fixture) into a REAL git repo on branch "main"
+# (repo-LOCAL user.email/user.name only -- never touches global git config)
+# with a local bare "origin" remote at <origin-bare-dir>. Does not commit or
+# push anything itself -- each K/L/M scenario below seeds + pushes its own
+# initial commit so it controls exactly what's "already committed" before
+# merge-ready.sh runs.
+# ---------------------------------------------------------------------------
+init_git_repo_fixture() {
+  local dir="$1" origin_bare="$2"
+  git init -q -b main "$dir"
+  git -C "$dir" config user.email "test@example.com"
+  git -C "$dir" config user.name "Test"
+  git init -q --bare -b main "$origin_bare"
+  git -C "$dir" remote add origin "$origin_bare"
+}
+
+# ---------------------------------------------------------------------------
+# K. Real post-merge roadmap COMMIT + PUSH (issue #175 review finding #2): a
+#    real git repo, on main, clean, in sync with a local bare "origin" -- the
+#    fixture's roadmap.sh stub writes a docs/ROADMAP.md that doesn't exist in
+#    HEAD yet, so the change-detection must see a real diff. Asserts the
+#    commit lands locally AND is actually pushed to the bare origin's main
+#    ref (not just a stubbed/skipped path like scenarios H/I).
+# ---------------------------------------------------------------------------
+dirK="$(new_fixture scenarioK)"
+originK="$work/scenarioK-origin.git"
+init_git_repo_fixture "$dirK" "$originK"
+printf 'seed\n' > "$dirK/seed.txt"
+git -C "$dirK" add seed.txt
+git -C "$dirK" commit -q -m "seed"
+git -C "$dirK" push -q origin main
+
+cat > "$dirK/.claude/scripts/roadmap.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--write" ]; then
+  mkdir -p docs
+  cat > docs/ROADMAP.md <<'ROADMAP'
+# Roadmap
+
+- issue #1 open
+
+---
+_Generated 2026-01-01T00:00:00Z · commit `abc1234`_
+ROADMAP
+fi
+exit 0
+EOF
+chmod +x "$dirK/.claude/scripts/roadmap.sh"
+gh_logK="$work/scenarioK-gh.log"
+cat > "$dirK/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logK"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "20"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":20,"title":"Ship widget","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-20-widget","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;  # every REST call here is a needs_human_clear DELETE no-op
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirK/.claude/scripts/bot-gh.sh"
+outK="$( (cd "$dirK" && env -u GATES_FILE bash .claude/scripts/merge-ready.sh "acme/repo") 2>&1 )"
+
+check "K: PR merged" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outK"
+check "K: roadmap_regen reports committed:true" bash -c 'printf "%s\n" "$1" | grep -q "roadmap_regen.*\"committed\":true"' _ "$outK"
+check "K: the regen commit actually landed locally on main" bash -c '
+  [ "$(git -C "$1" log -1 --pretty=%s)" = "chore: regenerate docs/ROADMAP.md [skip ci]" ]
+' _ "$dirK"
+check "K: the push actually reached the bare origin (main ref advanced)" bash -c '
+  [ "$(git -C "$1" log -1 --pretty=%s refs/heads/main)" = "chore: regenerate docs/ROADMAP.md [skip ci]" ]
+' _ "$originK"
+check "K: the bare origin content matches the regenerated roadmap" bash -c '
+  git -C "$1" show refs/heads/main:docs/ROADMAP.md | grep -q "issue #1 open"
+' _ "$originK"
+check "K: local main and origin main are in sync after the push" bash -c '
+  [ "$(git -C "$1" rev-parse main)" = "$(git -C "$2" rev-parse refs/heads/main)" ]
+' _ "$dirK" "$originK"
+
+# ---------------------------------------------------------------------------
+# L. "No changes" path is taken when the regenerated roadmap is semantically
+#    UNCHANGED (issue #175 review finding #3): docs/ROADMAP.md is already
+#    committed (and pushed) with some body + a footer timestamp; the
+#    fixture's roadmap.sh stub regenerates the SAME body but a DIFFERENT
+#    footer timestamp/commit line, mimicking roadmap.sh's real footer churn.
+#    Asserts NO commit is made and the bare origin's main ref never moves.
+# ---------------------------------------------------------------------------
+dirL="$(new_fixture scenarioL)"
+originL="$work/scenarioL-origin.git"
+init_git_repo_fixture "$dirL" "$originL"
+mkdir -p "$dirL/docs"
+cat > "$dirL/docs/ROADMAP.md" <<'EOF'
+# Roadmap
+
+- issue #1 open
+
+---
+_Generated 2026-01-01T00:00:00Z · commit `seed0001`_
+EOF
+git -C "$dirL" add docs/ROADMAP.md
+git -C "$dirL" commit -q -m "chore: regenerate docs/ROADMAP.md [skip ci]"
+git -C "$dirL" push -q origin main
+
+cat > "$dirL/.claude/scripts/roadmap.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--write" ]; then
+  mkdir -p docs
+  cat > docs/ROADMAP.md <<'ROADMAP'
+# Roadmap
+
+- issue #1 open
+
+---
+_Generated 2026-06-06T12:00:00Z · commit `deadbee1`_
+ROADMAP
+fi
+exit 0
+EOF
+chmod +x "$dirL/.claude/scripts/roadmap.sh"
+gh_logL="$work/scenarioL-gh.log"
+cat > "$dirL/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logL"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "21"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":21,"title":"Ship gizmo","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-21-gizmo","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;  # every REST call here is a needs_human_clear DELETE no-op
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirL/.claude/scripts/bot-gh.sh"
+preShaL="$(git -C "$originL" rev-parse refs/heads/main)"
+outL="$( (cd "$dirL" && env -u GATES_FILE bash .claude/scripts/merge-ready.sh "acme/repo") 2>&1 )"
+postShaL="$(git -C "$originL" rev-parse refs/heads/main)"
+
+check "L: PR merged" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outL"
+check "L: roadmap_regen reports committed:false, reason no changes (footer-only diff ignored)" bash -c '
+  printf "%s\n" "$1" | grep -q "roadmap_regen.*\"committed\":false" && printf "%s\n" "$1" | grep -q "no changes"
+' _ "$outL"
+check "L: no new commit was made locally (still just the single seeded roadmap commit)" bash -c '
+  [ "$(git -C "$1" log --oneline | wc -l)" -eq 1 ]
+' _ "$dirL"
+check "L: the bare origin main ref never moved" bash -c '[ "$1" = "$2" ]' _ "$preShaL" "$postShaL"
+
+# ---------------------------------------------------------------------------
+# M. Push FAILURE rolls back local $base so it is never left diverged from
+#    origin (issue #175 review finding #1b): the bare origin's pre-receive
+#    hook rejects every push (simulating branch protection / offline), so
+#    the regen commit is created locally but the push fails. Asserts (a) the
+#    merge itself still succeeds and merge-ready.sh still exits 0, and (b)
+#    local main ends up IDENTICAL to origin main (rolled back), never a
+#    dangling local commit diverging main from origin.
+# ---------------------------------------------------------------------------
+dirM="$(new_fixture scenarioM)"
+originM="$work/scenarioM-origin.git"
+init_git_repo_fixture "$dirM" "$originM"
+printf 'seed\n' > "$dirM/seed.txt"
+git -C "$dirM" add seed.txt
+git -C "$dirM" commit -q -m "seed"
+git -C "$dirM" push -q origin main
+mkdir -p "$originM/hooks"
+cat > "$originM/hooks/pre-receive" <<'EOF'
+#!/usr/bin/env bash
+echo "remote: rejected (branch protection)" >&2
+exit 1
+EOF
+chmod +x "$originM/hooks/pre-receive"
+
+cat > "$dirM/.claude/scripts/roadmap.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--write" ]; then
+  mkdir -p docs
+  cat > docs/ROADMAP.md <<'ROADMAP'
+# Roadmap
+
+- issue #1 open
+
+---
+_Generated 2026-01-01T00:00:00Z · commit `abc1234`_
+ROADMAP
+fi
+exit 0
+EOF
+chmod +x "$dirM/.claude/scripts/roadmap.sh"
+gh_logM="$work/scenarioM-gh.log"
+cat > "$dirM/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logM"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "22"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":22,"title":"Ship sprocket","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-22-sprocket","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;  # every REST call here is a needs_human_clear DELETE no-op
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirM/.claude/scripts/bot-gh.sh"
+preShaM="$(git -C "$originM" rev-parse refs/heads/main)"
+set +e
+outM="$( (cd "$dirM" && env -u GATES_FILE bash .claude/scripts/merge-ready.sh "acme/repo") 2>&1 )"
+rcM=$?
+set -e
+postShaM="$(git -C "$originM" rev-parse refs/heads/main)"
+localShaM="$(git -C "$dirM" rev-parse main)"
+
+check "M: merge-ready.sh exits 0 despite the roadmap push being rejected" bash -c '[ "$1" -eq 0 ]' _ "$rcM"
+check "M: PR still reported merged (roadmap push failure did not roll back the merge)" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outM"
+check "M: roadmap_regen surfaces the rolled-back commit/push failure" bash -c 'printf "%s\n" "$1" | grep -q "commit or push failed (rolled back)"' _ "$outM"
+check "M: the bare origin main ref never moved (push was rejected)" bash -c '[ "$1" = "$2" ]' _ "$preShaM" "$postShaM"
+check "M: local main was rolled back and is NOT diverged from origin main" bash -c '[ "$1" = "$2" ]' _ "$localShaM" "$postShaM"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

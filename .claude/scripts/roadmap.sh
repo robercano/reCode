@@ -21,9 +21,18 @@
 # companion" — that's exactly the census-invisible inbox state before owner
 # triage assigns a milestone).
 #
-# STATE DERIVATION mirrors loop-census.sh's own ADVANCE/in_flight logic (never
-# reimplemented, just re-applied here) so an issue's roadmap state never
-# disagrees with what the loop itself would report:
+# STATE DERIVATION follows the SAME shape as loop-census.sh's own
+# ADVANCE/in_flight logic (closed/PR-open/in_flight/open), re-applied here so
+# an issue's roadmap state usually agrees with what the loop would report.
+# NOTE (issue #175 review finding #4): this is a simplified re-application,
+# not a byte-for-byte port -- it does NOT carry census's stale-merged-remote
+# refinement (loop-census.sh ignores a remote-only branch whose PR already
+# merged; see loop-census.sh's own header). A branch here is "existing" if
+# ANY matching local/remote-tracking ref is present, full stop. In practice
+# this can only over-report `in_flight` for an issue whose old PR merged but
+# whose remote-tracking ref hasn't been pruned yet -- never under-report, and
+# never affects census/loop-tick's own ADVANCE decisions (this script only
+# renders a read-only snapshot, it never feeds back into the loop):
 #   closed          — issue.state == CLOSED
 #   PR#N open       — an OPEN PR's headRefName (or title "#N" mention)
 #                     matches this issue number
@@ -266,8 +275,9 @@ function parseBlocking(body) {
   }
 }
 
-// ---- State derivation (mirrors loop-census.sh's own ADVANCE/in_flight logic,
-// re-applied here rather than reimplemented from scratch) -------------------
+// ---- State derivation (same SHAPE as loop-census.sh's own ADVANCE/in_flight
+// logic, re-applied here -- NOT the stale-merged-remote refinement, see this
+// script's own header, issue #175 review finding #4) ------------------------
 function findPRForIssue(n) {
   for (const pr of prs) {
     const branch = String(pr.headRefName || "");
@@ -280,6 +290,10 @@ function findPRForIssue(n) {
   }
   return null;
 }
+// Any matching local OR remote-tracking ref counts as "existing" -- does NOT
+// apply census's stale-merged-remote refinement (a remote-only ref whose PR
+// already merged is still "existing" here), so this can over-report
+// in_flight for a stale ref; see this script's header, issue #175 finding #4.
 function branchExistsForIssue(n) {
   const re = /(?:^|\/)(?:remotes\/[^/]+\/)?(?:feat|fix|work)\/issue-(\d+)(?:[-_]|$)/i;
   return branches.some((b) => {
