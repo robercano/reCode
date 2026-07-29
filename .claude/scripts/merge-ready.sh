@@ -234,5 +234,55 @@ if [ "$merged" -gt 0 ]; then
   else
     echo "{\"local_sync\":\"skip\",\"reason\":\"fetch or fast-forward failed (diverged/offline?)\"}"
   fi
+
+  # Post-merge roadmap regen (issue #175): docs/ROADMAP.md is a GENERATED
+  # snapshot of open milestones/issues/PRs (see roadmap.sh's own header +
+  # docs/USAGE.md's "Roadmap" section) — regenerating it right after a merge
+  # keeps it fresh without the owner remembering to re-run it by hand.
+  #
+  # STRICTLY best-effort and NON-FATAL: this whole block is wrapped in its own
+  # subshell + `|| true` so ANY failure inside it (missing roadmap.sh, a
+  # generator crash, no local git checkout, an unclean tree, an offline
+  # push) degrades to a `"roadmap_regen":"skip"` line on STDERR — it must
+  # NEVER cause merge-ready.sh to report a non-zero exit or unwind a merge
+  # that already succeeded. `[ -f "$script_dir/roadmap.sh" ]` also makes this
+  # a no-op when roadmap.sh isn't present at all (nothing to regenerate).
+  #
+  # Regeneration itself is invoked unconditionally (independent of the
+  # local_sync outcome above) so a stubbed/failing roadmap.sh is always
+  # exercised — see merge-ready.test.sh. The COMMIT+PUSH step, however, only
+  # runs when $wt is a real checkout sitting on $base with a clean tree (the
+  # same safety rails local_sync already applies above): committing to a
+  # detached/foreign branch, or on top of uncommitted work, would be unsafe.
+  # The commit/push themselves are plain `git` (the repo OWNER's auth, same
+  # as every other git operation in this script) — only roadmap.sh's OWN gh
+  # calls (issue/PR/milestone reads) go through bot-gh.sh.
+  if [ -f "$script_dir/roadmap.sh" ]; then
+    (
+      set +e
+      regen_err="$(mktemp "${TMPDIR:-/tmp}/roadmap-regen.XXXXXX.err")"
+      if ! GATES_FILE="$gates_rel" bash "$script_dir/roadmap.sh" --write >/dev/null 2>"$regen_err"; then
+        echo "{\"roadmap_regen\":\"skip\",\"reason\":\"generator failed: $(tr '\n' ' ' <"$regen_err" | head -c 200)\"}" >&2
+        rm -f "$regen_err"
+        exit 0
+      fi
+      rm -f "$regen_err"
+      if [ -z "$wt" ] || [ "$cur" != "$base" ]; then
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"no eligible local checkout on $base\"}"
+        exit 0
+      fi
+      if git -C "$wt" diff --quiet -- docs/ROADMAP.md 2>/dev/null && git -C "$wt" diff --cached --quiet -- docs/ROADMAP.md 2>/dev/null; then
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"no changes\"}"
+        exit 0
+      fi
+      if git -C "$wt" add docs/ROADMAP.md \
+         && git -C "$wt" commit -q -m "chore: regenerate docs/ROADMAP.md [skip ci]" \
+         && git -C "$wt" push -q origin "HEAD:$base"; then
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":true,\"branch\":\"$base\"}"
+      else
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"commit or push failed\"}" >&2
+      fi
+    ) || echo "{\"roadmap_regen\":\"skip\",\"reason\":\"unexpected error\"}" >&2
+  fi
 fi
 echo "=== merge-ready: merged=$merged skipped=$skipped ==="

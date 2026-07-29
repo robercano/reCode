@@ -478,6 +478,163 @@ check "G3: no merge attempted for PR 16 (absolute-path adapter selection)" \
 check "G3: needs-human label add attempted (REST POST) via absolute-path adapter" \
   grep -qF -- "-X POST repos/acme/repo/issues/16/labels --input -" "$gh_logG3"
 
+# ---------------------------------------------------------------------------
+# H. Post-merge roadmap regen (issue #175) is INVOKED on a successful merge.
+#    The fixture's roadmap.sh is a stub that touches a marker file (proving
+#    invocation) whenever it's called with --write, then exits 0. Reuses the
+#    same scenario-C-shaped MERGE fixture (owner-approved, CI-green PR).
+# ---------------------------------------------------------------------------
+dirH="$(new_fixture scenarioH)"
+gh_logH="$work/scenarioH-gh.log"
+roadmap_markerH="$work/scenarioH-roadmap-invoked.marker"
+cat > "$dirH/.claude/scripts/roadmap.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "--write" ]; then
+  touch "$roadmap_markerH"
+fi
+exit 0
+EOF
+chmod +x "$dirH/.claude/scripts/roadmap.sh"
+cat > "$dirH/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logH"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "17"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":17,"title":"Ship roadmap-adjacent feature","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-17-thing","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;  # every REST call here is a needs_human_clear DELETE no-op
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirH/.claude/scripts/bot-gh.sh"
+outH="$(env -u GATES_FILE bash "$dirH/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+check "H: PR merged" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outH"
+check "H: roadmap.sh --write was actually invoked (marker file created)" test -f "$roadmap_markerH"
+check "H: output reports roadmap_regen generated" bash -c 'printf "%s\n" "$1" | grep -q "\"roadmap_regen\":\"generated\""' _ "$outH"
+
+# ---------------------------------------------------------------------------
+# I. Post-merge roadmap regen FAILURE is NON-FATAL: the fixture's roadmap.sh
+#    always exits 1 (simulating a generator crash). The merge itself must
+#    still be reported as merged, and the overall merge-ready.sh invocation
+#    must still exit 0 -- a broken roadmap generator must never break, abort,
+#    or roll back a merge that already succeeded.
+# ---------------------------------------------------------------------------
+dirI="$(new_fixture scenarioI)"
+gh_logI="$work/scenarioI-gh.log"
+cat > "$dirI/.claude/scripts/roadmap.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "boom: simulated roadmap generator crash" >&2
+exit 1
+EOF
+chmod +x "$dirI/.claude/scripts/roadmap.sh"
+cat > "$dirI/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logI"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "18"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":18,"title":"Ship another feature","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-18-thing","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirI/.claude/scripts/bot-gh.sh"
+set +e
+outI="$(env -u GATES_FILE bash "$dirI/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+rcI=$?
+set -e
+
+check "I: merge-ready.sh exits 0 despite the roadmap generator crashing" bash -c '[ "$1" -eq 0 ]' _ "$rcI"
+check "I: PR still reported merged (roadmap failure did not roll back the merge)" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outI"
+check "I: roadmap_regen skip reason surfaced (generator failed)" bash -c 'printf "%s\n" "$1" | grep -q "roadmap_regen.*generator failed"' _ "$outI"
+
+# ---------------------------------------------------------------------------
+# J. Roadmap regen is NEVER invoked on a SKIP-only run (no merge happened at
+#    all) -- it lives inside the `if [ "$merged" -gt 0 ]` post-merge block,
+#    same as the existing local_sync leg. Reuses scenario A's SKIP:no-owner-
+#    review shape with a marker-touching roadmap.sh stub, proving the marker
+#    stays absent.
+# ---------------------------------------------------------------------------
+dirJ="$(new_fixture scenarioJ)"
+gh_logJ="$work/scenarioJ-gh.log"
+roadmap_markerJ="$work/scenarioJ-roadmap-invoked.marker"
+labeled_markerJ="$work/scenarioJ-labeled.marker"
+cat > "$dirJ/.claude/scripts/roadmap.sh" <<EOF
+#!/usr/bin/env bash
+touch "$roadmap_markerJ"
+exit 0
+EOF
+chmod +x "$dirJ/.claude/scripts/roadmap.sh"
+cat > "$dirJ/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logJ"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "19"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":19,"title":"Add widget","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-19-widget","mergeable":"MERGEABLE","reviews":[],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}]}
+JSON
+        ;;
+      comment) : ;;
+      merge) exit 1 ;;
+      *) : ;;
+    esac
+    ;;
+  api)
+    case "\$*" in
+      *"-X POST"*"/issues/19/labels --input -")
+        touch "$labeled_markerJ"
+        ;;
+      *"-q .labels[].name"*)
+        [ -f "$labeled_markerJ" ] && printf 'needs-human\n'
+        ;;
+      *) : ;;
+    esac
+    ;;
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirJ/.claude/scripts/bot-gh.sh"
+outJ="$(env -u GATES_FILE bash "$dirJ/.claude/scripts/merge-ready.sh" "acme/repo" 2>&1)"
+
+check "J: verdict is skip:no-owner-review (no merge happened)" bash -c 'printf "%s\n" "$1" | grep -q "\"reason\":\"no-owner-review\""' _ "$outJ"
+check "J: roadmap.sh was NEVER invoked on a skip-only run (no marker file)" bash -c '[ ! -f "$1" ]' _ "$roadmap_markerJ"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "merge-ready.test.sh: PASS ($ok checks)"
