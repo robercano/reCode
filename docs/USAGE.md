@@ -537,6 +537,30 @@ micro-milestone containing just that one bug issue, label it `planned`, let the 
 cut the patch release through the exact same `Release vX.Y.Z+1` → `release.sh` machinery above (its
 "Blocked by" list will just be the one bug issue).
 
+**`/orchestrator:feedback` — the five-second consumer→inbox capture path (issue #177).** The rollout &
+feedback companion above assumes someone remembers to go file something; `/orchestrator:feedback "<one-line
+description>" [--severity SEV]` is the low-friction complement — run it from INSIDE a consumer repo
+(reDeploy, reDeFi, ...) while the owner is actually using the plugin there, and it lands the same triage-inbox
+issue in `robercano/reCode` without breaking flow. It asks for only two things — the description, and an
+optional severity suggestion — and autofills everything else:
+- **origin label** — derived from the consumer repo's `origin` git remote (case-insensitive `redeploy` →
+  `from:redeploy`, `redefi` → `from:redefi`; neither match still files the issue labelled just `feedback`,
+  with the raw origin repo slug always noted in the body regardless),
+- **installed plugin version** — read from the plugin cache manifest
+  (`${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json`, falling back to a local-clone install's
+  `.claude/.claude-plugin/plugin.json`; degrades to `unknown` rather than crashing),
+- **body template** — `Observed` / `Expected` / `Severity suggestion` sections plus an origin-repo +
+  plugin-version trailer,
+- **labels** — `feedback` + whichever `from:*` label matched. Same as the rollout companion issue,
+  deliberately **no milestone, no `planned` label** — it lands in the same census-invisible triage inbox
+  above, for the owner to triage later.
+
+Implemented as `.claude/skills/feedback/SKILL.md` + `.claude/skills/feedback/feedback.sh` — see the skill
+for the full consumer-repo guard definition (no origin remote / origin is reCode itself / plugin not
+installed here all degrade to a clear error and file nothing, never a partial issue) and the one deliberate
+place in this whole plugin that calls **plain `gh`** instead of `bot-gh.sh`: the issue being filed genuinely
+IS the owner's own feedback, so there is no bot-authorship-for-approval problem to route around.
+
 ## Roadmap (`docs/ROADMAP.md`, issue #175)
 
 **`docs/ROADMAP.md` is GENERATED — never hand-edit it.** The single source of truth is GitHub itself (open
