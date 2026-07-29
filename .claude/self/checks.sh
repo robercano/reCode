@@ -34,6 +34,118 @@ do_build() {
     }
   ' || rc=1
   [ "$rc" -eq 0 ] && echo "build: JSON configs valid + adapters well-shaped"
+  do_hooks_parity || rc=1
+  return "$rc"
+}
+
+# do_hooks_parity (issue #140) — the repo-local .claude/settings.json (self-
+# hosted sessions, $CLAUDE_PROJECT_DIR paths) and the shipped
+# .claude/hooks/hooks.json (consumers, ${CLAUDE_PLUGIN_ROOT} paths) hand-
+# duplicate the same hook set under two different path prefixes. Nothing
+# checked they stayed in sync, which is how a hook ended up reCode-only for
+# weeks (empty cockpit workers panel in every consumer). This normalizes
+# both files' `.hooks` into (event, matcher, command) triples — stripping the
+# environment-specific path prefix so the two forms collapse to the same
+# value — and fails on any divergence that isn't explicitly allowlisted as
+# deliberately self-only.
+#
+# File paths are overridable via HOOKS_SETTINGS_FILE / HOOKS_PLUGIN_FILE so
+# tests can point this at hermetic temp-dir fixtures instead of the real repo
+# files.
+do_hooks_parity() {
+  local rc=0
+  local settings_file="${HOOKS_SETTINGS_FILE:-.claude/settings.json}"
+  local plugin_file="${HOOKS_PLUGIN_FILE:-.claude/hooks/hooks.json}"
+
+  if [ ! -f "$settings_file" ]; then echo "build: hooks-parity — missing $settings_file"; return 1; fi
+  if [ ! -f "$plugin_file" ]; then echo "build: hooks-parity — missing $plugin_file"; return 1; fi
+
+  node -e '
+    const fs = require("fs");
+    const settingsFile = process.argv[1];
+    const pluginFile = process.argv[2];
+
+    // Deliberate self-only hooks: present in settings.json (self-hosted repo)
+    // but intentionally absent from hooks.json (shipped to consumers).
+    // Key format: "event|matcher|normalizedCommand".
+    const ALLOWLIST = new Set([
+      // log-worker-tool.sh mirrors a worker session'"'"'s tool calls into the
+      // cockpit workers panel. That panel — and the whole notion of a
+      // worker session to mirror — only exists in reCode'"'"'s own
+      // self-hosted orchestration loop; consumer projects have no cockpit
+      // worker-session view to feed, so this hook is deliberately
+      // self-only and must never be added to hooks.json.
+      "PostToolUse|Bash|Edit|Write|bash scripts/log-worker-tool.sh",
+    ]);
+
+    // Collapse the two environment-specific path prefixes
+    // ($CLAUDE_PROJECT_DIR/.claude/... in settings.json, quoted, vs.
+    // ${CLAUDE_PLUGIN_ROOT}/... in hooks.json, unquoted) down to the same
+    // plugin-root-relative form, and drop any remaining quoting, so
+    // "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate.sh\" lint" and
+    // "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate.sh lint" both normalize to
+    // "bash scripts/gate.sh lint".
+    function normalizeCommand(cmd) {
+      return cmd
+        .replace(/"\$CLAUDE_PROJECT_DIR\/\.claude\//g, "")
+        .replace(/\$CLAUDE_PROJECT_DIR\/\.claude\//g, "")
+        .replace(/\$\{CLAUDE_PLUGIN_ROOT\}\//g, "")
+        .replace(/"/g, "")
+        .trim()
+        .replace(/\s+/g, " ");
+    }
+
+    function triples(file) {
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      const hooksObj = data.hooks || {};
+      const out = [];
+      for (const [event, entries] of Object.entries(hooksObj)) {
+        for (const entry of entries || []) {
+          const matcher = entry.matcher || "";
+          for (const h of entry.hooks || []) {
+            const cmd = normalizeCommand(h.command || "");
+            out.push({ event, matcher, cmd, key: `${event}|${matcher}|${cmd}` });
+          }
+        }
+      }
+      return out;
+    }
+
+    const settingsTriples = triples(settingsFile);
+    const pluginTriples = triples(pluginFile);
+    const settingsKeys = new Set(settingsTriples.map((t) => t.key));
+    const pluginKeys = new Set(pluginTriples.map((t) => t.key));
+
+    let failed = false;
+
+    // In settings.json (self) but not hooks.json (consumers) — OK only if
+    // explicitly allowlisted as deliberately self-only.
+    for (const t of settingsTriples) {
+      if (!pluginKeys.has(t.key) && !ALLOWLIST.has(t.key)) {
+        console.error(
+          `build: hooks-parity — event="${t.event}" matcher="${t.matcher}" cmd="${t.cmd}" ` +
+          `present in ${settingsFile} but missing from ${pluginFile} (not in allowlist)`
+        );
+        failed = true;
+      }
+    }
+
+    // In hooks.json (consumers) but not settings.json (self) — never
+    // allowed: every hook shipped to consumers must also run self-hosted.
+    for (const t of pluginTriples) {
+      if (!settingsKeys.has(t.key)) {
+        console.error(
+          `build: hooks-parity — event="${t.event}" matcher="${t.matcher}" cmd="${t.cmd}" ` +
+          `present in ${pluginFile} but missing from ${settingsFile}`
+        );
+        failed = true;
+      }
+    }
+
+    if (failed) process.exit(1);
+  ' "$settings_file" "$plugin_file" || rc=1
+
+  [ "$rc" -eq 0 ] && echo "build: hooks parity OK — settings.json and hooks.json hook triples match (mod allowlist)"
   return "$rc"
 }
 
