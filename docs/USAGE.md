@@ -537,6 +537,38 @@ micro-milestone containing just that one bug issue, label it `planned`, let the 
 cut the patch release through the exact same `Release vX.Y.Z+1` → `release.sh` machinery above (its
 "Blocked by" list will just be the one bug issue).
 
+## Roadmap (`docs/ROADMAP.md`, issue #175)
+
+**`docs/ROADMAP.md` is GENERATED — never hand-edit it.** The single source of truth is GitHub itself (open
+milestones, issue labels/bodies, PR state); the file is a read-only rendering of that data, produced by
+`bash .claude/scripts/roadmap.sh --write`. A manual edit to `docs/ROADMAP.md` survives only until the next
+regeneration, at which point it's silently overwritten — the file itself carries a
+`GENERATED FILE — DO NOT EDIT BY HAND` marker at the very top as a reminder. To change what the roadmap
+shows, change the underlying GitHub state instead: relabel/reassign a milestone, adjust a
+`priority:critical|high|medium|low` label, or edit an issue's "Blocked by #N" line — then re-run the
+generator (or just wait for the next post-merge regen, see below).
+
+**What it renders**, per open milestone (in natural version order — v1.0.0 < v1.2.0 < v1.10.0, not a plain
+string sort):
+- every issue attached to that milestone, each with its priority chip (same label set as the census/cockpit
+  above), a derived **state** — `open` / `in_flight` (a `feat`/`fix`/`work`/issue-`<N>`-\* branch exists, no
+  PR yet) / `PR#N open` / `closed` — mirroring `loop-census.sh`'s own ADVANCE/in_flight logic so the roadmap
+  never disagrees with what the loop itself would report,
+- a Mermaid graph of the "Blocked by" edges among that milestone's issues (the SAME parser `cockpit.sh
+  --parse-blocking` uses — one implementation, reused, not re-derived).
+
+A trailing **Feedback inbox** section lists open `feedback`-labeled issues that carry **no milestone yet** —
+exactly the census-invisible state described in "The rollout & feedback companion" above, before owner
+triage assigns a milestone and turns it into loop-eligible work.
+
+**Regeneration.** `bash .claude/scripts/roadmap.sh --write` regenerates it on demand (default, no `--write`,
+prints the same Markdown to stdout instead — a preview that touches no file). `merge-ready.sh` also calls it
+automatically after every successful merge, best-effort: a roadmap generator failure (missing gh
+auth/network, a crash) is logged to stderr and never blocks, fails, or rolls back the merge that triggered
+it. Every `gh` call the generator makes is REST-only and gh-2.4.0-safe, routed through `bot-gh.sh` like every
+other script in this repo; the regenerated file's own commit/push (when the local checkout is cleanly on the
+base branch) runs as plain `git`, the same as every other git operation in this repo.
+
 ## Merge discipline
 - **`pr-per-agent`** (default): each worker → branch → PR. You (or a merge step) integrate; conflicts surface
   at PR time. Cleanest/auditable.

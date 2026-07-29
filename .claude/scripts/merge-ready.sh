@@ -222,6 +222,13 @@ done
 if [ "$merged" -gt 0 ]; then
   wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   cur="$(git -C "${wt:-.}" symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)"
+  # local_sync_ok (issue #175 review finding #1a): 1 iff the fast-forward
+  # below actually landed, i.e. the checkout was on $base, the WHOLE working
+  # tree was clean, and origin/$base fast-forwarded cleanly (so local $base
+  # is now verified in sync with origin/$base). The post-merge roadmap
+  # commit/push further below reuses this exact flag as its own precondition
+  # instead of re-deriving a weaker, file-scoped check -- see that block.
+  local_sync_ok=0
   if [ -z "$wt" ]; then
     :
   elif [ "$cur" != "$base" ]; then
@@ -231,8 +238,94 @@ if [ "$merged" -gt 0 ]; then
   elif git -C "$wt" fetch --quiet origin "$base" 2>/dev/null \
        && git -C "$wt" merge --ff-only -q "origin/$base" 2>/dev/null; then
     echo "{\"local_sync\":\"ok\",\"branch\":\"$base\",\"head\":\"$(git -C "$wt" rev-parse --short HEAD)\"}"
+    local_sync_ok=1
   else
     echo "{\"local_sync\":\"skip\",\"reason\":\"fetch or fast-forward failed (diverged/offline?)\"}"
+  fi
+
+  # Post-merge roadmap regen (issue #175): docs/ROADMAP.md is a GENERATED
+  # snapshot of open milestones/issues/PRs (see roadmap.sh's own header +
+  # docs/USAGE.md's "Roadmap" section) — regenerating it right after a merge
+  # keeps it fresh without the owner remembering to re-run it by hand.
+  #
+  # STRICTLY best-effort and NON-FATAL: this whole block is wrapped in its own
+  # subshell + `|| true` so ANY failure inside it (missing roadmap.sh, a
+  # generator crash, no local git checkout, an unclean tree, an offline
+  # push) degrades to a `"roadmap_regen":"skip"` line on STDERR — it must
+  # NEVER cause merge-ready.sh to report a non-zero exit or unwind a merge
+  # that already succeeded. `[ -f "$script_dir/roadmap.sh" ]` also makes this
+  # a no-op when roadmap.sh isn't present at all (nothing to regenerate).
+  #
+  # Regeneration itself is invoked unconditionally (independent of the
+  # local_sync outcome above) so a stubbed/failing roadmap.sh is always
+  # exercised — see merge-ready.test.sh. The COMMIT+PUSH step, however, gates
+  # on `local_sync_ok` -- the SAME precondition local_sync itself required
+  # (checkout on $base, WHOLE working tree clean, origin/$base fast-forwarded
+  # in sync) -- not just a docs/ROADMAP.md-only diff: committing on top of
+  # unrelated WIP, or while $base is diverged/offline, would be unsafe.
+  #
+  # Change detection ignores the volatile footer line (issue #175 review
+  # finding #3): roadmap.sh's own footer always changes (timestamp + the
+  # generating commit SHA), so a raw file diff would treat every regen as a
+  # change and commit no-op spam straight onto $base. Comparing the committed
+  # vs regenerated content with that line stripped from both means a
+  # semantically-identical roadmap is correctly treated as "no changes" and
+  # never committed -- the footer itself is still written to disk unstripped.
+  #
+  # The commit/push themselves are plain `git` (the repo OWNER's auth, same
+  # as every other git operation in this script) — only roadmap.sh's OWN gh
+  # calls (issue/PR/milestone reads) go through bot-gh.sh. This is deliberate,
+  # not an oversight: bot-gh.sh exists so PRs are bot-authored (the owner is
+  # then free to approve them); a direct-to-$base commit has no PR and
+  # nothing for the owner to approve, so that approvability concern doesn't
+  # apply here -- using the owner's own git auth (already required for the
+  # ff-only local_sync above) is the correct choice, not a shortcut.
+  #
+  # On push failure (issue #175 review finding #1b): roll back with
+  # `git reset --hard origin/$base` so a rejected/offline push NEVER leaves a
+  # dangling local commit diverging $base from origin (which would otherwise
+  # wedge every future local_sync ff-only forever). Safe specifically because
+  # local_sync_ok guarantees the tree was clean and $base was on origin/$base
+  # immediately before this block ran, so resetting to origin/$base discards
+  # at most the regen commit just made here -- never real owner work.
+  if [ -f "$script_dir/roadmap.sh" ]; then
+    (
+      set +e
+      regen_err="$(mktemp "${TMPDIR:-/tmp}/roadmap-regen.XXXXXX.err")"
+      if ! GATES_FILE="$gates_rel" bash "$script_dir/roadmap.sh" --write >/dev/null 2>"$regen_err"; then
+        echo "{\"roadmap_regen\":\"skip\",\"reason\":\"generator failed: $(tr '\n' ' ' <"$regen_err" | head -c 200)\"}" >&2
+        rm -f "$regen_err"
+        exit 0
+      fi
+      rm -f "$regen_err"
+      if [ "$local_sync_ok" -ne 1 ]; then
+        git -C "$wt" checkout -- docs/ROADMAP.md 2>/dev/null || true
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"local $base not verified in sync with origin (see local_sync)\"}"
+        exit 0
+      fi
+      old_content="$(git -C "$wt" show "HEAD:docs/ROADMAP.md" 2>/dev/null | grep -v '^_Generated ' || true)"
+      new_content="$(grep -v '^_Generated ' "$wt/docs/ROADMAP.md" 2>/dev/null || true)"
+      if [ "$old_content" = "$new_content" ]; then
+        # roadmap.sh --write still rewrote the file on disk (its footer
+        # timestamp + commit SHA always change), so even though there's
+        # nothing worth committing, the working tree must be restored to
+        # clean here -- otherwise local_sync's own clean-tree precondition
+        # (above) would trip on THIS file on the very next run and wedge
+        # roadmap regeneration off forever (issue #175 review finding #1,
+        # round 2).
+        git -C "$wt" checkout -- docs/ROADMAP.md 2>/dev/null || true
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"no changes\"}"
+        exit 0
+      fi
+      if git -C "$wt" add docs/ROADMAP.md \
+         && git -C "$wt" commit -q -m "chore: regenerate docs/ROADMAP.md [skip ci]" \
+         && git -C "$wt" push -q origin "HEAD:$base"; then
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":true,\"branch\":\"$base\"}"
+      else
+        git -C "$wt" reset --hard "origin/$base" >/dev/null 2>&1 || true
+        echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"commit or push failed (rolled back)\"}" >&2
+      fi
+    ) || echo "{\"roadmap_regen\":\"skip\",\"reason\":\"unexpected error\"}" >&2
   fi
 fi
 echo "=== merge-ready: merged=$merged skipped=$skipped ==="
