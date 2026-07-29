@@ -299,12 +299,21 @@ if [ "$merged" -gt 0 ]; then
       fi
       rm -f "$regen_err"
       if [ "$local_sync_ok" -ne 1 ]; then
+        git -C "$wt" checkout -- docs/ROADMAP.md 2>/dev/null || true
         echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"local $base not verified in sync with origin (see local_sync)\"}"
         exit 0
       fi
       old_content="$(git -C "$wt" show "HEAD:docs/ROADMAP.md" 2>/dev/null | grep -v '^_Generated ' || true)"
       new_content="$(grep -v '^_Generated ' "$wt/docs/ROADMAP.md" 2>/dev/null || true)"
       if [ "$old_content" = "$new_content" ]; then
+        # roadmap.sh --write still rewrote the file on disk (its footer
+        # timestamp + commit SHA always change), so even though there's
+        # nothing worth committing, the working tree must be restored to
+        # clean here -- otherwise local_sync's own clean-tree precondition
+        # (above) would trip on THIS file on the very next run and wedge
+        # roadmap regeneration off forever (issue #175 review finding #1,
+        # round 2).
+        git -C "$wt" checkout -- docs/ROADMAP.md 2>/dev/null || true
         echo "{\"roadmap_regen\":\"generated\",\"committed\":false,\"reason\":\"no changes\"}"
         exit 0
       fi

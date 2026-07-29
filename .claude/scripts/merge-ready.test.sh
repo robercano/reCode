@@ -820,6 +820,14 @@ check "L: no new commit was made locally (still just the single seeded roadmap c
   [ "$(git -C "$1" log --oneline | wc -l)" -eq 1 ]
 ' _ "$dirL"
 check "L: the bare origin main ref never moved" bash -c '[ "$1" = "$2" ]' _ "$preShaL" "$postShaL"
+# Round-2 regression guard (issue #175 review finding #1, round 2): the
+# stub's --write still rewrote docs/ROADMAP.md on disk with a new footer
+# even though nothing was committed -- the working tree MUST be restored to
+# clean, or local_sync's own clean-tree precondition would trip on this file
+# next run and wedge roadmap regen off forever.
+check "L: working tree is clean afterward (ROADMAP.md was restored, not left dirty)" bash -c '
+  git -C "$1" diff --quiet docs/ROADMAP.md
+' _ "$dirL"
 
 # ---------------------------------------------------------------------------
 # M. Push FAILURE rolls back local $base so it is never left diverged from
@@ -901,6 +909,113 @@ check "M: PR still reported merged (roadmap push failure did not roll back the m
 check "M: roadmap_regen surfaces the rolled-back commit/push failure" bash -c 'printf "%s\n" "$1" | grep -q "commit or push failed (rolled back)"' _ "$outM"
 check "M: the bare origin main ref never moved (push was rejected)" bash -c '[ "$1" = "$2" ]' _ "$preShaM" "$postShaM"
 check "M: local main was rolled back and is NOT diverged from origin main" bash -c '[ "$1" = "$2" ]' _ "$localShaM" "$postShaM"
+
+# ---------------------------------------------------------------------------
+# N. "Not in sync" path leaves the working tree CLEAN afterward (issue #175
+#    review finding #1, round 2, regression guard): docs/ROADMAP.md is
+#    already committed+pushed, then local main and origin main are made to
+#    DIVERGE (an unrelated commit lands on the bare origin via a second
+#    clone, and a separate unrelated local-only commit lands on dirN that is
+#    never pushed) so local_sync's own `git merge --ff-only` fails and
+#    local_sync_ok stays 0. roadmap.sh --write still rewrites docs/ROADMAP.md
+#    on disk with a real content diff; the commit/push step must be skipped
+#    (not in sync), AND the rewritten file must be restored so the tree ends
+#    up clean -- otherwise the NEXT run's local_sync clean-tree precondition
+#    would trip on this file and wedge roadmap regen off forever.
+# ---------------------------------------------------------------------------
+dirN="$(new_fixture scenarioN)"
+originN="$work/scenarioN-origin.git"
+init_git_repo_fixture "$dirN" "$originN"
+mkdir -p "$dirN/docs"
+cat > "$dirN/docs/ROADMAP.md" <<'EOF'
+# Roadmap
+
+- issue #1 open
+
+---
+_Generated 2026-01-01T00:00:00Z · commit `seed0001`_
+EOF
+git -C "$dirN" add docs/ROADMAP.md
+git -C "$dirN" commit -q -m "chore: regenerate docs/ROADMAP.md [skip ci]"
+git -C "$dirN" push -q origin main
+
+# Diverge origin: a second clone pushes an unrelated commit directly.
+cloneN="$work/scenarioN-clone"
+git clone -q "$originN" "$cloneN"
+git -C "$cloneN" config user.email "test@example.com"
+git -C "$cloneN" config user.name "Test"
+printf 'remote-only\n' > "$cloneN/remote-only.txt"
+git -C "$cloneN" add remote-only.txt
+git -C "$cloneN" commit -q -m "unrelated remote commit"
+git -C "$cloneN" push -q origin main
+
+# Diverge dirN: an unrelated LOCAL-only commit that is never pushed, so
+# dirN's main and origin/main now share only the earlier seed commit as
+# common ancestor -- `git merge --ff-only origin/main` must fail.
+printf 'local-only\n' > "$dirN/local-only.txt"
+git -C "$dirN" add local-only.txt
+git -C "$dirN" commit -q -m "unrelated local-only commit"
+
+cat > "$dirN/.claude/scripts/roadmap.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--write" ]; then
+  mkdir -p docs
+  cat > docs/ROADMAP.md <<'ROADMAP'
+# Roadmap
+
+- issue #1 open
+- issue #2 open
+
+---
+_Generated 2026-06-06T12:00:00Z · commit `deadbee2`_
+ROADMAP
+fi
+exit 0
+EOF
+chmod +x "$dirN/.claude/scripts/roadmap.sh"
+gh_logN="$work/scenarioN-gh.log"
+cat > "$dirN/.claude/scripts/bot-gh.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_logN"
+case "\$1" in
+  pr)
+    case "\$2" in
+      list)
+        if printf '%s\n' "\$*" | grep -q -- '--json number'; then
+          echo "23"
+        fi
+        ;;
+      view)
+        cat <<'JSON'
+{"number":23,"title":"Ship widget-two","isDraft":false,"baseRefName":"main","headRefName":"feat/issue-23-widget-two","mergeable":"MERGEABLE","reviews":[{"author":{"login":"acme"},"state":"APPROVED","submittedAt":"2026-01-02T00:00:00Z"}],"statusCheckRollup":[],"commits":[{"committedDate":"2026-01-01T00:00:00Z"}]}
+JSON
+        ;;
+      merge) exit 0 ;;
+      comment) : ;;
+      *) : ;;
+    esac
+    ;;
+  api) : ;;  # every REST call here is a needs_human_clear DELETE no-op
+  *) echo "unhandled: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$dirN/.claude/scripts/bot-gh.sh"
+preShaN="$(git -C "$originN" rev-parse refs/heads/main)"
+localHeadBeforeN="$(git -C "$dirN" rev-parse main)"
+outN="$( (cd "$dirN" && env -u GATES_FILE bash .claude/scripts/merge-ready.sh "acme/repo") 2>&1 )"
+postShaN="$(git -C "$originN" rev-parse refs/heads/main)"
+localHeadAfterN="$(git -C "$dirN" rev-parse main)"
+
+check "N: PR merged" bash -c 'printf "%s\n" "$1" | grep -q "\"action\":\"merged\""' _ "$outN"
+check "N: local_sync reports skip (diverged)" bash -c 'printf "%s\n" "$1" | grep -q "\"local_sync\":\"skip\""' _ "$outN"
+check "N: roadmap_regen reports committed:false, reason not-in-sync" bash -c '
+  printf "%s\n" "$1" | grep -q "roadmap_regen.*\"committed\":false" && printf "%s\n" "$1" | grep -q "not verified in sync"
+' _ "$outN"
+check "N: no new commit was made locally beyond the unrelated local-only commit" bash -c '[ "$1" = "$2" ]' _ "$localHeadBeforeN" "$localHeadAfterN"
+check "N: the bare origin main ref never moved" bash -c '[ "$1" = "$2" ]' _ "$preShaN" "$postShaN"
+check "N: working tree is clean afterward (ROADMAP.md was restored, not left dirty)" bash -c '
+  git -C "$1" diff --quiet docs/ROADMAP.md
+' _ "$dirN"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
