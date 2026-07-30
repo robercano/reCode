@@ -35,7 +35,33 @@ do_build() {
   ' || rc=1
   [ "$rc" -eq 0 ] && echo "build: JSON configs valid + adapters well-shaped"
   do_hooks_parity || rc=1
+  do_packaging_exclusion || rc=1
   return "$rc"
+}
+
+# do_packaging_exclusion (issue #138 review) — self-dev assets were moved from
+# .claude/self/ to top-level self/ because the plugin installer does a
+# verbatim recursive copy of the marketplace-sourced .claude/ directory with
+# no exclusion mechanism (see PR #203's investigation): anything left under
+# .claude/self/ ships to every consumer's plugin cache. This structurally
+# asserts the invariant holds by checking FILE EXISTENCE only — fails the
+# build if .claude/self/ (or anything under it) exists again, e.g. from a
+# careless future edit that recreates the old path.
+#
+# Deliberately NOT a content/string check ("no tracked file mentions
+# .claude/self/"): .github/workflows/gates.yml still legitimately carries a
+# dangling .claude/self/gates.json reference (this session's git credential
+# lacks GitHub `workflow` scope, so that file couldn't be updated in this PR
+# — see the PR body's required owner follow-up). A string-based assertion
+# would wrongly fail the build on that known, intentional exception.
+do_packaging_exclusion() {
+  if [ -e ".claude/self" ]; then
+    echo "build: packaging-exclusion invariant violated — .claude/self/ exists (self-dev assets must live only under self/, never re-enter the shipped .claude/ tree)"
+    find .claude/self -type f 2>/dev/null | sed 's/^/build:   /'
+    return 1
+  fi
+  echo "build: packaging-exclusion OK — .claude/self/ does not exist"
+  return 0
 }
 
 # do_hooks_parity (issue #140) — the repo-local .claude/settings.json (self-
