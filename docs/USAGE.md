@@ -256,7 +256,7 @@ detached tmux session all touch `$HOME`/systemd, which the Claude Code sandbox b
 bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N]
 ```
 **in a real terminal outside Claude Code.** It's idempotent (safe to re-run any time). Self-hosting: add
-`--gates-file .claude/self/gates.json`. WSL2-only extra: optionally make the loop survive a Windows reboot
+`--gates-file self/gates.json`. WSL2-only extra: optionally make the loop survive a Windows reboot
 **unattended** — i.e. WSL2 boots at system startup, before anyone logs in, not just at logon. From an
 **elevated Windows PowerShell** (Run as Administrator — required by `-RunLevel Highest`), substituting
 `<distro>` from `wsl -l` and `<user>` for your Linux username:
@@ -428,12 +428,12 @@ it, since the driving session still has to read the verdict and act on it, e.g. 
 > Historical note: before the `planned` label existed, the `module:*` label alone was the opt-in queue.
 > If a repo predates the split, treat `module:*`-only issues as `backlog` until the owner adds `planned`.
 
-**Self-hosting this repo's own backlog?** **`.claude/self/pr-loop-self.md`** runs the same loop mechanics
+**Self-hosting this repo's own backlog?** **`self/pr-loop-self.md`** runs the same loop mechanics
 self-hosted, against this repo's own `.claude`/`docs`/`examples`/`.github` backlog, using
-**`.claude/self/gates.json`** as the adapter (module map, gates, review lenses) instead of the placeholder
-`.claude/gates.json` above. It lives under `.claude/self/` (not `.claude/commands/`), so it is self-hosting-only
+**`self/gates.json`** as the adapter (module map, gates, review lenses) instead of the placeholder
+`.claude/gates.json` above. It lives under `self/` (not `.claude/commands/`), so it is self-hosting-only
 — not a registered slash command and never packaged to downstream installs of the plugin; ask Claude to read and
-follow it directly. See `.claude/self/README.md` for the self-adapter contract.
+follow it directly. See `self/README.md` for the self-adapter contract.
 
 New project? Wire this up with the **[new-project configuration
 checklist](GETTING_STARTED.md#new-project-configuration-checklist)**.

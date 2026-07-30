@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Self-host gate implementations (issue #11). node + bash only — no external
 # linters — so the loop can validate harness changes in a bare environment.
-# Invoked via .claude/self/gates.json, e.g. `bash .claude/self/checks.sh lint`.
+# Invoked via self/gates.json, e.g. `bash self/checks.sh lint`.
 #
 #   build → every JSON config parses and each adapter has the required shape
 #   lint  → `bash -n` every shell script + `node --check` every workflow
@@ -12,7 +12,7 @@
 #           this file again.
 set -uo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 cmd="${1:?usage: checks.sh build|lint|test}"
 
@@ -20,13 +20,13 @@ json_parse() { node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'u
 
 do_build() {
   local rc=0
-  for f in .claude/gates.json .claude/self/gates.json .claude/settings.json .claude/.claude-plugin/plugin.json .claude/.claude-plugin/marketplace.json .claude/hooks/hooks.json; do
+  for f in .claude/gates.json self/gates.json .claude/settings.json .claude/.claude-plugin/plugin.json .claude/.claude-plugin/marketplace.json .claude/hooks/hooks.json; do
     if [ ! -f "$f" ]; then echo "build: missing $f"; rc=1; continue; fi
     if ! json_parse "$f" 2>/dev/null; then echo "build: invalid JSON — $f"; rc=1; fi
   done
   # each ADAPTER must have the shape the generic agents rely on
   node -e '
-    for (const f of [".claude/gates.json", ".claude/self/gates.json"]) {
+    for (const f of [".claude/gates.json", "self/gates.json"]) {
       const g = require(process.cwd() + "/" + f);
       if (!g.project || !Array.isArray(g.modules) || typeof g.gates !== "object") {
         console.error("build: bad adapter shape —", f); process.exit(1);
@@ -35,7 +35,33 @@ do_build() {
   ' || rc=1
   [ "$rc" -eq 0 ] && echo "build: JSON configs valid + adapters well-shaped"
   do_hooks_parity || rc=1
+  do_packaging_exclusion || rc=1
   return "$rc"
+}
+
+# do_packaging_exclusion (issue #138 review) — self-dev assets were moved from
+# .claude/self/ to top-level self/ because the plugin installer does a
+# verbatim recursive copy of the marketplace-sourced .claude/ directory with
+# no exclusion mechanism (see PR #203's investigation): anything left under
+# .claude/self/ ships to every consumer's plugin cache. This structurally
+# asserts the invariant holds by checking FILE EXISTENCE only — fails the
+# build if .claude/self/ (or anything under it) exists again, e.g. from a
+# careless future edit that recreates the old path.
+#
+# Deliberately NOT a content/string check ("no tracked file mentions
+# .claude/self/"): .github/workflows/gates.yml still legitimately carries a
+# dangling .claude/self/gates.json reference (this session's git credential
+# lacks GitHub `workflow` scope, so that file couldn't be updated in this PR
+# — see the PR body's required owner follow-up). A string-based assertion
+# would wrongly fail the build on that known, intentional exception.
+do_packaging_exclusion() {
+  if [ -e ".claude/self" ]; then
+    echo "build: packaging-exclusion invariant violated — .claude/self/ exists (self-dev assets must live only under self/, never re-enter the shipped .claude/ tree)"
+    find .claude/self -type f 2>/dev/null | sed 's/^/build:   /'
+    return 1
+  fi
+  echo "build: packaging-exclusion OK — .claude/self/ does not exist"
+  return 0
 }
 
 # do_hooks_parity (issue #140) — the repo-local .claude/settings.json (self-
@@ -154,8 +180,8 @@ do_lint() {
   # .claude/skills/*/*.sh (scaffold.sh, sync.sh) and .claude/skills/*/templates/*.sh
   # (issue #102's arm-loop.sh template) are included so a syntax regression in the
   # setup/sync machinery or a scaffolded script template is caught here too, not just
-  # .claude/scripts/*.sh and .claude/self/*.sh.
-  for f in .claude/scripts/*.sh .claude/self/*.sh .claude/skills/*/*.sh .claude/skills/*/templates/*.sh; do
+  # .claude/scripts/*.sh and self/*.sh.
+  for f in .claude/scripts/*.sh self/*.sh .claude/skills/*/*.sh .claude/skills/*/templates/*.sh; do
     [ -e "$f" ] || continue
     bash -n "$f" || { echo "lint: shell syntax error — $f"; rc=1; }
   done

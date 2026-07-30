@@ -26,8 +26,8 @@
 set -uo pipefail
 
 # Isolate from the CALLER's environment (mirrors cockpit.test.sh/notify.test.sh):
-# this test is wired into .claude/self/checks.sh's `test` case, which itself
-# often runs under `GATES_FILE=.claude/self/gates.json` (the self-host loop).
+# this test is wired into self/checks.sh's `test` case, which itself
+# often runs under `GATES_FILE=self/gates.json` (the self-host loop).
 # An ambient GATES_FILE would silently redirect notify.sh's config lookup
 # (called by needs_human_flag/needs_human_clear below) onto the SELF adapter
 # instead of each fixture's own hand-written .claude/gates.json.

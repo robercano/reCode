@@ -43,7 +43,7 @@ repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 if [ -f "$script_dir/needs-human.sh" ]; then . "$script_dir/needs-human.sh"; fi
 owner="${MERGE_APPROVER:-${repo%%/*}}"   # the approver whose APPROVED review authorizes a merge
 
-# Adapter file: honor GATES_FILE (the self-host loop points at .claude/self/gates.json),
+# Adapter file: honor GATES_FILE (the self-host loop points at self/gates.json),
 # fall back to the shipped root adapter. Both merge.baseBranch and protectedPaths
 # (issue #94 Layer 2) are read from it, so the self-adapter's permissive protectedPaths
 # override applies when the loop runs self-hosted.

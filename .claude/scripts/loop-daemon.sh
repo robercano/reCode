@@ -106,7 +106,7 @@
 # Env:
 #   LOOP_MODEL                   model for the driver (default sonnet; read by loop-event.sh)
 #   GATES_FILE                   adapter override, passed straight through the environment
-#                                 (self-hosting: .claude/self/gates.json)
+#                                 (self-hosting: self/gates.json)
 #   LOOP_DRIVER_TIMEOUT          wall-clock cap per driver (default 90m); becomes
 #                                 systemd-run's `-p RuntimeMaxSec=` when systemd-run
 #                                 is on PATH, else `timeout`'s duration (issue #119)

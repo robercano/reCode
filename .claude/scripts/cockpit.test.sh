@@ -25,8 +25,8 @@
 set -uo pipefail
 
 # Isolate from the CALLER's environment: this test is now wired into
-# .claude/self/checks.sh's `test` case, which itself typically runs under
-# `GATES_FILE=.claude/self/gates.json` (the self-host loop). Since env vars
+# self/checks.sh's `test` case, which itself typically runs under
+# `GATES_FILE=self/gates.json` (the self-host loop). Since env vars
 # set before a command propagate to every child process it spawns, an
 # ambient GATES_FILE would silently redirect the DEFAULT-adapter assertions
 # below (section 2) onto the self-adapter. Section 3 sets GATES_FILE
@@ -466,8 +466,8 @@ check "all-clear run: no awaiting-your-review group heading" bash -c '! grep -qF
 #    (no gh/network either way).
 # ---------------------------------------------------------------------------
 html_self="$work/cockpit-self.html"
-GATES_FILE=.claude/self/gates.json bash "$cockpit" --fixtures "$work/fixtures" "$html_self" >/dev/null 2>"$work/stderr-self.log"
-check "GATES_FILE override honored in generator output" grep -q 'Adapter: <code>.claude/self/gates.json</code>' "$html_self"
+GATES_FILE=self/gates.json bash "$cockpit" --fixtures "$work/fixtures" "$html_self" >/dev/null 2>"$work/stderr-self.log"
+check "GATES_FILE override honored in generator output" grep -q 'Adapter: <code>self/gates.json</code>' "$html_self"
 
 # ---------------------------------------------------------------------------
 # 4. Graceful degrade when gh is unavailable — stub COCKPIT_GH_BIN so this is
@@ -658,7 +658,7 @@ alias_npm_pid=""
 #    event timeline + latest breadcrumbs + live worktree forensics, entirely
 #    offline. Forensics are computed by cockpit-serve.sh shelling out to git
 #    against a SYNTHETIC temp git repo/worktree built here under $TMPDIR
-#    (mirrors .claude/self/smoke-fanout.sh's own git-init/worktree-add
+#    (mirrors self/smoke-fanout.sh's own git-init/worktree-add
 #    pattern) -- never against this checkout, so this stays deterministic and
 #    isolated. Covers BOTH worktree-lookup strategies documented in
 #    cockpit-serve.sh: by conventional directory name

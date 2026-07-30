@@ -57,7 +57,7 @@ regardless of owner approval or green CI, and reviewers hard-reject it outright 
 `.claude/agents/reviewer.md`). The shipped root adapter defaults this to a protective set
 (`.claude/**`, `.github/workflows/**`, `gates.json`, `**/gates.json`) so downstream adopters' harness and
 CI files can't be silently rewritten by an agent. This repo's own self-adapter
-(`.claude/self/gates.json`) overrides it to an empty array, which disables the guard — reCode's harness
+(`self/gates.json`) overrides it to an empty array, which disables the guard — reCode's harness
 files under `.claude/` ARE the product, so legitimate slices of work must remain mergeable when the loop
 runs self-hosted. A fuller writeup is deferred to follow-up issue #166.
 

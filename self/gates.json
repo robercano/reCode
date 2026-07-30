@@ -1,5 +1,5 @@
 {
-  "_README": "SELF-ADAPTER (issue #11). Lets this template dogfood itself WITHOUT polluting the shipped placeholder .claude/gates.json (which stays pristine for downstream adopters). The loop uses THIS file only when pointed at it via GATES_FILE=.claude/self/gates.json (see .claude/self/README.md). Gate commands are node/bash-only so they run with no extra tooling installed.",
+  "_README": "SELF-ADAPTER (issue #11). Lets this template dogfood itself WITHOUT polluting the shipped placeholder .claude/gates.json (which stays pristine for downstream adopters). The loop uses THIS file only when pointed at it via GATES_FILE=self/gates.json (see self/README.md). This file (and the rest of self/) lives at the top-level repo root, OUTSIDE .claude/ (issue #138) — the plugin marketplace source is ./.claude, so anything outside it is structurally never copied into a consumer's plugin cache. Gate commands are node/bash-only so they run with no extra tooling installed.",
   "project": {
     "name": "recode",
     "language": "shell+markdown+js",
@@ -14,7 +14,7 @@
     {
       "name": "harness",
       "path": ".claude",
-      "description": "Orchestrator machinery: agents, commands, scripts, workflows, self-adapter."
+      "description": "Orchestrator machinery: agents, commands, scripts, workflows. The self-adapter itself (this file and its siblings) lives at the top-level self/ directory, outside .claude/ (issue #138)."
     },
     {
       "name": "examples",
@@ -28,13 +28,13 @@
     }
   ],
   "gates": {
-    "_note": "Static checks in .claude/self/checks.sh; end-to-end fan-out smoke in .claude/self/smoke-fanout.sh (issue #64) — node + bash + git only, so they pass in a bare environment. test_affected stays static-only: it's the Stop-hook fast path and shouldn't pay the smoke's git churn on every stop.",
+    "_note": "Static checks in self/checks.sh; end-to-end fan-out smoke in self/smoke-fanout.sh (issue #64) — node + bash + git only, so they pass in a bare environment. test_affected stays static-only: it's the Stop-hook fast path and shouldn't pay the smoke's git churn on every stop.",
     "install": "",
-    "build": "bash .claude/self/checks.sh build",
-    "lint": "bash .claude/self/checks.sh lint",
+    "build": "bash self/checks.sh build",
+    "lint": "bash self/checks.sh lint",
     "typecheck": "",
-    "test": "bash .claude/self/checks.sh test && bash .claude/self/smoke-fanout.sh",
-    "test_affected": "bash .claude/self/checks.sh test",
+    "test": "bash self/checks.sh test && bash self/smoke-fanout.sh",
+    "test_affected": "bash self/checks.sh test",
     "coverage": "",
     "coverage_threshold": 0,
     "e2e": "",

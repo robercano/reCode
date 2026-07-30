@@ -108,7 +108,7 @@ EOF
 
 run_census() {
   # $1 = fixture dir. GATES_FILE unset explicitly (a test invoked from inside
-  # a GATES_FILE=.claude/self/gates.json gate run must not leak that into the
+  # a GATES_FILE=self/gates.json gate run must not leak that into the
   # fixture's own default-relative gates.json — same guard as
   # loop-census.test.sh).
   env -u GATES_FILE bash "$1/.claude/scripts/loop-census.sh" "acme/repo"

@@ -12,10 +12,11 @@ that ship to downstream installs are what runs the live self-hosted PR loop here
   `/orchestrator:harden`, etc. No file renames are needed for this — the namespace comes
   from `name` in `plugin.json`, not from filenames.
 - `plugin.json` carries an explicit `commands` allowlist (issue #76) so only consumer-facing
-  commands ship downstream. `.claude/self/pr-loop-self.md` — this repo's own self-hosting loop
-  prompt — is deliberately excluded: it lives under `.claude/self/` (not `.claude/commands/`), so
-  it is never auto-discovered as a project slash command either. See `.claude/self/README.md` for
-  how to run it in-repo.
+  commands ship downstream. `self/pr-loop-self.md` — this repo's own self-hosting loop
+  prompt — is deliberately excluded: it lives at the top-level `self/` (outside `.claude/`
+  entirely, issue #138), not `.claude/commands/`, so it is never auto-discovered as a project
+  slash command either — nor copied into the plugin payload at all, since the marketplace
+  source is `./.claude`. See `self/README.md` for how to run it in-repo.
 
 ## The `${CLAUDE_PLUGIN_ROOT:-.claude}` fallback
 Agent/command prompts invoke scripts as:
@@ -35,9 +36,12 @@ consumer-facing command files — this disables the default directory-wide auto-
 
 Not distributed by this plugin (repo-scaffolded, project-specific):
 - `.claude/workflows/*.js` — deterministic fan-out workflows, not plugin-portable.
-- `.claude/self/*` — this repo's OWN self-hosting adapter (gates, checks, and the
-  `pr-loop-self.md` loop prompt), not for downstream projects; downstream adopters get the
-  placeholder `.claude/gates.json` instead.
+- top-level `self/*` (issue #138) — this repo's OWN self-hosting adapter (gates, checks, and
+  the `pr-loop-self.md` loop prompt), not for downstream projects; downstream adopters get the
+  placeholder `.claude/gates.json` instead. Unlike the other exclusions above, this one is
+  structural rather than allowlist-based: `self/` lives outside `.claude/` (the marketplace
+  `source`), so it is physically absent from any consumer's plugin cache — no risk of
+  accidental inclusion via a future auto-discovery change.
 
 ## Enabling in a consuming project
 

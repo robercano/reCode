@@ -3,6 +3,12 @@
 This directory lets **this repo run its own PR loop against its own harness/docs**, without touching the
 shipped placeholder `.claude/gates.json` (which stays pristine for downstream adopters).
 
+**Lives at the top-level `self/` (issue #138), not under `.claude/`.** The plugin marketplace sources the
+payload from `./.claude` (see `.claude-plugin/marketplace.json`), so anything outside `.claude/` is
+structurally never copied into a consumer's plugin cache — no allowlist or naming convention to maintain,
+just physical location. This directory used to live at `.claude/self/`; it moved out entirely so a freshly
+built plugin cache contains none of this repo's self-development assets.
+
 ## Why a separate adapter
 `.claude/gates.json` is the file a *new project* fills in. If we filled it with this repo's own modules and
 gates, every clone of the template would inherit our self-config. So the self-config lives here instead, and
@@ -27,37 +33,36 @@ the tooling reads it only when explicitly pointed at it.
 `gate.sh` honors a `GATES_FILE` env override (defaults to `.claude/gates.json`):
 
 ```bash
-GATES_FILE=.claude/self/gates.json bash .claude/scripts/gate.sh build
-GATES_FILE=.claude/self/gates.json bash .claude/scripts/gate.sh lint
-GATES_FILE=.claude/self/gates.json bash .claude/scripts/gate.sh test
+GATES_FILE=self/gates.json bash .claude/scripts/gate.sh build
+GATES_FILE=self/gates.json bash .claude/scripts/gate.sh lint
+GATES_FILE=self/gates.json bash .claude/scripts/gate.sh test
 ```
 
 ## Running the loop self-hosted
 To have the autonomous loop work this repo's own `module:*` backlog:
 1. Label the target issue with a self module — `module:docs`, `module:harness`, `module:examples`, or `module:ci`.
-2. Drive the tick with `GATES_FILE=.claude/self/gates.json` exported, and tell the orchestrator to read
-   **`.claude/self/gates.json`** as its adapter (module map + gates) for this repo. The generic agents/scripts
+2. Drive the tick with `GATES_FILE=self/gates.json` exported, and tell the orchestrator to read
+   **`self/gates.json`** as its adapter (module map + gates) for this repo. The generic agents/scripts
    otherwise behave identically — worker boundaries come from this file's `modules`, gates from its `gates`.
 
-**Recommended (issue #102): the cron-less daemon.** `bash .claude/scripts/arm-loop.sh --gates-file .claude/self/gates.json`
+**Recommended (issue #102): the cron-less daemon.** `bash .claude/scripts/arm-loop.sh --gates-file self/gates.json`
 (run in a real terminal outside Claude Code — installing systemd units/`enable-linger`/tmux touches `$HOME`
 and is blocked by the sandbox) arms `.claude/scripts/loop-daemon.sh` under `systemd --user`, forever, adapted
 to this repo's own module set. It survives session restarts and spawns a driver only on an actionable
-verdict. Never run it alongside `.claude/self/pr-loop-self.md`'s cron at the same time — safe (spawn lock),
+verdict. Never run it alongside `self/pr-loop-self.md`'s cron at the same time — safe (spawn lock),
 just wasteful.
 
-The legacy, session-scoped way to do this is **`.claude/self/pr-loop-self.md`** — it mirrors `/pr-loop` exactly
+The legacy, session-scoped way to do this is **`self/pr-loop-self.md`** — it mirrors `/pr-loop` exactly
 (arm/re-arm cron, adaptive cadence, poll → merge → address-feedback → advance) but carries
-`GATES_FILE=.claude/self/gates.json` through every gate call and every spawned agent, and adapts on the self
+`GATES_FILE=self/gates.json` through every gate call and every spawned agent, and adapts on the self
 modules (`module:docs`/`module:harness`/`module:examples`/`module:ci`) instead of the project's own
 `gates.json`. It uses a distinct cron identity marker ("self-hosted autonomous PR loop") so it never collides
 with a `/pr-loop` job in the same session.
 
-This file lives under `.claude/self/` (not `.claude/commands/`) so it is **not** shipped to downstream plugin
-consumers — see `.claude/.claude-plugin/plugin.json`'s explicit `commands` allowlist (issue #76). It is
-therefore not a registered `/pr-loop-self` slash command; to (re)arm the self-hosted loop, ask Claude to read
-and follow the instructions in `.claude/self/pr-loop-self.md` directly (e.g. "read and run
-`.claude/self/pr-loop-self.md`").
+This file lives under the top-level `self/` (outside `.claude/`, so structurally **not** shipped to
+downstream plugin consumers — issue #138) rather than `.claude/commands/`, so it is also not a registered
+`/pr-loop-self` slash command; to (re)arm the self-hosted loop, ask Claude to read and follow the
+instructions in `self/pr-loop-self.md` directly (e.g. "read and run `self/pr-loop-self.md`").
 
 ## Self-hosting promotion (the one gotcha)
 Agent-definition / `settings.json` / hook changes only take effect on a **fresh session**. So when the loop

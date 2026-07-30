@@ -49,8 +49,8 @@ frozen copy means you never get fixes/improvements:
 - `.claude/agents/` — orchestrator, implementer, reviewer, test-runner.
 - `.claude/commands/` — `pr-loop.md`, `harden.md`, `test-pr.md`, etc. (they resolve
   as namespaced `/orchestrator:*` commands once the plugin is enabled). Note: `pr-loop-self.md` is **not**
-  among these — it lives under `.claude/self/` (not `.claude/commands/`) and is not plugin-distributed; see
-  `.claude/self/README.md` if your repo has a self-hosting setup of its own.
+  among these — it lives under `self/` (not `.claude/commands/`) and is not plugin-distributed; see
+  `self/README.md` if your repo has a self-hosting setup of its own.
 - `.claude/skills/` — e.g. the `setup` skill.
 - `.claude/hooks/` — `hooks.json` (the lint/test-affected wiring is now shipped by the plugin and resolves via
   `${CLAUDE_PLUGIN_ROOT}` automatically).

@@ -189,7 +189,7 @@ EOF
 chmod +x "$scripts_dir/pr-feedback.sh"
 
 # Unset GATES_FILE explicitly: this test may itself run from inside a gate
-# invocation that exports GATES_FILE=.claude/self/gates.json for the OUTER
+# invocation that exports GATES_FILE=self/gates.json for the OUTER
 # repo (mirrors loop-census.test.sh's own guard) — which would leak in here
 # and make pr-comment-fix.sh read the outer self-adapter's commentFix.botAllowlist
 # instead of this fixture's own gates.json.

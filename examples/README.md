@@ -13,5 +13,5 @@ Each subdirectory is one stack; the `gates.json` there is what you'd drop into y
 > (`bash .claude/scripts/gate.sh build`, etc.).
 
 Also here, but **not** a worked example: [`fixture-target/`](fixture-target/) — the tiny *runnable* fixture
-repo the self-host smoke harness (`.claude/self/smoke-fanout.sh`, issue #64) drives end-to-end on every PR.
+repo the self-host smoke harness (`self/smoke-fanout.sh`, issue #64) drives end-to-end on every PR.
 See its README; don't copy it as an adapter starting point.

@@ -16,7 +16,7 @@
 #   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>] [--spawn <mode>] [--stop-after-days N]
 #
 #   --gates-file <path>       passed to pr-loop.service as GATES_FILE (e.g.
-#                              .claude/self/gates.json for the self-hosted
+#                              self/gates.json for the self-hosted
 #                              loop). Omit for the default project adapter.
 #   --permission-mode <mode>  passed to `claude remote-control --permission-mode`.
 #                              Defaults to permissions.defaultMode in
