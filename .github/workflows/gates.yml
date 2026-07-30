@@ -45,8 +45,8 @@ jobs:
 
   # This repo self-hosts on the orchestrator template: harness changes under
   # `.claude/**` and `docs/**` are exercised via the SELF adapter
-  # (self/gates.json), whose gates are actually implemented (node+bash
-  # checks in self/checks.sh). The `gates` job above reads the default,
+  # (.claude/self/gates.json), whose gates are actually implemented (node+bash
+  # checks in .claude/self/checks.sh). The `gates` job above reads the default,
   # placeholder adapter (.claude/gates.json), which has empty gate commands for
   # this repo and so skips cleanly — meaning harness/docs PRs would otherwise get
   # no real server-side check. This job closes that gap without touching the
@@ -64,5 +64,5 @@ jobs:
         # Self-adapter gates are node+bash only, so the default toolchain
         # shipped on ubuntu-latest runners is sufficient — no setup action needed.
         env:
-          GATES_FILE: self/gates.json
+          GATES_FILE: .claude/self/gates.json
         run: bash .claude/scripts/gate.sh ${{ matrix.gate }}
