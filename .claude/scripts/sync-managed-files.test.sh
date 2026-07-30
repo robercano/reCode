@@ -447,7 +447,7 @@ JSON
 # takes an absolute GATES_FILE as-is, same convention as gate.sh, see gate.test.sh's
 # write_gates_file/run_gate). Scenarios 12/12b/15 must be deterministic regardless of an
 # ambient GATES_FILE leaking in from the caller's environment (e.g. the self-hosted test
-# gate runs *.test.sh with GATES_FILE=.claude/self/gates.json already exported) — without
+# gate runs *.test.sh with GATES_FILE=self/gates.json already exported) — without
 # this pin, derive_module_labels would resolve the ambient adapter relative to $t12 instead
 # of this fixture's own gates.json and silently fail to derive any labels.
 out12="$(GATES_FILE="$t12/.claude/gates.json" bash "$plugin_v_ok/skills/sync/sync.sh" "$t12" 2>&1)"
@@ -597,7 +597,7 @@ cat >"$t9/.claude/gates.json" <<'JSON'
 JSON
 # Pin GATES_FILE to this self-hosting fixture's OWN adapter (absolute path — same isolation
 # rationale as scenario 12) so this scenario is deterministic regardless of an ambient
-# GATES_FILE (e.g. the real self-hosted test gate exports GATES_FILE=.claude/self/gates.json
+# GATES_FILE (e.g. the real self-hosted test gate exports GATES_FILE=self/gates.json
 # before invoking this file, which would otherwise make derive_module_labels look in the
 # wrong place relative to $t9 and change which advisory lines print).
 out15="$(GATES_FILE="$t9/.claude/gates.json" bash "$t9/.claude/skills/sync/sync.sh" "$t9" 2>&1)"

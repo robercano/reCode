@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Self-host gate implementations (issue #11). node + bash only — no external
 # linters — so the loop can validate harness changes in a bare environment.
-# Invoked via .claude/self/gates.json, e.g. `bash .claude/self/checks.sh lint`.
+# Invoked via self/gates.json, e.g. `bash self/checks.sh lint`.
 #
 #   build → every JSON config parses and each adapter has the required shape
 #   lint  → `bash -n` every shell script + `node --check` every workflow
@@ -12,7 +12,7 @@
 #           this file again.
 set -uo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 cmd="${1:?usage: checks.sh build|lint|test}"
 
@@ -20,13 +20,13 @@ json_parse() { node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'u
 
 do_build() {
   local rc=0
-  for f in .claude/gates.json .claude/self/gates.json .claude/settings.json .claude/.claude-plugin/plugin.json .claude/.claude-plugin/marketplace.json .claude/hooks/hooks.json; do
+  for f in .claude/gates.json self/gates.json .claude/settings.json .claude/.claude-plugin/plugin.json .claude/.claude-plugin/marketplace.json .claude/hooks/hooks.json; do
     if [ ! -f "$f" ]; then echo "build: missing $f"; rc=1; continue; fi
     if ! json_parse "$f" 2>/dev/null; then echo "build: invalid JSON — $f"; rc=1; fi
   done
   # each ADAPTER must have the shape the generic agents rely on
   node -e '
-    for (const f of [".claude/gates.json", ".claude/self/gates.json"]) {
+    for (const f of [".claude/gates.json", "self/gates.json"]) {
       const g = require(process.cwd() + "/" + f);
       if (!g.project || !Array.isArray(g.modules) || typeof g.gates !== "object") {
         console.error("build: bad adapter shape —", f); process.exit(1);
@@ -154,8 +154,8 @@ do_lint() {
   # .claude/skills/*/*.sh (scaffold.sh, sync.sh) and .claude/skills/*/templates/*.sh
   # (issue #102's arm-loop.sh template) are included so a syntax regression in the
   # setup/sync machinery or a scaffolded script template is caught here too, not just
-  # .claude/scripts/*.sh and .claude/self/*.sh.
-  for f in .claude/scripts/*.sh .claude/self/*.sh .claude/skills/*/*.sh .claude/skills/*/templates/*.sh; do
+  # .claude/scripts/*.sh and self/*.sh.
+  for f in .claude/scripts/*.sh self/*.sh .claude/skills/*/*.sh .claude/skills/*/templates/*.sh; do
     [ -e "$f" ] || continue
     bash -n "$f" || { echo "lint: shell syntax error — $f"; rc=1; }
   done

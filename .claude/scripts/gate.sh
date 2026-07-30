@@ -13,8 +13,8 @@ key="${1:?usage: gate.sh <gate-name>}"
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 
 # Which adapter to read. Defaults to the project adapter; set GATES_FILE to run a
-# different one (e.g. GATES_FILE=.claude/self/gates.json for the self-host loop —
-# see .claude/self/README.md). Relative paths resolve from the repo root.
+# different one (e.g. GATES_FILE=self/gates.json for the self-host loop —
+# see self/README.md). Relative paths resolve from the repo root.
 gates_ref="${GATES_FILE:-.claude/gates.json}"
 case "$gates_ref" in
   /*) gates="$gates_ref" ;;

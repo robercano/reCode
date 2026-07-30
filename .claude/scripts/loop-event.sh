@@ -131,7 +131,7 @@ mode="$(printf '%s\n' "$tick_out" | sed -n 's/^advance_mode=//p' | tail -1)"
 mode="${mode:-implement}"
 
 # Adapter clause: only when this loop runs against a non-default adapter
-# (self-hosting). Mirrors the wording in .claude/self/pr-loop-self.md.
+# (self-hosting). Mirrors the wording in self/pr-loop-self.md.
 adapter=""
 if [ -n "${GATES_FILE:-}" ]; then
   adapter="Export GATES_FILE=$GATES_FILE for every gate/orchestration step, and instruct every spawned agent (orchestrator, implementers, reviewers) to read $GATES_FILE — NOT the placeholder root .claude/gates.json — as its adapter (module map, gates, review lenses). Every gate.sh invocation MUST run as: GATES_FILE=$GATES_FILE bash $script_dir/gate.sh <name>. "
@@ -201,7 +201,7 @@ NEVER force-merge, and NEVER merge, in either outcome."
 Issue #$n was flagged STALLED by loop-census.sh (no recorded activity for the adapter's stall_minutes window) and a PRIOR driver already left partial work on a local \`feat/issue-$n-*\` branch. $branch_clause This is a CONTINUATION, NOT a fresh advance: do NOT create a new branch, do NOT re-scope the issue from scratch, and do NOT start a new worktree implementer with a clean slate — inspect what is ALREADY THERE (git log/diff on that branch) and pick up from it.
 1. Locate and reattach to the EXISTING worktree for that branch (or re-create a worktree checked out on the SAME branch if the prior one was already cleaned up) — the commits/WIP on the branch are the authoritative starting point.
 2. Assess what's actually done vs. still missing against the issue's acceptance criteria, then finish the implementation on that SAME branch.
-3. Re-run the module's gates before publishing: \`GATES_FILE=.claude/self/gates.json bash $script_dir/gate.sh <name>\` for build/lint/typecheck/test/coverage per the adapter (per the adapter clause above) — do not skip this just because some gates may have passed in a prior, now-stale attempt.
+3. Re-run the module's gates before publishing: \`GATES_FILE=self/gates.json bash $script_dir/gate.sh <name>\` for build/lint/typecheck/test/coverage per the adapter (per the adapter clause above) — do not skip this just because some gates may have passed in a prior, now-stale attempt.
 4. Route the finished diff through the reviewer lenses per the adapter (consensus as configured), addressing any reject before proceeding.
 5. Publish: push the branch and open the bot PR if none exists yet (\`bash $script_dir/bot-gh.sh pr create ...\`), or push the update to refresh an already-open PR for this issue. The work product MUST land on GitHub before you end your turn — a resume that ends without a pushed branch/PR just re-stalls the issue for the next tick.
 Do NOT merge."

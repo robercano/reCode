@@ -39,7 +39,7 @@ if [ "$phase" = setup ]; then
   fi
 fi
 # Which adapter to read. Defaults to the project adapter; set GATES_FILE to run a
-# different one (e.g. GATES_FILE=.claude/self/gates.json). Relative paths resolve
+# different one (e.g. GATES_FILE=self/gates.json). Relative paths resolve
 # from the repo root.
 gates_ref="${GATES_FILE:-.claude/gates.json}"
 case "$gates_ref" in

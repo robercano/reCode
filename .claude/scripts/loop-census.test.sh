@@ -225,7 +225,7 @@ git -C "$fixture" branch feat/issue-100-w main >/dev/null
 
 # Unset GATES_FILE explicitly: loop-census.sh reads it straight from the
 # environment, and this test may itself be run from inside a gate invocation
-# that exports GATES_FILE=.claude/self/gates.json for the OUTER repo — which
+# that exports GATES_FILE=self/gates.json for the OUTER repo — which
 # would leak in here and make census look for a gates.json this fixture never
 # created. Force it back to the fixture's own default-relative gates.json.
 out="$(env -u GATES_FILE bash "$scripts_dir/loop-census.sh" "acme/repo")"

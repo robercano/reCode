@@ -1,5 +1,5 @@
 {
-  "_README": "Adapter for the SMOKE-TEST FIXTURE TARGET (issue #64, Phase 2 of #11). A minimal consumer-shaped repo the smoke harness (.claude/self/smoke-fanout.sh) stages into a temp git repo and drives end-to-end: worktree -> canned diff -> these gates via the real gate.sh -> merge. Gates are node-only so they run in a bare environment.",
+  "_README": "Adapter for the SMOKE-TEST FIXTURE TARGET (issue #64, Phase 2 of #11). A minimal consumer-shaped repo the smoke harness (self/smoke-fanout.sh) stages into a temp git repo and drives end-to-end: worktree -> canned diff -> these gates via the real gate.sh -> merge. Gates are node-only so they run in a bare environment.",
 
   "project": { "name": "fixture-target", "language": "js", "packageManager": "none" },
 

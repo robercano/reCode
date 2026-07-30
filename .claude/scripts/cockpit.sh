@@ -166,7 +166,7 @@ gh() { "$gh_bin" "$@"; }
 
 # Adapter to read for model/skill routing — same override contract as
 # gate.sh/worktree.sh (GATES_FILE env, relative paths resolve from repo root),
-# so self-hosting this repo can point it at .claude/self/gates.json.
+# so self-hosting this repo can point it at self/gates.json.
 gates_ref="${GATES_FILE:-.claude/gates.json}"
 case "$gates_ref" in
   /*) gates="$gates_ref" ;;

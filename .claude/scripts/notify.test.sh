@@ -12,8 +12,8 @@
 set -uo pipefail
 
 # Isolate from the CALLER's environment (mirrors cockpit.test.sh): this test
-# is wired into .claude/self/checks.sh's `test` case, which itself often runs
-# under `GATES_FILE=.claude/self/gates.json` (the self-host loop). Since env
+# is wired into self/checks.sh's `test` case, which itself often runs
+# under `GATES_FILE=self/gates.json` (the self-host loop). Since env
 # vars set before a command propagate to every child process, an ambient
 # GATES_FILE would silently redirect notify.sh's config lookup onto the SELF
 # adapter instead of each fixture's own hand-written .claude/gates.json below.

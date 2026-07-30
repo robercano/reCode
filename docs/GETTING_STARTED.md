@@ -205,7 +205,7 @@ model (the `module:*` opt-in queue + the owner-approval merge gate) that this ch
    supervised by `systemd --user`, survives Claude Code restarts, adaptive FAST/WATCH/IDLE sleep read
    straight off the census) and `claude-rc-<repo>.service` (`claude remote-control` in a detached tmux
    session, for spawning planning sessions remotely). Self-hosting: add `--gates-file
-   .claude/self/gates.json`. See [`USAGE.md` → "Cron-less loop
+   self/gates.json`. See [`USAGE.md` → "Cron-less loop
    (daemon)"](USAGE.md#cron-less-loop-daemon) for the full architecture, cadence, run ledger, and
    failure-contract details, including WSL2's `systemd=true` prerequisite.
    Fallback (no systemd available): **`/orchestrator:pr-loop`** — the legacy session-scoped cron. It

@@ -288,10 +288,10 @@ check "scenario 5: no prompt-file line emitted" bash -c '! printf "%s\n" "$1" | 
 # ---------------------------------------------------------------------------
 dir6="$(new_fixture scenario6 'cadence=FAST cron=* * * * *
 action=advance issue=9')"
-out6="$(cd "$dir6" && PATH="/usr/bin:/bin" GATES_FILE=.claude/self/gates.json bash .claude/scripts/loop-event.sh)"; rc6=$?
+out6="$(cd "$dir6" && PATH="/usr/bin:/bin" GATES_FILE=self/gates.json bash .claude/scripts/loop-event.sh)"; rc6=$?
 pf6="$(printf '%s\n' "$out6" | sed -n 's/^loop-event: prompt-file=//p')"
 check "scenario 6 (GATES_FILE): exits 0" [ "$rc6" -eq 0 ]
-check "scenario 6: prompt file exports the adapter's GATES_FILE" bash -c 'grep -q "GATES_FILE=.claude/self/gates.json" "$1"' _ "$pf6"
+check "scenario 6: prompt file exports the adapter's GATES_FILE" bash -c 'grep -q "GATES_FILE=self/gates.json" "$1"' _ "$pf6"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

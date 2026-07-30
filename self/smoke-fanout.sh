@@ -23,9 +23,9 @@
 # commit/merge all work there under the strict sandbox).
 set -uo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$root/examples/fixture-target"
-patches="$root/.claude/self/smoke"
+patches="$root/self/smoke"
 
 fail() { echo "smoke: FAIL — $*" >&2; exit 1; }
 step() { echo "smoke: $*"; }
@@ -79,7 +79,7 @@ step "module boundary respected ($mod); change committed on branch"
 
 # --- 4. Gates through the REAL gate.sh, inside the worktree ------------------
 # env -u GATES_FILE: when this smoke itself runs under the self adapter (CI sets
-# GATES_FILE=.claude/self/gates.json), the inner gate.sh would inherit it, fail
+# GATES_FILE=self/gates.json), the inner gate.sh would inherit it, fail
 # to find that path inside the FIXTURE repo, and skip every gate — passing
 # vacuously even on broken code. The fixture is a consumer repo: it must read
 # its own default .claude/gates.json. (Caught by the failure-path check below.)

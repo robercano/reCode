@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hooks-parity.test.sh — offline smoke test for the hooks-parity check
-# (issue #140) added to .claude/self/checks.sh's `do_hooks_parity` (run as
+# (issue #140) added to self/checks.sh's `do_hooks_parity` (run as
 # part of `do_build`, and therefore under `gate.sh build`/`gate.sh test`).
 #
 # Asserts:
@@ -21,7 +21,7 @@ set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-checks_sh="$repo_root/.claude/self/checks.sh"
+checks_sh="$repo_root/self/checks.sh"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/hooks-parity-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT

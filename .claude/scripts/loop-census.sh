@@ -109,7 +109,7 @@
 #
 # The module label set is derived from $GATES_FILE (default .claude/gates.json)
 # → modules[].name, so the same script serves the self-hosted loop
-# (GATES_FILE=.claude/self/gates.json) and downstream adopters.
+# (GATES_FILE=self/gates.json) and downstream adopters.
 #
 # WHY THIS EXISTS (issue: loop stalled 13h with two planned issues): ticks that
 # "optimized" STEP 0 away — or piped the cursor-advancing notify-poll.sh through

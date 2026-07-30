@@ -191,7 +191,7 @@ Two ways to fire the loop; ask the user which one (`AskUserQuestion`), presentin
    ```
    bash .claude/scripts/arm-loop.sh
    ```
-   (Self-hosting: `bash .claude/scripts/arm-loop.sh --gates-file .claude/self/gates.json`.) This one script
+   (Self-hosting: `bash .claude/scripts/arm-loop.sh --gates-file self/gates.json`.) This one script
    installs both `pr-loop-<repo>.service` (the loop daemon) and `claude-rc-<repo>.service` (`claude
    remote-control` in a detached tmux session, so planning sessions can be spawned from claude.ai/mobile),
    enables + starts them, and runs `loginctl enable-linger $USER` so they keep running without an open login
