@@ -317,6 +317,10 @@ sudo gpasswd -d "$USER" docker     # if you don't need Docker in this distro
 
 ### Worked example: dedicated Linux server (maximum containment)
 
+> **Guided:** run **`/orchestrator:provision`** on the new box to be walked through this section
+> interactively — an interview, phase-by-phase checkpoints with verification, and resumable progress in
+> `.claude/state/provision-progress.json`. This section stays the source of truth; the command executes it.
+
 A dedicated server (or VM/cloud box) is the strongest home for the loop, because it fixes the two
 things a shared machine can't: a **real privilege boundary** between the agent and you (on WSL you and
 the agent are the same user, so Step 4's root-owned policy is decoration), and **kernel-level egress
