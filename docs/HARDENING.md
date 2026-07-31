@@ -315,6 +315,103 @@ sudo gpasswd -d "$USER" docker     # if you don't need Docker in this distro
 > Also scrub any `alias ssh=/mnt/...exe` from your shell rc. Same applies to editors, credential
 > helpers, or `GIT_*` vars pointed at `.exe` paths.
 
+### Worked example: dedicated Linux server (maximum containment)
+
+A dedicated server (or VM/cloud box) is the strongest home for the loop, because it fixes the two
+things a shared machine can't: a **real privilege boundary** between the agent and you (on WSL you and
+the agent are the same user, so Step 4's root-owned policy is decoration), and **kernel-level egress
+control**. The goal state: when something gets through, it lands in a disposable box holding one
+narrow token — containment, not immunity. The residual risks (your PR review as the merge gate,
+GitHub as a sanctioned exfil channel, supply chain of `claude`/`gh`/`node`/kernel) are irreducible;
+everything below is about making compromise cheap to survive and easy to notice.
+
+**1. A dedicated user that owns nothing but the loop.** You SSH in as yourself and drop *down* into
+the agent; the agent's account has no keys, no sudo, no way back up:
+
+```bash
+sudo useradd -m -s /bin/bash recode-agent      # NOT in sudo/wheel/docker/adm
+sudo loginctl enable-linger recode-agent        # user units run without a login session
+sudo -iu recode-agent                           # how YOU inspect/operate it
+```
+
+No `~/.ssh/authorized_keys` for `recode-agent` — it is reachable only via your account + `sudo -u`.
+
+**2. Fresh credentials, minted for the box (never copied from your workstation):**
+- A **fine-grained GitHub PAT** scoped to only the target repo(s) — Contents/Issues/Pull-requests
+  read-write, nothing administrative, expiry set — into `~recode-agent/<repo>/.env` (mode `600`).
+- A **dedicated Anthropic API key** with a spend cap set in the console.
+- Rotate whatever token previously lived on the old machine as part of the migration.
+
+**3. Managed settings, now with teeth (Step 4).** Install the Step 4 file at
+`/etc/claude-code/managed-settings.json`, root-owned `644`. Because the agent user can't write it or
+escalate, `disableBypassPermissionsMode` / `allowManagedDomainsOnly` / `allowManagedReadPathsOnly`
+become structural guarantees rather than conventions. Put the sandbox network allowlist here, not in
+`settings.local.json`.
+
+**4. systemd unit hardening.** `arm-loop.sh` stamps user units from `.claude/systemd/*.service`; run
+it as `recode-agent` and add a drop-in (`systemctl --user edit pr-loop-<repo>.service`) — or promote
+to system units with `User=recode-agent` for the full directive set:
+
+```ini
+[Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/recode-agent
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+MemoryMax=8G
+CPUQuota=200%
+```
+
+This constrains even *merged, reviewed* daemon code — the layer nothing else on this page provides.
+(`MemoryMax`/`CPUQuota` also stop a runaway driver from taking the box down.)
+
+**5. Kernel-level egress allowlist.** The app-layer sandbox can in principle be escaped; an nftables
+rule matched on the agent's UID cannot be talked around by an injected model. Allow only what the
+loop needs — the Anthropic API, GitHub, your notifier — and **log the drops**:
+
+```bash
+# /etc/nftables.d/recode-agent.nft — adjust the resolver/set mechanics to taste;
+# domain-based filtering needs a resolving frontend (e.g. a local proxy) or periodic set refresh.
+table inet recode_agent {
+  chain output {
+    type filter hook output priority 0;
+    meta skuid != "recode-agent" accept
+    ct state established,related accept
+    udp dport 53 accept                        # DNS (or pin to a local resolver)
+    tcp dport 443 ip daddr @allowed_v4 accept  # populate from api.anthropic.com, github.com, ntfy.sh
+    counter log prefix "recode-agent-egress-drop " drop
+  }
+}
+```
+
+Wire the drop log to your notifier — blocked egress from this box is your intrusion alarm, not noise.
+
+**6. Detection.** Single-purpose boxes make auditing cheap:
+- `auditd` watches on `.claude/scripts/`, `.claude/self/`, `.env`, and the unit files — any write
+  outside an expected driver window is an alert.
+- A root-owned timer that alerts when the checkout's daemon-executed paths diverge from
+  `origin/main` (the census's `main_dirty=` line, enforced from *outside* the agent's trust zone).
+- Persistent journald (`Storage=persistent`) so a post-incident timeline survives a reboot.
+
+**7. Migration mechanics** (from a WSL/workstation install): install `bubblewrap` + `socat` (on
+Debian-family kernels check unprivileged user namespaces are enabled), fresh clone as
+`recode-agent`, write `.env` and any machine-local state (e.g. `.claude/state/ntfy-topic`), apply
+Steps 1–4, then re-arm with `arm-loop.sh`. WSL-specific mitigations (interop/`/mnt` severing, the
+Windows-side watchdog) retire with the old host.
+
+**Checklist deltas** (on top of the Step 3 checklist):
+- [ ] Agent user has no sudo/docker membership, no SSH keys, reachable only via your account.
+- [ ] Managed settings root-owned; agent cannot edit `/etc/claude-code/`.
+- [ ] Unit hardening directives active (`systemd-analyze security pr-loop-<repo>.service`).
+- [ ] Egress allowlist live; a `curl https://example.com` as `recode-agent` is dropped AND logged.
+- [ ] PAT is fine-grained + repo-scoped + expiring; API key spend-capped; old tokens rotated.
+- [ ] auditd + divergence timer alerting into the same channel as the loop's `notify` seam.
+
 ---
 
 ## Step 3 — Activate and verify
