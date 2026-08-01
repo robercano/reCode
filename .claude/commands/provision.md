@@ -63,11 +63,15 @@ Substitute the answers everywhere below (the docs' `recode-agent` placeholder = 
 
 ## Phase 3 — fresh credentials (`3-credentials`, HARDENING step 2)
 
-You cannot mint these; guide the human through each and verify the result:
-- **Bot token** for `bot-gh.sh` (see the setup notes at the top of `.claude/scripts/bot-gh.sh` — classic
-  PAT with `repo` scope on the machine account), plus — if the loop pushes as a distinct identity — a
-  **fine-grained PAT** per the worked example: target repo(s) only, Contents/Issues/Pull-requests
-  read-write, expiry set.
+You cannot mint these; guide the human through each and verify the result. The worked example's
+**step 2** now carries the full mint walkthrough (click-path + exact permission table) — print it
+verbatim, substituting the target repo(s):
+- **Fine-grained PAT** for the loop's push identity: *Only select repositories* = the target repo(s);
+  repository permissions exactly Contents/Issues/Pull-requests read-write + Metadata read (Workflows
+  read-write only if the loop may push `.github/workflows/` changes); expiry set.
+- **Bot token** for `bot-gh.sh` (`GH_BOT_TOKEN`): **classic** PAT with the single `repo` scope, minted
+  as the machine account (classic on purpose — fine-grained PATs cannot reliably target repos owned by
+  another personal account; one-time bot setup notes at the top of `.claude/scripts/bot-gh.sh`).
 - **Dedicated Anthropic API key** with a spend cap set in the console (skip if the box will use
   subscription auth via `claude` login in Phase 4).
 - **Rotate every token that lived on the machine being replaced** — this is part of the migration, not

@@ -341,8 +341,27 @@ sudo -iu recode-agent                           # how YOU inspect/operate it
 No `~/.ssh/authorized_keys` for `recode-agent` — it is reachable only via your account + `sudo -u`.
 
 **2. Fresh credentials, minted for the box (never copied from your workstation):**
-- A **fine-grained GitHub PAT** scoped to only the target repo(s) — Contents/Issues/Pull-requests
-  read-write, nothing administrative, expiry set — into `~recode-agent/<repo>/.env` (mode `600`).
+- A **fine-grained GitHub PAT** scoped to only the target repo(s) — into `~recode-agent/<repo>/.env`
+  (mode `600`). Mint it at github.com → *Settings → Developer settings → Personal access tokens →
+  Fine-grained tokens → Generate new token*:
+  - **Resource owner**: the account/org that owns the target repo(s).
+  - **Repository access**: *Only select repositories* → the target repo(s), nothing else.
+  - **Repository permissions** — exactly these, everything else stays *No access*:
+    | Permission | Level | Why the loop needs it |
+    |---|---|---|
+    | Contents | Read and write | push branches / read the repo |
+    | Issues | Read and write | file + label loop issues |
+    | Pull requests | Read and write | open, update, comment on PRs |
+    | Metadata | Read-only | mandatory (auto-selected) |
+    | Workflows | Read and write — **only if** the loop may push changes under `.github/workflows/` | without it such pushes are refused (workflow-scope push restriction); leave at *No access* and keep CI files human-edited otherwise |
+  - **No account permissions, nothing administrative.** Set an **expiration** (≤90 days) and put the
+    rotation date somewhere you'll see it.
+- The **bot token** (`GH_BOT_TOKEN` for `bot-gh.sh`) is a separate credential and deliberately
+  **classic**, not fine-grained — fine-grained PATs cannot reliably target repos owned by another
+  personal account, and the bot is its own machine account. Mint it *as the bot*: *Settings →
+  Developer settings → Tokens (classic) → Generate new token (classic)* with the single `repo` scope,
+  expiry set. Full one-time bot setup (machine account, write-collaborator invite) is in the notes at
+  the top of `.claude/scripts/bot-gh.sh`.
 - A **dedicated Anthropic API key** with a spend cap set in the console.
 - Rotate whatever token previously lived on the old machine as part of the migration.
 

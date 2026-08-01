@@ -15,6 +15,11 @@ Entries land here as work merges; `.claude/scripts/release.sh` (issue #176) turn
   fresh credentials, clone, managed settings, harden + arm, optional nftables egress / auditd
   detection / remote-SSH per `docs/REMOTE_SSH_RUNBOOK.md`) with per-phase verification and progress
   persisted in `.claude/state/provision-progress.json`.
+- **Explicit GitHub-token mint walkthroughs** in the credential steps: `docs/HARDENING.md` worked
+  example step 2 now carries the fine-grained-PAT click-path and exact permission table (Contents/
+  Issues/Pull-requests read-write, Metadata read, Workflows only if the loop pushes CI files) plus the
+  classic `repo`-scope bot-token recipe; `/orchestrator:provision` Phase 3 prints it, and
+  `/orchestrator:setup` step 7's "action needed" path spells out the same bot-account walkthrough.
 
 ## [0.2.2] - 2026-07-17
 
