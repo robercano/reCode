@@ -6,6 +6,7 @@
   "commands": [
     "./commands/harden.md",
     "./commands/pr-loop.md",
+    "./commands/provision.md",
     "./commands/test-pr.md"
   ]
 }

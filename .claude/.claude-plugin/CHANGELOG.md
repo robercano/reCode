@@ -9,6 +9,25 @@ Entries land here as work merges; `.claude/scripts/release.sh` (issue #176) turn
 `## [X.Y.Z] - YYYY-MM-DD` section — ahead of the prior release, below this scaffold — at cut time. See
 `docs/USAGE.md` → "Release cycle".
 
+### Added
+- **`/orchestrator:provision`** (issue #204): guided, resumable walkthrough of `docs/HARDENING.md`'s
+  dedicated-Linux-server worked example — interview once, then nine checkpointed phases (agent user,
+  fresh credentials, clone, managed settings, harden + arm, optional nftables egress / auditd
+  detection / remote-SSH per `docs/REMOTE_SSH_RUNBOOK.md`) with per-phase verification and progress
+  persisted in `.claude/state/provision-progress.json`.
+- **Explicit GitHub-token mint walkthroughs** in the credential steps: `docs/HARDENING.md` worked
+  example step 2 now carries the fine-grained-PAT click-path and exact permission table (Contents/
+  Issues/Pull-requests read-write, Metadata read, Workflows only if the loop pushes CI files) plus the
+  classic `repo`-scope bot-token recipe; `/orchestrator:provision` Phase 3 prints it, and
+  `/orchestrator:setup` step 7's "action needed" path spells out the same bot-account walkthrough.
+
+### Changed
+- **`BOT_LOGIN` default is now derived from the bot token** instead of a hardcoded personal login:
+  `pr-ci-fix.sh` / `pr-comment-fix.sh` / `pr-rebase.sh` / `pr-feedback.sh` fall back to
+  `bot-gh.sh api user --jq .login` when `BOT_LOGIN` is unset, so consumer repos no longer silently
+  filter for PRs authored by the plugin author's bot. Set `BOT_LOGIN` in `.env` to skip the extra
+  API call; behavior is unchanged when it's set.
+
 ## [0.2.2] - 2026-07-17
 
 ### Changed

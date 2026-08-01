@@ -148,9 +148,16 @@ Report created vs already-existing. Remind: **an issue is only loop-eligible onc
 ## 7. Verify the bot account
 - Confirm `.env` has `GH_BOT_TOKEN` and the bot can see the repo:
   `bash ${CLAUDE_PLUGIN_ROOT:-.claude}/scripts/bot-gh.sh api user --jq .login` and a `repo view` on the resolved repo.
-- If missing/no access, DON'T fail the whole setup — point at the one-time setup notes in
-  `.claude/scripts/bot-gh.sh` (create machine account → add as **write** collaborator → classic `repo`-scope
-  token → `.env`) and mark this step "action needed".
+- If missing/no access, DON'T fail the whole setup — print the one-time walkthrough (from the setup
+  notes in `.claude/scripts/bot-gh.sh`) and mark this step "action needed":
+  1. Create a free GitHub machine account (one is allowed alongside a personal account), e.g. `<you>-assistant-bot`.
+  2. As the OWNER: add it as a **write** collaborator on this repo; accept the invite as the bot.
+  3. As the BOT: github.com → *Settings → Developer settings → Personal access tokens → Tokens (classic)
+     → Generate new token (classic)* with the single **`repo`** scope, expiry set. Classic on purpose:
+     fine-grained PATs cannot reliably target repos owned by another personal account. (This bot token is
+     distinct from the loop's own push credential — for a hardened/dedicated box see
+     `docs/HARDENING.md` → worked example step 2 for the fine-grained-PAT permission table.)
+  4. Put it in the project's gitignored `.env` as `GH_BOT_TOKEN=...` and re-run the verification above.
 
 ## 8. Server-side gates (CI)
 - Confirm `.github/workflows/gates.yml` exists (scaffolded in step 4 if it wasn't already) and its jobs match

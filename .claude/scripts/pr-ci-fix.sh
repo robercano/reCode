@@ -8,7 +8,7 @@
 #   <number>\t<branch>\t<failing_check_names_csv>\t<head_sha>
 #
 # A PR is listed when ALL hold:
-#   - authored by the bot ($BOT_LOGIN, default robercano-ghbot), open, base is
+#   - authored by the bot ($BOT_LOGIN, default: the bot token's own login), open, base is
 #     the adapter's merge.baseBranch ($GATES_FILE, default .claude/gates.json —
 #     same node-read as loop-census.sh/merge-ready.sh);
 #   - at least one CI check on the CURRENT head is FAILING: CheckRun
@@ -60,7 +60,7 @@ set -euo pipefail
 # Route EVERY gh call through the bot identity (see bot-gh.sh).
 gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-bot="${BOT_LOGIN:-robercano-ghbot}"
+bot="${BOT_LOGIN:-$(gh api user --jq .login)}"   # default: the bot token's own login
 
 gates_rel="${GATES_FILE:-.claude/gates.json}"
 case "$gates_rel" in /*) gates="$gates_rel" ;; *) gates="$root/$gates_rel" ;; esac
