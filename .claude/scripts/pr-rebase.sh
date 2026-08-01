@@ -9,7 +9,7 @@
 #   <number>\t<branch>\t<head_sha>\t<base_sha>\t<attempt>
 #
 # A PR is listed when ALL hold:
-#   - authored by the bot ($BOT_LOGIN, default robercano-ghbot), open, base is
+#   - authored by the bot ($BOT_LOGIN, default: the bot token's own login), open, base is
 #     the adapter's merge.baseBranch ($GATES_FILE, default .claude/gates.json
 #     — same node-read as loop-census.sh/pr-ci-fix.sh/pr-comment-fix.sh);
 #   - GitHub's own `mergeable` field on the PR is EXACTLY `CONFLICTING`. This
@@ -89,7 +89,7 @@ set -euo pipefail
 # Route EVERY gh call through the bot identity (see bot-gh.sh).
 gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-bot="${BOT_LOGIN:-robercano-ghbot}"
+bot="${BOT_LOGIN:-$(gh api user --jq .login)}"   # default: the bot token's own login
 
 # needs_human_flag (issue #99 seam): sourced AFTER `gh` is defined above, so
 # its calls run through the bot identity too. Guarded (not a bare source

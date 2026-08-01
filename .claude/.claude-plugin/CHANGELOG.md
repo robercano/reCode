@@ -21,6 +21,13 @@ Entries land here as work merges; `.claude/scripts/release.sh` (issue #176) turn
   classic `repo`-scope bot-token recipe; `/orchestrator:provision` Phase 3 prints it, and
   `/orchestrator:setup` step 7's "action needed" path spells out the same bot-account walkthrough.
 
+### Changed
+- **`BOT_LOGIN` default is now derived from the bot token** instead of a hardcoded personal login:
+  `pr-ci-fix.sh` / `pr-comment-fix.sh` / `pr-rebase.sh` / `pr-feedback.sh` fall back to
+  `bot-gh.sh api user --jq .login` when `BOT_LOGIN` is unset, so consumer repos no longer silently
+  filter for PRs authored by the plugin author's bot. Set `BOT_LOGIN` in `.env` to skip the extra
+  API call; behavior is unchanged when it's set.
+
 ## [0.2.2] - 2026-07-17
 
 ### Changed

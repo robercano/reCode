@@ -30,7 +30,7 @@ set -euo pipefail
 # Route EVERY gh call through the bot identity (see bot-gh.sh).
 gh() { bash "$script_dir/bot-gh.sh" "$@"; }
 repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-bot="${BOT_LOGIN:-robercano-ghbot}"
+bot="${BOT_LOGIN:-$(gh api user --jq .login)}"   # default: the bot token's own login
 marker="<!-- claude-addressed -->"
 
 # needs_human_flag/needs_human_clear (issue #99): the ONE shared label+notify
