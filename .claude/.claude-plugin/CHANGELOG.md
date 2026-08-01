@@ -9,6 +9,13 @@ Entries land here as work merges; `.claude/scripts/release.sh` (issue #176) turn
 `## [X.Y.Z] - YYYY-MM-DD` section — ahead of the prior release, below this scaffold — at cut time. See
 `docs/USAGE.md` → "Release cycle".
 
+### Added
+- **`/orchestrator:provision`** (issue #204): guided, resumable walkthrough of `docs/HARDENING.md`'s
+  dedicated-Linux-server worked example — interview once, then nine checkpointed phases (agent user,
+  fresh credentials, clone, managed settings, harden + arm, optional nftables egress / auditd
+  detection / remote-SSH per `docs/REMOTE_SSH_RUNBOOK.md`) with per-phase verification and progress
+  persisted in `.claude/state/provision-progress.json`.
+
 ## [0.2.2] - 2026-07-17
 
 ### Changed

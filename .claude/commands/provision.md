@@ -11,6 +11,9 @@ rationale from memory: read the section and use its blocks verbatim, substitutin
 Where to run: **on the new box**, as the human's own **admin** account, in a session with interactive
 permission prompts (i.e. BEFORE any hardening is active — sudo and prompts must still work), inside a
 clone of the target repo with the `orchestrator` plugin enabled (or this repo itself, self-hosted).
+The repo must already be onboarded — `.claude/gates.json` and `.claude/scripts/arm-loop.sh` exist
+(scaffolded by `/orchestrator:setup`; tracked in-repo when self-hosting). If they don't, run
+`/orchestrator:setup` first and come back.
 
 > Division of labor, stated up front and repeated per phase: you run what a sandboxed/promptable session
 > can run; anything touching **another user's `$HOME`, `/etc`, systemd, or requiring a login shell** is
@@ -22,7 +25,7 @@ clone of the target repo with the `orchestrator` plugin enabled (or this repo it
 Progress lives in `.claude/state/provision-progress.json`:
 
 ```json
-{ "answers": { "agent_user": "...", "repos": ["..."], "notifier": "...", "layers": ["nftables", "auditd"] },
+{ "answers": { "agent_user": "...", "repos": ["..."], "notifier": "...", "layers": ["nftables", "auditd", "remote-ssh"] },
   "phases": { "1-prereqs": "done", "2-agent-user": "pending", "...": "..." } }
 ```
 
@@ -35,7 +38,7 @@ silently dropped from the final report.
 
 Ask, with defaults:
 1. **Agent username** (default `recode-agent`).
-2. **Repo(s) the loop will host** (owner/name; first one is cloned in Phase 3).
+2. **Repo(s) the loop will host** (owner/name; first one is cloned in Phase 4).
 3. **Notifier** — ntfy topic (recommended; also receives the egress-drop alarm), other command, or none.
 4. **Optional layers** — kernel egress allowlist (nftables), detection (auditd + divergence timer),
    remote SSH access for humans (`docs/REMOTE_SSH_RUNBOOK.md` — on native Linux its WSL2 gotchas drop out).
@@ -111,12 +114,28 @@ If chosen in the interview:
 - Verify: `curl https://example.com` **as the agent user** is dropped AND the drop is logged/notified;
   the loop's own hosts still work (`curl -sI https://api.github.com` as the agent user succeeds).
 
-## Phase 8 — final verification (`8-verify`)
+## Phase 8 — remote SSH for humans (`8-remote-ssh`, optional layer; `docs/REMOTE_SSH_RUNBOOK.md`)
+
+If chosen in the interview — this gives the human's **admin** account zero-inbound-exposure SSH
+(Cloudflare Tunnel + Access + short-lived certs); it is **never** a path into the agent user, whose
+no-`authorized_keys` invariant from Phase 2 stands:
+- Walk the runbook top to bottom; on native Linux its WSL2-specific gotchas (the `loopback0` ufw rule,
+  `localhostForwarding`) drop out. Almost everything is human-terminal or Cloudflare-dashboard work
+  (sshd config, `cloudflared` install + tunnel, the Access app and SSH CA) — print the blocks, then verify.
+- Interplay with Phase 7's egress allowlist: `cloudflared` runs as its own system user, not the agent
+  user, so the UID-matched nftables chain does not (and must not) allowlist anything for it.
+- Verify: `sshd -T` shows loopback-only `ListenAddress`, `PasswordAuthentication no`,
+  `PermitRootLogin no`, and `AllowUsers` limited to the admin (+ email-local-part alias); the
+  `cloudflared` tunnel unit is active; the human confirms a real login from another device lands as
+  the admin account; `~<agent_user>/.ssh/authorized_keys` still does not exist.
+
+## Phase 9 — final verification (`9-verify`)
 
 Walk HARDENING.md's **"Checklist deltas"** for the worked example plus:
 - One loop tick landed in `.claude/state/loop-ticks.jsonl` (or the census explains why not).
 - A test notification arrived through the `notify` seam.
 - The old machine: its loop/daemons decommissioned and its tokens rotated (Phase 3).
+- If remote SSH was set up (Phase 8): the runbook's §6 "Verify the security posture" block passes.
 
 ## Report
 
