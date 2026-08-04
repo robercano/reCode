@@ -263,8 +263,18 @@ run_daemon_once_stripped_path() {
   # that has NEITHER node NOR claude (mirroring pr-loop.service's minimal
   # systemd PATH before issue #107's baked-PATH fix), to exercise main()'s
   # startup ensure_claude_on_path nvm fallback instead of the fixture's own
-  # bin/ dir.
-  ( cd "$1" && PATH="/usr/bin:/bin" NVM_DIR="$2" LOOP_DAEMON_MAX_ITERATIONS=1 LOOP_DAEMON_SLEEP_FAST=0 LOOP_DAEMON_SLEEP_WATCH=0 LOOP_DAEMON_SLEEP_IDLE=0 LOOP_DAEMON_SLEEP_FALLBACK=0 bash .claude/scripts/loop-daemon.sh )
+  # bin/ dir. Uses $curated_bin (NOT a bare "/usr/bin:/bin") for the exact
+  # same reason as run_daemon_once/run_daemon_once_env: a bare /usr/bin:/bin
+  # still resolves the HOST's real systemd-run/systemctl if present, and this
+  # test runs FROM INSIDE a real pr-loop-driver-issue* systemd unit (the
+  # autonomous loop dogfoods its own test gate), so main()'s startup re-attach
+  # (issue #119 pt 3 -- list_active_driver_units + wait_for_driver_unit) would
+  # see that genuinely-active host unit and block forever in its reattach poll
+  # loop, hanging this whole test suite. $curated_bin already omits
+  # node/claude/systemd-run/systemctl (see its build comment above), so it
+  # preserves this scenario's PATH-resolution purpose while restoring the
+  # systemd isolation every other helper here relies on.
+  ( cd "$1" && PATH="$curated_bin" NVM_DIR="$2" LOOP_DAEMON_MAX_ITERATIONS=1 LOOP_DAEMON_SLEEP_FAST=0 LOOP_DAEMON_SLEEP_WATCH=0 LOOP_DAEMON_SLEEP_IDLE=0 LOOP_DAEMON_SLEEP_FALLBACK=0 bash .claude/scripts/loop-daemon.sh )
 }
 
 # ---------------------------------------------------------------------------

@@ -243,6 +243,8 @@ check "issue=42 branch line shows the origin-prefixed remote-tracking name" bash
 check "ci_fix_prs=0 counted (no-op pr-ci-fix.sh stub, issue #96)" bash -c 'printf "%s\n" "$1" | grep -qx "ci_fix_prs=0"' _ "$out"
 check "comment_fix_prs=0 counted (no-op pr-comment-fix.sh stub, issue #96 part 2)" bash -c 'printf "%s\n" "$1" | grep -qx "comment_fix_prs=0"' _ "$out"
 check "rebase_prs=0 counted (no-op pr-rebase.sh stub, issue #96 part 3)" bash -c 'printf "%s\n" "$1" | grep -qx "rebase_prs=0"' _ "$out"
+check "healthy census run (issue #187): zero census_error= lines emitted (nominal fixture must never false-positive)" bash -c \
+  '[ "$(printf "%s\n" "$1" | grep -c "^census_error=")" -eq 0 ]' _ "$out"
 
 # ---------------------------------------------------------------------------
 # ci_fix_prs (issue #96): loop-census.sh must surface pr-ci-fix.sh's own
@@ -1713,6 +1715,244 @@ check "census still reaches planned_issues= despite both failures (never aborts 
   bash -c 'printf "%s\n" "$1" | grep -qx "planned_issues=1"' _ "$outCensusErr"
 check "advance_ready=none when open_prs is unknown (conservative -- never advances on bad data)" \
   bash -c 'printf "%s\n" "$1" | grep -qx "advance_ready=none"' _ "$outCensusErr"
+
+# ---------------------------------------------------------------------------
+# census_error: repo-derive (issue #187 tests-lens fix, blocker #3). Distinct
+# from every other stage: `gh repo view` is only ever called when NO repo is
+# passed as $1, and a failure there degrades to a MINIMAL, self-consistent
+# contract (every count zeroed/none, cadence=IDLE) printed BEFORE any other
+# gh call is attempted, then exits 0 -- not a partial run of the other 8
+# stages. Asserted specifically, as its own fixture, rather than folded into
+# the table-driven block below.
+# ---------------------------------------------------------------------------
+dirRepoDerive="$work/repo-derive"
+scriptsRepoDerive="$dirRepoDerive/.claude/scripts"
+mkdir -p "$scriptsRepoDerive"
+cp "$census_src" "$scriptsRepoDerive/loop-census.sh"
+cp "$resolve_roots_src" "$scriptsRepoDerive/resolve-roots.sh"
+cat > "$dirRepoDerive/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+for stub in pr-feedback pr-ci-fix pr-comment-fix pr-rebase; do
+  cat > "$scriptsRepoDerive/$stub.sh" <<EOF
+#!/usr/bin/env bash
+echo "fake-$stub.sh: should NEVER be invoked -- repo-derive must exit before reaching here" >&2
+exit 1
+EOF
+done
+cat > "$scriptsRepoDerive/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "fake-bot-gh.sh: simulated gh repo view failure" >&2; exit 1 ;;
+  *) echo "fake-bot-gh.sh: should NEVER be called past repo-derive: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$scriptsRepoDerive"/*.sh
+git -C "$dirRepoDerive" init -q -b main
+git -C "$dirRepoDerive" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+
+# NOTE: no repo arg passed -- forces loop-census.sh down the `gh repo view`
+# fallback path (the only way repo-derive's failure branch can be reached).
+outRepoDerive="$(env -u GATES_FILE bash "$scriptsRepoDerive/loop-census.sh" 2>/dev/null)"
+rcRepoDerive=$?
+check "census_error=repo-derive: script exits 0 (degraded contract printed, not a set -e crash)" \
+  bash -c '[ "$1" -eq 0 ]' _ "$rcRepoDerive"
+check "census_error=repo-derive line emitted" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "census_error=repo-derive"' _ "$outRepoDerive"
+check "census_error=repo-derive: minimal degraded contract -- open_prs=0" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "open_prs=0"' _ "$outRepoDerive"
+check "census_error=repo-derive: minimal degraded contract -- rebase_prs=0" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "rebase_prs=0"' _ "$outRepoDerive"
+check "census_error=repo-derive: minimal degraded contract -- advance_ready=none" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "advance_ready=none"' _ "$outRepoDerive"
+check "census_error=repo-derive: minimal degraded contract -- cadence=IDLE" \
+  bash -c 'printf "%s\n" "$1" | grep -q "^cadence=IDLE"' _ "$outRepoDerive"
+check "census_error=repo-derive: exactly one census_error= line (the early-exit itself, nothing downstream ran)" \
+  bash -c '[ "$(printf "%s\n" "$1" | grep -c "^census_error=")" -eq 1 ]' _ "$outRepoDerive"
+check "census_error=repo-derive: none of the sibling PR-event scripts were ever invoked (true early exit)" \
+  bash -c '! printf "%s\n" "$1" | grep -q "should NEVER be invoked"' _ "$outRepoDerive"
+
+# ---------------------------------------------------------------------------
+# census_error: remaining stage coverage (issue #187 tests-lens fix, blocker
+# #3) -- open_pr_branches, open_issue_set, feedback_prs, ci_fix_prs,
+# comment_fix_prs, planned. (open_prs and rebase_prs are already covered
+# above/in pr-rebase.test.sh; repo-derive is covered separately above because
+# of its distinct early-exit contract.) One parameterized fixture generator,
+# table-driven over the 6 remaining stages: BREAK_STAGE selects exactly ONE
+# call to fail per run, every other call succeeds normally, so a genuine
+# failure is attributable to ONLY that stage -- and the "exactly one
+# census_error= line" assertion below actively guards against a broken stage
+# ALSO false-positiving some other, unrelated stage.
+# ---------------------------------------------------------------------------
+build_stage_error_fixture() {
+  # $1 = dir name under $work -> prints fixture root
+  local dir="$work/$1"
+  local scripts="$dir/.claude/scripts"
+  mkdir -p "$scripts"
+  cp "$census_src" "$scripts/loop-census.sh"
+  cp "$resolve_roots_src" "$scripts/resolve-roots.sh"
+  cat > "$dir/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+  git -C "$dir" init -q -b main
+  git -C "$dir" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+  printf '%s\n' "$dir"
+}
+
+write_breakable_stub() {
+  # $1=path $2=BREAK_STAGE value that makes this stub fail; anything else
+  # (including BREAK_STAGE unset/a DIFFERENT stage under test) succeeds as a
+  # plain no-op, exactly like the nominal fixture1 stubs above.
+  local path="$1" stage="$2"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'if [ "${BREAK_STAGE:-}" = "%s" ]; then\n' "$stage"
+    printf '  echo "simulated failure (BREAK_STAGE=%s)" >&2\n' "$stage"
+    printf '  exit 1\n'
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$path"
+  chmod +x "$path"
+}
+
+for stage in open_pr_branches open_issue_set feedback_prs ci_fix_prs comment_fix_prs planned; do
+  dirStage="$(build_stage_error_fixture "stage-$stage")"
+  scriptsStage="$dirStage/.claude/scripts"
+  write_breakable_stub "$scriptsStage/pr-feedback.sh" "feedback_prs"
+  write_breakable_stub "$scriptsStage/pr-ci-fix.sh" "ci_fix_prs"
+  write_breakable_stub "$scriptsStage/pr-comment-fix.sh" "comment_fix_prs"
+  write_breakable_stub "$scriptsStage/pr-rebase.sh" "rebase_prs"
+  # bot-gh.sh: nominal (all-succeeding) responses for every gh call
+  # loop-census.sh makes on a healthy tick, EXCEPT the one selected by
+  # $BREAK_STAGE, which fails exactly like a real transient gh error would.
+  cat > "$scriptsStage/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q -- '--state merged'; then
+      echo 0  # stale-merged-remote per-branch check (not under test; unreached here anyway)
+    elif printf '%s\n' "$*" | grep -q -- '--json number '; then
+      echo 0  # open_prs count (covered by a separate fixture, not this table)
+    elif printf '%s\n' "$*" | grep -q 'headRefName'; then
+      if [ "${BREAK_STAGE:-}" = "open_pr_branches" ]; then
+        echo "simulated open_pr_branches failure" >&2
+        exit 1
+      fi
+      : # nominal: no open PR branches
+    else
+      echo "fake-bot-gh.sh: unexpected pr subcommand: $*" >&2
+      exit 1
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          if [ "${BREAK_STAGE:-}" = "planned" ]; then
+            echo "simulated planned failure" >&2
+            exit 1
+          fi
+          printf '5\tplanned,module:test\t\tCandidate five\n'
+        else
+          if [ "${BREAK_STAGE:-}" = "open_issue_set" ]; then
+            echo "simulated open_issue_set failure" >&2
+            exit 1
+          fi
+          printf '99\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "fake-bot-gh.sh: unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  api) exit 1 ;;  # milestones REST fetch -- degrades gracefully (`|| true` in loop-census.sh)
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$scriptsStage/bot-gh.sh"
+
+  outStage="$(env -u GATES_FILE BREAK_STAGE="$stage" bash "$scriptsStage/loop-census.sh" "acme/repo" 2>/dev/null)"
+  rcStage=$?
+  check "census_error stage coverage ($stage): script exits 0 (no set -e crash)" \
+    bash -c '[ "$1" -eq 0 ]' _ "$rcStage"
+  check "census_error stage coverage ($stage): census_error=$stage line emitted" bash -c \
+    "printf '%s\n' \"\$1\" | grep -qx 'census_error=$stage'" _ "$outStage"
+  check "census_error stage coverage ($stage): exactly one census_error= line (no cross-stage false-positive)" bash -c \
+    '[ "$(printf "%s\n" "$1" | grep -c "^census_error=")" -eq 1 ]' _ "$outStage"
+  check "census_error stage coverage ($stage): census still reaches planned_issues= (never aborts early)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^planned_issues="' _ "$outStage"
+  check "census_error stage coverage ($stage): census still reaches advance_ready= (never aborts early)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^advance_ready="' _ "$outStage"
+done
+
+# ---------------------------------------------------------------------------
+# open_prs: gh SUCCEEDS (rc=0) but returns empty/non-numeric stdout (issue
+# #187 follow-up, correctness-lens finding). The exit-code-only guard above
+# would sail right past this — open_prs="" with no census_error — and the
+# LATER `[ "$open_prs" -eq 0 ]` comparison would then blow up with a bash
+# "integer expression expected" error instead of a clean, greppable signal.
+# Reuses build_stage_error_fixture's nominal shape; only bot-gh.sh's `pr
+# list --json number ` response differs (rc=0, stdout is the literal string
+# "null" -- a real-world shape a malformed --jq expression could produce).
+# ---------------------------------------------------------------------------
+dirOpenPrsGarbage="$(build_stage_error_fixture "stage-open_prs_garbage")"
+scriptsOpenPrsGarbage="$dirOpenPrsGarbage/.claude/scripts"
+write_breakable_stub "$scriptsOpenPrsGarbage/pr-feedback.sh" "__never__"
+write_breakable_stub "$scriptsOpenPrsGarbage/pr-ci-fix.sh" "__never__"
+write_breakable_stub "$scriptsOpenPrsGarbage/pr-comment-fix.sh" "__never__"
+write_breakable_stub "$scriptsOpenPrsGarbage/pr-rebase.sh" "__never__"
+cat > "$scriptsOpenPrsGarbage/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q -- '--json number '; then
+      echo "null"  # rc=0, but non-numeric -- simulates a malformed --jq result
+    elif printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # nominal: no open PR branches
+    else
+      echo "fake-bot-gh.sh: unexpected pr subcommand: $*" >&2
+      exit 1
+    fi
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--label'; then
+          printf '5\tplanned,module:test\t\tCandidate five\n'
+        else
+          printf '99\n'
+        fi
+        ;;
+      view) echo '{"body":""}' ;;
+      *) echo "fake-bot-gh.sh: unhandled issue subcmd: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  api) exit 1 ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$scriptsOpenPrsGarbage/bot-gh.sh"
+
+outOpenPrsGarbage="$(env -u GATES_FILE bash "$scriptsOpenPrsGarbage/loop-census.sh" "acme/repo" 2>&1)"
+rcOpenPrsGarbage=$?
+check "open_prs non-numeric success: script exits 0 (no bash 'integer expression expected' crash)" \
+  bash -c '[ "$1" -eq 0 ]' _ "$rcOpenPrsGarbage"
+check "open_prs non-numeric success: census_error=open_prs line emitted (value validated, not just exit code)" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "census_error=open_prs"' _ "$outOpenPrsGarbage"
+check "open_prs non-numeric success: open_prs degrades to -1 (never the bare non-numeric value)" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "open_prs=-1"' _ "$outOpenPrsGarbage"
+check "open_prs non-numeric success: no bash 'integer expression expected' error leaked into output" \
+  bash -c '! printf "%s\n" "$1" | grep -q "integer expression expected"' _ "$outOpenPrsGarbage"
+check "open_prs non-numeric success: census still reaches advance_ready= (never aborts early)" \
+  bash -c 'printf "%s\n" "$1" | grep -q "^advance_ready="' _ "$outOpenPrsGarbage"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

@@ -104,20 +104,35 @@ base="$(node -e 'const g=require(process.argv[1]); console.log((g.merge&&g.merge
 
 # Base branch tip SHA (issue #187): `baseRefOid` is NOT a valid `gh pr list
 # --json` field on the installed gh (2.46.0) -- it only exists on the
-# GraphQL PullRequest type, which this gh has no `gh api graphql` support
-# for either. Requesting it in the `--json` list below made gh print
-# "Unknown JSON field" + exit non-zero on EVERY invocation, which the caller
-# (loop-census.sh) silently swallowed to rebase_prs=0 -- a permanent no-op.
-# Fix: every PR this script queries shares the SAME base branch ($base,
-# enforced by --base below), so the PR-level baseRefOid GitHub would report
-# is, by definition, identical to that base branch's own current tip --
-# fetch it ONCE via a plain REST call instead of a per-PR graphql round
-# trip. A failed fetch degrades to base_sha="" (never aborts): no marker
-# comment will ever match an empty sha, so every CONFLICTING PR is simply
-# treated as attempt=1 (fresh) for this tick rather than crashing the whole
-# script -- the anti-livelock budget still applies correctly on the NEXT
-# tick once the fetch succeeds.
-base_sha="$(gh api "repos/$repo/commits/$base" --jq .sha 2>/dev/null)" || base_sha=""
+# GraphQL PullRequest type. `gh api graphql` DOES work on this gh (verified
+# directly; the installed gh has no problem executing a graphql query) --
+# but a REST one-shot call here is still strictly the better choice, not
+# because graphql is unavailable: every PR this script queries shares the
+# SAME base branch ($base, enforced by --base below), so the PR-level
+# baseRefOid GitHub would report is, by definition, identical to that base
+# branch's own current tip -- one plain REST call replaces what would
+# otherwise be a per-PR graphql round trip. Requesting `baseRefOid` in the
+# `--json` list below (the pre-#187 bug) made gh print "Unknown JSON field"
+# + exit non-zero on EVERY invocation, which the caller (loop-census.sh)
+# silently swallowed to rebase_prs=0 -- a permanent no-op.
+#
+# Fail-CLOSED on a failed fetch, NOT fail-open: an empty base_sha can never
+# match a marker's `<!-- claude-rebase-attempted:<sha>:<attempt> -->`
+# ([^:]+ never matches an empty string), so treating base_sha="" as a green
+# light would silently re-emit EVERY CONFLICTING PR as a fresh attempt=1
+# candidate on every tick of a fetch outage -- the driver would then post an
+# unreadable `claude-rebase-attempted::1` marker and the anti-livelock
+# budget above would stop applying without any signal that anything was
+# wrong. Emit NOTHING instead and exit non-zero, so loop-census.sh's guard
+# (the same exit-code-checked pattern used for every sibling PR-event call --
+# see its own comment) surfaces `census_error=rebase_prs`: the loop sees
+# "census degraded" rather than misreading a fetch outage as "nothing to
+# rebase". This is a deliberate, checked `exit 1`, not an uncaught `set -e`
+# crash -- the "never abort the script" property is preserved.
+if ! base_sha="$(gh api "repos/$repo/commits/$base" --jq .sha 2>/dev/null)"; then
+  echo "pr-rebase.sh: failed to fetch base branch tip sha for '$base' -- degrading to zero rebase candidates this tick (fail-closed, issue #187)" >&2
+  exit 1
+fi
 
 # Feedback, comment-fix, AND ci-fix candidates OUTRANK rebase (precedence) —
 # exclude their PR numbers up front so a PR that qualifies for any of them

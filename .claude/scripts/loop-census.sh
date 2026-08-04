@@ -571,7 +571,21 @@ get_blocked_by() {
 # downstream open_prs comparison below takes its conservative/"don't act on
 # unknown data" branch instead of hitting a bash arithmetic error on a
 # non-numeric value).
-if ! open_prs=$(gh pr list -R "$repo" --state open --base "$base" --json number --jq 'length'); then
+#
+# The exit-code check alone is not enough (issue #187 follow-up): a gh
+# SUCCESS with empty/non-numeric stdout (a malformed --jq result, or a gh
+# version whose `length` output isn't a bare integer) would sail past `if !
+# open_prs=$(...)` unnoticed and leave open_prs="" — silently breaking the
+# LATER `[ "$open_prs" -eq 0 ]` comparison with a bash "integer expression
+# expected" error instead of a clean census_error. Validate the VALUE too,
+# reusing the same `case ... ''|*[!0-9]*)` numeric-guard idiom already used
+# for merged_count below — any non-digit-only result (including empty) is
+# treated exactly like a hard gh failure.
+if open_prs=$(gh pr list -R "$repo" --state open --base "$base" --json number --jq 'length'); then
+  case "$open_prs" in
+    ''|*[!0-9]*) census_error "open_prs"; open_prs=-1 ;;
+  esac
+else
   census_error "open_prs"
   open_prs=-1
 fi

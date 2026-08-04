@@ -77,7 +77,22 @@ EOF
 # return "base-new" -- the SAME value for every PR, exactly like the real
 # per-run fetch (every PR here shares base=main). The reset scenario (PR 19)
 # is exercised by giving ONLY that PR's marker comment an OLDER base_sha
-# ("base-old"), distinct from the current "base-new".
+# ("base-old"), distinct from the current "base-new").
+#
+# `--json` field validation (issue #187 tests-lens fix): a prior version of
+# this stub dispatched on a bare `grep -q 'headRefOid'` and returned canned
+# JSON for ANY `--json` field list containing that string -- so re-adding the
+# invalid `baseRefOid` field back into pr-rebase.sh's --json list (the exact
+# production defect this issue fixed) still made the suite go green, because
+# the stub never actually validated the field list the way real gh does.
+# `valid_pr_json_fields` below is the EXACT `gh pr list --json <bogus>`
+# allowlist reported by the real installed gh (2.46.0; confirm with
+# `gh pr list --json bogus`) -- deliberately NOT including `baseRefOid`
+# (which only exists on the GraphQL PullRequest type, never on `gh pr list`).
+# Any `--json` field outside this list makes the stub fail exactly like real
+# gh does ("Unknown JSON field: ..." + exit non-zero), so a future
+# reintroduction of `baseRefOid` here fails this suite instead of silently
+# passing.
 cat > "$scripts_dir/bot-gh.sh" <<'BOTGH'
 #!/usr/bin/env bash
 # Log every invocation (mirrors pr-comment-fix.test.sh's gh-call-log
@@ -90,12 +105,38 @@ cat > "$scripts_dir/bot-gh.sh" <<'BOTGH'
 log_dir="$(cd "$(dirname "$0")" && pwd)"
 label_marker17="$log_dir/labeled-17.marker"
 printf '%s\n' "$*" >> "$log_dir/gh-calls.log"
+# Real gh 2.46.0's `gh pr list --json <bogus>` allowlist (confirm with
+# `gh pr list --json bogus`), deliberately NOT including `baseRefOid` (which
+# only exists on the GraphQL PullRequest type, never on `gh pr list`).
+valid_pr_json_fields=" additions assignees author autoMergeRequest baseRefName body changedFiles closed closedAt comments commits createdAt deletions files headRefName headRefOid headRepository headRepositoryOwner id isCrossRepository isDraft labels latestReviews maintainerCanModify mergeCommit mergeStateStatus mergeable mergedAt mergedBy milestone number potentialMergeCommit projectCards projectItems reactionGroups reviewDecision reviewRequests reviews state statusCheckRollup title updatedAt url "
+validate_json_fields() {
+  # $1 = comma-separated --json field list; mimics real gh's per-field
+  # "Unknown JSON field" rejection (issue #187) so a bogus/invalid field
+  # (e.g. a reintroduced baseRefOid) fails the SAME way real gh 2.46.0 does.
+  local field
+  IFS=',' read -ra _fields <<< "$1"
+  for field in "${_fields[@]}"; do
+    case "$valid_pr_json_fields" in
+      *" $field "*) : ;;
+      *) echo "Unknown JSON field: \"$field\"" >&2; return 1 ;;
+    esac
+  done
+}
 case "$1" in
   repo) echo "acme/repo" ;;
   pr)
     case "$2" in
       comment) exit 0 ;;  # needs_human_flag's `gh pr comment`
     esac
+    json_fields=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--json" ] && json_fields="$a"
+      prev="$a"
+    done
+    if [ -n "$json_fields" ]; then
+      validate_json_fields "$json_fields" || exit 1
+    fi
     if printf '%s\n' "$*" | grep -q 'headRefOid'; then
       cat <<'JSON'
 {"number":10,"headRefName":"feat/issue-10-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha10"}
@@ -200,10 +241,14 @@ check "PR 19 (reset after base change): needs-human label NOT applied" \
 # ---------------------------------------------------------------------------
 # fixture2 (issue #187): the base-branch-tip fetch (`gh api
 # repos/.../commits/main --jq .sha`) itself fails (transient gh/network
-# error) -- the script must NOT abort (no `set -e` crash under
-# `set -euo pipefail`) and must still emit the CONFLICTING PR, just with an
-# empty base_sha field, degrading exactly like every other guarded gh call
-# in this script.
+# error). This must degrade FAIL-CLOSED: no `set -e` crash (a deliberate,
+# checked `exit 1`, not an uncaught failure), but ALSO no candidates emitted
+# -- an empty base_sha would otherwise re-emit the CONFLICTING PR as a fresh
+# attempt=1 candidate every tick of the outage (the OLD, fail-open
+# behavior this fixture used to assert before issue #187's fail-closed fix).
+# The script's non-zero exit is what lets loop-census.sh's guard (same
+# exit-code-checked pattern as every sibling PR-event call) surface
+# census_error=rebase_prs instead of silently reporting "nothing to do".
 # ---------------------------------------------------------------------------
 fixture2="$work/fixture2"
 scripts_dir2="$fixture2/.claude/scripts"
@@ -268,9 +313,8 @@ chmod +x "$scripts_dir2/pr-ci-fix.sh"
 
 out2="$(env -u GATES_FILE BOT_LOGIN=testbot bash "$scripts_dir2/pr-rebase.sh" "acme/repo")"
 rc2=$?
-check "base-tip fetch failure: script exits 0 (no set -e crash)" bash -c '[ "$1" -eq 0 ]' _ "$rc2"
-check "base-tip fetch failure: PR 30 still emitted, attempt=1, base_sha empty" bash -c '
-  printf "%s\n" "$1" | grep -qF "$(printf "30\tfeat/issue-30-a\tsha30\t\t1")"' _ "$out2"
+check "base-tip fetch failure: script exits non-zero (fail-closed, issue #187 -- lets loop-census.sh surface census_error=rebase_prs)" bash -c '[ "$1" -ne 0 ]' _ "$rc2"
+check "base-tip fetch failure: NO candidates emitted (fail-closed -- PR 30 must NOT be re-emitted as a bare attempt=1)" bash -c '[ -z "$1" ]' _ "$out2"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
