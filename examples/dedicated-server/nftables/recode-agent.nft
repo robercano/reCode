@@ -1,0 +1,43 @@
+#!/usr/sbin/nft -f
+# Protocol/port egress fence for the loop's agent user (HARDENING.md step 5).
+# Independent of ufw: adds only its own table, never flushes the ruleset.
+#
+# JUMP on a positive skuid match -- `skuid != N accept` never matches
+# kernel-generated packets (ICMPv6 MLD/ND, DHCP renewal), which would then fall
+# through to the drop and silently filter the host's own network stack.
+#
+# Scope, stated honestly: this restricts PROTOCOL and PORT, not destination.
+# Per-destination filtering by IP set was tried and abandoned -- GitHub,
+# Datadog, downloads.claude.ai and the remote-control endpoint all rotate
+# addresses across fleets no DNS snapshot can track, so it dropped real work
+# between refreshes. And since GitHub must be reachable for the loop to
+# function, destination filtering could never have closed the exfiltration
+# path anyway (HARDENING.md lists GitHub as a sanctioned exfil channel among
+# the irreducible risks). What remains is worth having: no outbound SSH, no
+# arbitrary ports, no non-HTTPS protocols -- and an alarm that only fires on
+# genuinely anomalous traffic, so it stays worth reading.
+#
+# For true per-domain control, the correct build is an L7 proxy with a domain
+# allowlist, with direct 443 blocked and the agent forced through it.
+table inet recode_agent {
+	chain output {
+		type filter hook output priority 0; policy accept;
+		meta skuid 1001 jump agent_out
+	}
+
+	chain agent_out {
+		oifname "lo" accept
+		ct state established,related accept
+
+		# Link-local multicast: denied, never alarmed on (discovery noise).
+		ip  daddr 224.0.0.0/4 drop
+		ip6 daddr ff00::/8 drop
+
+		udp dport 53 accept
+		tcp dport 53 accept
+		tcp dport 443 accept
+
+		# Anything else from this UID is anomalous: block it and page.
+		counter log prefix "recode-egress-drop " level warn drop
+	}
+}

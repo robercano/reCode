@@ -324,6 +324,10 @@ sudo gpasswd -d "$USER" docker     # if you don't need Docker in this distro
 
 ### Worked example: dedicated Linux server (maximum containment)
 
+> **Working files:** [`examples/dedicated-server/`](../examples/dedicated-server/) carries the
+> nftables fence, egress alarm, auditd rules, divergence tripwire and systemd drop-in from a real
+> run of this section on bare-metal Ubuntu 26.04, with the reasoning behind each choice.
+
 > **Guided:** run **`/orchestrator:provision`** on the new box to be walked through this section
 > interactively — an interview, phase-by-phase checkpoints with verification, and resumable progress in
 > `.claude/state/provision-progress.json`. This section stays the source of truth; the command executes it.
@@ -465,13 +469,32 @@ loop needs — the Anthropic API, GitHub, your notifier — and **log the drops*
 # /etc/nftables.d/recode-agent.nft — adjust the resolver/set mechanics to taste;
 # domain-based filtering needs a resolving frontend (e.g. a local proxy) or periodic set refresh.
 table inet recode_agent {
+  set allowed_v4 { type ipv4_addr; }
+  set allowed_v6 { type ipv6_addr; }
+
   chain output {
-    type filter hook output priority 0;
-    meta skuid != "recode-agent" accept
+    type filter hook output priority 0; policy accept;
+    # JUMP on a positive UID match — do NOT write `meta skuid != <uid> accept`.
+    # Kernel-generated packets (ICMPv6 MLD/ND, DHCP renewal) have NO owning
+    # socket, so `skuid != N` never matches them and they fall through to the
+    # drop below — silently filtering the host's own network stack. The symptom
+    # arrives days later as a lease that won't renew or IPv6 quietly degrading,
+    # with nothing to connect it back to this file.
+    meta skuid 1001 jump agent_out             # numeric uid; `id -u <agent>`
+  }
+
+  chain agent_out {
+    oifname "lo" accept
     ct state established,related accept
+    # Link-local multicast is local discovery noise: deny WITHOUT the log
+    # prefix, or mDNS/MLD will page you forever and the alarm stops being read.
+    ip  daddr 224.0.0.0/4 drop
+    ip6 daddr ff00::/8 drop
     udp dport 53 accept                        # DNS (or pin to a local resolver)
-    tcp dport 443 ip daddr @allowed_v4 accept  # populate from api.anthropic.com, github.com, ntfy.sh
-    counter log prefix "recode-agent-egress-drop " drop
+    tcp dport 53 accept
+    ip  daddr @allowed_v4 tcp dport 443 accept # refreshed from DNS on a timer
+    ip6 daddr @allowed_v6 tcp dport 443 accept
+    counter log prefix "recode-agent-egress-drop " level warn drop
   }
 }
 ```
@@ -496,6 +519,15 @@ Three things the sketch above glosses over, learned the hard way:
   would rather not run a resolver-refresh loop, the alternative is coarse — permit DNS and TCP 443 to
   *any* destination — but understand that this stops odd ports and non-HTTPS exfil only, and gives you
   no meaningful exfiltration alarm, which is most of the value.
+- **Resolve the hosts the agent actually contacts, not the ones you assume.** `statsig.anthropic.com`
+  (in an earlier version of this list) has **no A record**; Claude Code's feature-flag traffic goes to
+  `api.statsig.com` / `statsigapi.net` / `events.statsigapi.net` / `featureassets.org`, on Google
+  Cloud. Leaving them out is defensible — the loop works without telemetry — but it pages you forever,
+  and an alarm that cries wolf gets ignored. Decide deliberately; don't discover it as noise.
+- **Alerts must be readable and de-duplicated.** A raw kernel log line (`IN= OUT= SRC= DST= LEN=…`)
+  is unreadable on a phone. Parse `DST`/`DPT`/`PROTO`, reverse-resolve the address, and suppress
+  repeats per destination (15 minutes works) — otherwise one blocked endpoint produces dozens of
+  identical pushes and the channel becomes noise.
 
 **6. Detection.** Single-purpose boxes make auditing cheap:
 - `auditd` watches on `.claude/scripts/`, `.claude/self/`, `.env`, and the unit files — any write
