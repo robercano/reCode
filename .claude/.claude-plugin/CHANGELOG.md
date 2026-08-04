@@ -28,6 +28,117 @@ Entries land here as work merges; `.claude/scripts/release.sh` (issue #176) turn
   filter for PRs authored by the plugin author's bot. Set `BOT_LOGIN` in `.env` to skip the extra
   API call; behavior is unchanged when it's set.
 
+## [0.3.0] - 2026-08-04
+
+### Changed
+- #202: chore/ntfy-notify
+- #203: feat/issue-138-packaging-exclude
+- #199: feat/issue-177-feedback-skill
+- #198: feat/issue-175-roadmap-generator
+- #196: feat/issue-140-hooks-parity
+- #195: feat/issue-181-census-plus-worktree-marker
+- #194: feat/issue-174-milestone-scoped-census
+- #193: feat/issue-176-release-rollout-conventions
+- #191: feat/issue-141-sync-v2-checks
+- #189: feat/issue-87-go-public-docs
+- #183: chore/brand-v1.9-logo
+- #186: claude/shared-statusbar-header
+- #180: feat/issue-173-priority-labels-census
+- #179: feat/issue-94-protected-paths
+- #172: feat/issue-94-fence-driver-prompts
+- #171: feat/issue-169-needs-human-rest-labels
+- #168: feat/issue-158-census-stale-merged-remote
+- #167: feat/issue-130-arm-loop-placeholder-guard
+- #162: feat/issue-94-sanitize-untrusted
+- #161: feat/issue-154-resume-dispatch
+- #160: feat/issue-96-rebase
+- #159: feat/issue-96-comment-fix
+- #156: feat/issue-134-stop-vendoring
+- #152: feat/issue-106-git-state-guard
+- #155: feat/issue-129-gate-hygiene
+- #153: feat/issue-96-ci-fix
+- #151: feat/issue-128-vendor-runtime
+- #150: feat/issue-124-rc-supervision
+- #149: feat/issue-116-cockpit-staleness-badge
+- #148: feat/issue-100-plan-gate
+- #147: feat/issue-99-needs-human-signal
+- #146: feat/issue-98-stall-resume
+- #135: feat/issue-97-census-blocking-graph
+- #131: fix/loop-driver-working-directory
+- #127: feat/issue-95-loop-spend-ceilings
+- #126: fix/cockpit-accurate-live-state
+- #125: fix/worktree-env-bootstrap
+- #122: feat/issue-119-driver-lifetime-decouple
+- #121: fix/bot-gh-assign-review-notify
+- #120: feat/issue-113-release-0.2.1
+- #118: feat/issue-111-driver-oneshot-contract
+- #117: feat/issue-107-harden-runtime-env
+- #114: feat/issue-92-live-progress-groups
+- #112: feat/issue-91-worktree-hygiene
+- #110: feat/issue-109-release-0.2.0
+- #108: feat/issue-90-pnpm-cockpit
+- #105: feat/issue-86-rebrand-recode
+- #104: feat/issue-85-loop-health-panel
+- #103: feat/issue-102-cronless-loop-daemon
+- #101: feat/issue-84-tool-mirror-activity
+- #93: feat/issue-83-loop-tick-step0
+- #89: feat/issue-88-consolidate-setup-commands
+- #82: feat/issue-81-harden-loop-tick
+- #80: feat/issue-78-bump-version-0.1.4
+- #77: feat/issue-76-self-cmd-isolation
+- #75: feat/issue-71-tool-mirror
+- #74: feat/issue-70-worker-inspector
+- #73: feat/issue-69-cockpit-serve-sse
+- #72: feat/issue-approval-labels
+- #67: chore/bump-0.1.3
+- #66: feat/issue-63-plugin-root-derivation
+- #65: feat/issue-64-fanout-smoke
+- #61: chore/gitignore-pycache
+- #62: feat/loop-post-merge-local-sync
+- #60: fix/bump-plugin-version-for-hooks-fix
+- #58: feat/issue-52-live-progress-events
+- #57: fix/bump-plugin-version-for-hooks-fix
+- #56: fix/plugin-hooks-json-schema
+- #53: feat/issue-51-cockpit-dashboard
+- #54: fix/bot-gh-assign-scope-fallback
+- #55: feat/root-marketplace-alias
+- #50: chore/gate-pnpm-freshness-preflight
+- #49: feat/token-usage-optimization
+- #48: feat/issue-39-packaging-phase4
+merge main into feat/issue-39-packaging-phase4; resolve docs/USAGE.md; sync is now shipped (#46)
+- #46: feat/issue-38-orchestrator-sync
+- #47: feat/phone-testing-tunnel
+- #45: feat/issue-37-orchestrator-setup
+- #44: fix/hook-gate-path-project-dir
+- #43: feat/issue-36-plugin-skeleton
+- #42: feat/issue-25-ci-self-gates
+- #41: feat/test-pr-command
+- #40: feat/issue-24-pr-loop-self
+- #34: feat/issue-33-auto-assign-pr-owner
+- #35: docs/setup-orchestrator-pointers
+- #32: feat/issue-19-onboarding-loop-docs
+- #31: feat/issue-10-cockpit-evaluation
+- #30: feat/issue-9-worktree-lifecycle-rebased
+- #28: feat/issue-6-mixed-stack-example
+- #27: feat/issue-5-concurrency-doc
+- #26: feat/issue-4-test-affected-guidance
+- #23: feat/issue-11-self-adapter
+- #22: docs/setup-orchestrator-pointers
+- #21: chore/harden-hygiene
+- #20: chore/bot-identity-and-setup-orchestrator
+- #18: chore/backport-sandbox-hardening
+- #17: chore/backport-pr-loop
+Merge branch 'main' into chore/backport-pr-loop
+- #16: feat/auto-merge-loop
+Merge branch 'main' into feat/auto-merge-loop
+- #15: feat/pr-feedback-loop
+- #14: feat/bot-gh-preflight
+- #13: feat/ci-gates-workflow
+- #7: docs/pr-feedback-loop
+- #3: feat/seed-issues-example
+- #2: docs/bootstrap-first
+- #1: feat/permission-allowlist-hardening
+
 ## [0.2.2] - 2026-07-17
 
 ### Changed
