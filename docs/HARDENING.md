@@ -102,41 +102,48 @@ Starting point — adapt the lists to your stack, then drop into `.claude/settin
       "Read(~/.docker/config.json)",
       // host filesystem — WSL only; see Step 2
       "Bash(cmd.exe:*)", "Bash(powershell.exe:*)", "Bash(pwsh:*)", "Bash(wsl.exe:*)",
-      "Bash(/mnt:*)", "Read(//mnt/**)", "Edit(//mnt/**)", "Write(//mnt/**)",
-      "Edit(//etc/**)", "Write(//etc/**)",
+      "Bash(/mnt:*)", "Read(//mnt/**)", "Edit(//mnt/**)",
+      "Edit(//etc/**)",
 
       // ── Edit/Write fence (PORTABLE — copy as-is, no project paths) ──────────
       // The Edit/Write TOOLS are NOT confined by the OS Bash sandbox (that only
       // confines Bash subprocesses). Their only fence is the deny list + OS file
       // ownership. Deny the sensitive paths OUTSIDE any project; the project stays
       // writable by omission (deny beats allow, so you can't "allow-back" — see note).
+      //
+      // USE `Edit(path)` ONLY — NOT `Write(path)`. File permission checks match
+      // `Edit(...)` rules, and an Edit rule covers EVERY file-editing tool
+      // (Edit, Write, NotebookEdit). A `Write(...)` rule matches nothing; Claude
+      // Code emits a startup warning per rule and the path is left unfenced if
+      // that is the only rule you wrote for it. Pairing both was harmless but
+      // noisy, so the twins were removed here.
       // shell init & profile (run on next shell = persistence / code-exec)
-      "Edit(~/.bashrc)", "Write(~/.bashrc)",
-      "Edit(~/.bash_profile)", "Write(~/.bash_profile)",
-      "Edit(~/.profile)", "Write(~/.profile)",
-      "Edit(~/.zshrc)", "Write(~/.zshrc)",
-      "Edit(~/.zprofile)", "Write(~/.zprofile)",
-      "Edit(~/.zshenv)", "Write(~/.zshenv)",
+      "Edit(~/.bashrc)",
+      "Edit(~/.bash_profile)",
+      "Edit(~/.profile)",
+      "Edit(~/.zshrc)",
+      "Edit(~/.zprofile)",
+      "Edit(~/.zshenv)",
       // git config (hooks / aliases = code-exec on next git command)
-      "Edit(~/.gitconfig)", "Write(~/.gitconfig)",
-      "Edit(~/.config/git/**)", "Write(~/.config/git/**)",
+      "Edit(~/.gitconfig)",
+      "Edit(~/.config/git/**)",
       // credentials (Edit/Write — Read already denied above)
-      "Edit(~/.ssh/**)", "Write(~/.ssh/**)",
-      "Edit(~/.gnupg/**)", "Write(~/.gnupg/**)",
-      "Edit(~/.aws/**)", "Write(~/.aws/**)",
-      "Edit(~/.config/gcloud/**)", "Write(~/.config/gcloud/**)",
-      "Edit(~/.kube/**)", "Write(~/.kube/**)",
-      "Edit(~/.npmrc)", "Write(~/.npmrc)",
-      "Edit(~/.docker/config.json)", "Write(~/.docker/config.json)",
+      "Edit(~/.ssh/**)",
+      "Edit(~/.gnupg/**)",
+      "Edit(~/.aws/**)",
+      "Edit(~/.config/gcloud/**)",
+      "Edit(~/.kube/**)",
+      "Edit(~/.npmrc)",
+      "Edit(~/.docker/config.json)",
       // login-time / startup persistence
-      "Edit(~/.config/systemd/**)", "Write(~/.config/systemd/**)",
-      "Edit(~/.config/autostart/**)", "Write(~/.config/autostart/**)",
+      "Edit(~/.config/systemd/**)",
+      "Edit(~/.config/autostart/**)",
       // Claude Code's OWN guardrails — surgical, NOT all of ~/.claude (memory/state live there)
-      "Edit(~/.claude/settings.json)", "Write(~/.claude/settings.json)",
-      "Edit(~/.claude/settings.local.json)", "Write(~/.claude/settings.local.json)",
+      "Edit(~/.claude/settings.json)",
+      "Edit(~/.claude/settings.local.json)",
       // this project's permission files (stop the agent removing its own deny rules)
-      "Edit(.claude/settings.json)", "Write(.claude/settings.json)",
-      "Edit(.claude/settings.local.json)", "Write(.claude/settings.local.json)"
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)"
     ]
   },
   "sandbox": {
@@ -341,9 +348,13 @@ sudo -iu recode-agent                           # how YOU inspect/operate it
 No `~/.ssh/authorized_keys` for `recode-agent` — it is reachable only via your account + `sudo -u`.
 
 **2. Fresh credentials, minted for the box (never copied from your workstation):**
-- A **fine-grained GitHub PAT** scoped to only the target repo(s) — into `~recode-agent/<repo>/.env`
-  (mode `600`). Mint it at github.com → *Settings → Developer settings → Personal access tokens →
-  Fine-grained tokens → Generate new token*:
+- A **fine-grained GitHub PAT** — the loop's **push identity**. Install it with
+  `gh auth login --with-token` + `gh auth setup-git` as the agent user; **do not put it in `.env`.**
+  The scripts source `.env` with `set -a`, so a `GH_TOKEN`/`GITHUB_TOKEN` there would be exported into
+  *every* `gh` call — including `bot-gh.sh`, which would then run as the owner instead of the bot, and
+  the owner could no longer formally approve the resulting PRs. `.env` holds `GH_BOT_TOKEN` and
+  nothing else token-shaped. Mint it at github.com → *Settings → Developer settings → Personal access
+  tokens → Fine-grained tokens → Generate new token*:
   - **Resource owner**: the account/org that owns the target repo(s).
   - **Repository access**: *Only select repositories* → the target repo(s), nothing else.
   - **Repository permissions** — exactly these, everything else stays *No access*:
@@ -354,6 +365,7 @@ No `~/.ssh/authorized_keys` for `recode-agent` — it is reachable only via your
     | Pull requests | Read and write | open, update, comment on PRs |
     | Metadata | Read-only | mandatory (auto-selected) |
     | Workflows | Read and write — **only if** the loop may push changes under `.github/workflows/` | without it such pushes are refused (workflow-scope push restriction); leave at *No access* and keep CI files human-edited otherwise |
+    | Actions | **No access** | the loop reads CI state (`statusCheckRollup`, failing-check detection) through `bot-gh.sh`, i.e. on the *bot's* classic token — whose `repo` scope already covers the Actions API. Granting Actions here adds reach nothing consumes. |
   - **No account permissions, nothing administrative.** Set an **expiration** (≤90 days) and put the
     rotation date somewhere you'll see it.
 - The **bot token** (`GH_BOT_TOKEN` for `bot-gh.sh`) is a separate credential and deliberately
@@ -362,6 +374,16 @@ No `~/.ssh/authorized_keys` for `recode-agent` — it is reachable only via your
   Developer settings → Tokens (classic) → Generate new token (classic)* with the single `repo` scope,
   expiry set. Full one-time bot setup (machine account, write-collaborator invite) is in the notes at
   the top of `.claude/scripts/bot-gh.sh`.
+  **`repo` only — never add `workflow`.** With `workflow` the bot could edit `.github/workflows/`
+  through the Contents API, re-opening from the bot's side the boundary you closed by leaving
+  *Workflows* at *No access* on the fine-grained PAT. Verify the grant with
+  `bot-gh.sh api repos/<owner>/<repo> --jq .permissions` → expect `"push": true` (a bare
+  `bot-gh.sh repo view` proves nothing on a public repo).
+  **One bot, many repos = one shared credential.** `bot-gh.sh` reuses a single machine account across
+  every repo (GitHub ToS allows one free one), so the same `GH_BOT_TOKEN` ends up in each agent user's
+  `.env`. Per-repo Unix users isolate the *fine-grained* PATs from each other but **not** the bot
+  token: compromise of any one agent user yields bot-write on all of them. Org-owned repos avoid this
+  (fine-grained PATs work reliably there, so each agent can hold its own per-repo bot token).
 - A **dedicated Anthropic API key** with a spend cap set in the console.
 - Rotate whatever token previously lived on the old machine as part of the migration.
 
@@ -371,27 +393,69 @@ escalate, `disableBypassPermissionsMode` / `allowManagedDomainsOnly` / `allowMan
 become structural guarantees rather than conventions. Put the sandbox network allowlist here, not in
 `settings.local.json`.
 
-**4. systemd unit hardening.** `arm-loop.sh` stamps user units from `.claude/systemd/*.service`; run
-it as `recode-agent` and add a drop-in (`systemctl --user edit pr-loop-<repo>.service`) — or promote
-to system units with `User=recode-agent` for the full directive set:
+**4. systemd unit hardening.** `arm-loop.sh` stamps **user** units (`pr-loop-<slug>.service` and
+`claude-rc-<slug>.service`, where `<slug>` is the repo directory name lowercased). Add a drop-in as
+`recode-agent` at `~/.config/systemd/user/pr-loop-<slug>.service.d/hardening.conf`:
 
 ```ini
 [Service]
 NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=/home/recode-agent
-PrivateTmp=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
 MemoryMax=8G
 CPUQuota=200%
 ```
 
+> ⚠️ **This is the user-unit-safe set. Do not paste the full system-unit block into a `--user` unit.**
+> `ProtectKernelModules=`, `ProtectKernelTunables=` and `ProtectControlGroups=` imply
+> `CapabilityBoundingSet=` changes, and `PR_CAPBSET_DROP` requires `CAP_SETPCAP` — which an
+> unprivileged `systemd --user` manager does not have. The daemon then dies before it starts with
+> `status=218/CAPABILITIES` ("Failed to drop capabilities: Operation not permitted") and restart-loops
+> indefinitely; `systemctl --user is-active` may still report `active` because it catches the unit
+> mid-restart, so **always confirm with `journalctl --user -u pr-loop-<slug>.service -n 20`**.
+>
+> `ProtectSystem=strict`, `ReadWritePaths=` and `PrivateTmp=` need **mount** namespaces, which need
+> `CAP_SYS_ADMIN` in a user namespace — unavailable under the Ubuntu ≥24.04 userns restriction (see
+> the AppArmor subsection below). Test them one at a time and drop them if the unit fails to start.
+>
+> For the **full** directive set — including real filesystem confinement — promote the loop to a
+> **system** unit with `User=recode-agent`, where systemd has the privileges to enforce it. The
+> trade-off: `arm-loop.sh` writes user units, so every re-arm re-creates them and your system unit
+> must be maintained alongside.
+
 This constrains even *merged, reviewed* daemon code — the layer nothing else on this page provides.
 (`MemoryMax`/`CPUQuota` also stop a runaway driver from taking the box down.)
+
+**4a. Ubuntu ≥24.04: the app-layer sandbox and the userns restriction collide.** On a stock
+bare-metal Ubuntu 24.04+ install (unlike WSL2, whose Microsoft kernel does not enforce the policy),
+`kernel.apparmor_restrict_unprivileged_userns=1` is active and `/etc/apparmor.d/bwrap-userns-restrict`
+stacks every process `bwrap` execs into the `unpriv_bwrap` profile, which contains `audit deny
+capability`. Claude Code shells out to `/usr/bin/bwrap` and then builds a **second** namespace inside
+it for its seccomp layer — which needs `CAP_SYS_ADMIN` in that child. Result: every Bash call fails
+with
+
+```
+apply-seccomp: write /proc/self/setgroups
+  (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied
+```
+
+and, because `failIfUnavailable: true` is fail-closed, **the loop cannot run at all**. Diagnosis
+notes, so you don't re-derive them: `bwrap --ro-bind / / true` *passes* (the restriction is not a
+kernel-wide userns block); `cat /proc/self/attr/current` returns `unconfined` outside bwrap and
+`bwrap//&unpriv_bwrap (enforce)` inside; `strace -f -e trace=execve` shows the `execve("/usr/bin/bwrap", …)`.
+Flatpak-style single-layer bwrap use is unaffected — only nested sandboxing collides.
+
+Three ways out, in the order we'd pick them:
+
+| Option | What it costs |
+|---|---|
+| **Disable the app sandbox** (`{"sandbox": {"enabled": false}}` in managed settings) and rely on the dedicated UID, `0750` home, the `Edit()` deny fence, systemd hardening, and step 5's egress allowlist | Loses filesystem confinement *within* the agent's own home. Coherent on a dedicated box, where the OS boundaries are real — which is exactly what WSL never had. |
+| **Grant the capability back to bwrap children**: `echo 'allow capability sys_admin,' > /etc/apparmor.d/local/unpriv_bwrap && apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict` | Re-opens the userns→`CAP_SYS_ADMIN` kernel attack surface for anything that can run bwrap — i.e. the agent you are containing. Keep the kernel patched if you take it. |
+| **`sysctl kernel.apparmor_restrict_unprivileged_userns=0`** | **Don't.** Removes the mitigation for *every* binary on the box to fix one program's nesting. |
+
+Note that dropping only `sandbox.network` does **not** help — the capability is required by the core
+seccomp layer, not just the domain-filtering proxy. (Tested; it fails identically.)
 
 **5. Kernel-level egress allowlist.** The app-layer sandbox can in principle be escaped; an nftables
 rule matched on the agent's UID cannot be talked around by an injected model. Allow only what the
@@ -413,6 +477,25 @@ table inet recode_agent {
 ```
 
 Wire the drop log to your notifier — blocked egress from this box is your intrusion alarm, not noise.
+(Run that notifier as **root**: the chain matches the agent's UID, so root's own `curl` to the notifier
+is not subject to the allowlist it is reporting on.)
+
+Three things the sketch above glosses over, learned the hard way:
+
+- **Coexisting with `ufw`.** If `ufw` is active, do **not** enable `nftables.service` — it runs
+  `/etc/nftables.conf`, which conventionally starts with `flush ruleset` and would wipe ufw's rules at
+  boot. Load your table from its own `oneshot` unit (`ExecStart=/usr/sbin/nft -f …`,
+  `ExecStop=/usr/sbin/nft delete table inet recode_agent`, `After=ufw.service`) so it only ever adds
+  its own table.
+- **`policy accept` + an explicit trailing `drop`,** not `policy drop`. A UID-matched chain with a drop
+  policy will bite anything you forgot, including your own recovery shell, on a box you may only reach
+  over SSH.
+- **The allowlist rots.** GitHub and Anthropic sit behind CDNs whose addresses rotate, so a static IP
+  set silently breaks the loop days later. Refresh it from DNS on a timer (5 minutes works) and accept
+  a small race: the loop can resolve an address the set does not yet contain and get dropped. If you
+  would rather not run a resolver-refresh loop, the alternative is coarse — permit DNS and TCP 443 to
+  *any* destination — but understand that this stops odd ports and non-HTTPS exfil only, and gives you
+  no meaningful exfiltration alarm, which is most of the value.
 
 **6. Detection.** Single-purpose boxes make auditing cheap:
 - `auditd` watches on `.claude/scripts/`, `.claude/self/`, `.env`, and the unit files — any write
@@ -422,17 +505,42 @@ Wire the drop log to your notifier — blocked egress from this box is your intr
 - Persistent journald (`Storage=persistent`) so a post-incident timeline survives a reboot.
 
 **7. Migration mechanics** (from a WSL/workstation install): install `bubblewrap` + `socat` (on
-Debian-family kernels check unprivileged user namespaces are enabled), fresh clone as
-`recode-agent`, write `.env` and any machine-local state (e.g. `.claude/state/ntfy-topic`), apply
-Steps 1–4, then re-arm with `arm-loop.sh`. WSL-specific mitigations (interop/`/mnt` severing, the
-Windows-side watchdog) retire with the old host.
+Debian-family kernels check unprivileged user namespaces are enabled — and read **4a** first, because
+on Ubuntu ≥24.04 "enabled" does not mean the app sandbox will work), fresh clone as `recode-agent`,
+write `.env` and any machine-local state (e.g. `.claude/state/ntfy-topic`), apply Steps 1–4, then
+re-arm with `arm-loop.sh`. WSL-specific mitigations (interop/`/mnt` severing, the Windows-side
+watchdog) retire with the old host — as do any `//mnt/**` deny rules, which are dead weight elsewhere.
+
+Two traps in that sequence:
+
+- **Run `/orchestrator:harden` *inside the agent's clone*, as the agent user.** It writes
+  `.claude/settings.local.json`, which is **gitignored** — so it does not travel with a `git clone`,
+  and running the command in your own checkout silently hardens the wrong copy while reporting
+  success. Symptom: the agent's Claude Code sessions print only the committed-`settings.json`
+  warnings and none of the local deny rules. Verify with
+  `ls -l ~<agent>/<repo>/.claude/settings.local.json` before arming, and confirm
+  `grep defaultMode` shows `bypassPermissions`.
+- **Install a per-repo agent user per repo, not one shared account.** Three loops under one UID means
+  three repos' `.env` files readable by one compromised process, which makes the per-repo PAT scoping
+  decorative. Ubuntu's default `HOME_MODE=0750` plus a private user group already prevents one agent
+  user from traversing another's home — no `chmod` needed. Box-global phases (prerequisites, managed
+  settings, the nftables table, remote SSH) are done once and shared; only the user, credentials,
+  clone, and arming repeat.
 
 **Checklist deltas** (on top of the Step 3 checklist):
-- [ ] Agent user has no sudo/docker membership, no SSH keys, reachable only via your account.
+- [ ] Agent user has no sudo/docker membership, no SSH keys, reachable only via your account
+      (`sudo -l -U <agent>` and `sudo ls ~<agent>/.ssh` — check as root; a permission-denied from your
+      own account proves nothing).
 - [ ] Managed settings root-owned; agent cannot edit `/etc/claude-code/`.
-- [ ] Unit hardening directives active (`systemd-analyze security pr-loop-<repo>.service`).
-- [ ] Egress allowlist live; a `curl https://example.com` as `recode-agent` is dropped AND logged.
-- [ ] PAT is fine-grained + repo-scoped + expiring; API key spend-capped; old tokens rotated.
+- [ ] `settings.local.json` exists **in the agent's clone** with `defaultMode: bypassPermissions`.
+- [ ] Unit hardening drop-in uses the **user-unit-safe** directive set, and
+      `journalctl --user -u pr-loop-<slug>.service` shows a clean `loop-daemon: starting` line
+      (not `218/CAPABILITIES`). `is-active` alone is not evidence — it reports `active` mid-restart.
+- [ ] Egress allowlist live; a `curl https://example.com` as `recode-agent` is dropped AND logged AND
+      lands a notification; `curl -sI https://api.github.com` as the same user still succeeds.
+- [ ] PAT is fine-grained + repo-scoped + expiring and lives in `gh auth`, not `.env`; bot token is
+      classic `repo`-only with `"push": true`; API key spend-capped (or subscription auth chosen
+      deliberately); old tokens rotated.
 - [ ] auditd + divergence timer alerting into the same channel as the loop's `notify` seam.
 
 ---
@@ -477,9 +585,6 @@ settings**, a root-owned file the agent can't touch:
 
 ```jsonc
 {
-  "permissions": {
-    "disableBypassPermissionsMode": "disable"   // pins the bypass decision; local settings can't widen it
-  },
   "sandbox": {
     "enabled": true,
     "failIfUnavailable": true,
@@ -489,6 +594,13 @@ settings**, a root-owned file the agent can't touch:
   }
 }
 ```
+
+> ⚠️ **Do NOT add `permissions.disableBypassPermissionsMode: "disable"` while the loop runs in
+> `bypassPermissions`.** Despite the name reading like "pin the bypass decision", this key *disables*
+> bypass mode outright. `/orchestrator:harden` writes `defaultMode: "bypassPermissions"` and
+> `arm-loop.sh` reads that value to launch the daemon, so setting it stalls every driver on permission
+> prompts no human is there to answer. Use it **only** together with a deliberate switch to `dontAsk`
+> (see the note below) and a `permissions.allow` list covering every command the loop runs.
 
 Managed settings win over every other scope, and deny rules from any scope still beat allow rules from
 a lower one. This is the software-side equivalent of the OS-level isolation in Step 2: a boundary the
