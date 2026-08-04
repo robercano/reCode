@@ -69,6 +69,15 @@ EOF
 #   18: mergeable=UNKNOWN                                          -> NOT emitted (still computing)
 #   19: mergeable=CONFLICTING, marker attempt=2 for a DIFFERENT (old) base_sha
 #                                                                  -> EMITTED attempt=1 (reset)
+#
+# Issue #187: `baseRefOid` is not a valid `gh pr list --json` field on the
+# real gh 2.46.0 -- the PR list response below no longer carries it (mirrors
+# the production fix). Instead, base_sha comes from ONE fake
+# `gh api repos/acme/repo/commits/main --jq .sha` call, simulated below to
+# return "base-new" -- the SAME value for every PR, exactly like the real
+# per-run fetch (every PR here shares base=main). The reset scenario (PR 19)
+# is exercised by giving ONLY that PR's marker comment an OLDER base_sha
+# ("base-old"), distinct from the current "base-new".
 cat > "$scripts_dir/bot-gh.sh" <<'BOTGH'
 #!/usr/bin/env bash
 # Log every invocation (mirrors pr-comment-fix.test.sh's gh-call-log
@@ -89,17 +98,17 @@ case "$1" in
     esac
     if printf '%s\n' "$*" | grep -q 'headRefOid'; then
       cat <<'JSON'
-{"number":10,"headRefName":"feat/issue-10-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha10"}
-{"number":11,"headRefName":"feat/issue-11-a","author":{"login":"testbot"},"labels":[],"mergeable":"MERGEABLE","baseRefOid":"base1","headRefOid":"sha11"}
-{"number":12,"headRefName":"feat/issue-12-a","author":{"login":"testbot"},"labels":[{"name":"needs-human"}],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha12"}
-{"number":13,"headRefName":"feat/issue-13-a","author":{"login":"testbot"},"labels":[{"name":"claude-rebasing"}],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha13"}
-{"number":14,"headRefName":"feat/issue-14-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha14"}
-{"number":15,"headRefName":"feat/issue-15-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha15"}
-{"number":20,"headRefName":"feat/issue-20-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha20"}
-{"number":16,"headRefName":"feat/issue-16-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha16"}
-{"number":17,"headRefName":"feat/issue-17-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","baseRefOid":"base1","headRefOid":"sha17"}
-{"number":18,"headRefName":"feat/issue-18-a","author":{"login":"testbot"},"labels":[],"mergeable":"UNKNOWN","baseRefOid":"base1","headRefOid":"sha18"}
-{"number":19,"headRefName":"feat/issue-19-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","baseRefOid":"base-new","headRefOid":"sha19"}
+{"number":10,"headRefName":"feat/issue-10-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha10"}
+{"number":11,"headRefName":"feat/issue-11-a","author":{"login":"testbot"},"labels":[],"mergeable":"MERGEABLE","headRefOid":"sha11"}
+{"number":12,"headRefName":"feat/issue-12-a","author":{"login":"testbot"},"labels":[{"name":"needs-human"}],"mergeable":"CONFLICTING","headRefOid":"sha12"}
+{"number":13,"headRefName":"feat/issue-13-a","author":{"login":"testbot"},"labels":[{"name":"claude-rebasing"}],"mergeable":"CONFLICTING","headRefOid":"sha13"}
+{"number":14,"headRefName":"feat/issue-14-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha14"}
+{"number":15,"headRefName":"feat/issue-15-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha15"}
+{"number":20,"headRefName":"feat/issue-20-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha20"}
+{"number":16,"headRefName":"feat/issue-16-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha16"}
+{"number":17,"headRefName":"feat/issue-17-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha17"}
+{"number":18,"headRefName":"feat/issue-18-a","author":{"login":"testbot"},"labels":[],"mergeable":"UNKNOWN","headRefOid":"sha18"}
+{"number":19,"headRefName":"feat/issue-19-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha19"}
 JSON
     else
       echo "fake-bot-gh.sh: unexpected pr subcommand: $*" >&2
@@ -108,6 +117,9 @@ JSON
     ;;
   api)
     case "$*" in
+      *"repos/acme/repo/commits/main --jq .sha"*)
+        echo "base-new"
+        ;;
       *"-X POST"*"/issues/17/labels --input -")
         touch "$label_marker17"
         ;;
@@ -118,10 +130,10 @@ JSON
         [ -f "$label_marker17" ] && echo "needs-human"
         ;;
       *"issues/16/comments"*)
-        echo '[{"user":{"login":"testbot"},"body":"<!-- claude-rebase-attempted:base1:1 -->"}]'
+        echo '[{"user":{"login":"testbot"},"body":"<!-- claude-rebase-attempted:base-new:1 -->"}]'
         ;;
       *"issues/17/comments"*)
-        echo '[{"user":{"login":"testbot"},"body":"<!-- claude-rebase-attempted:base1:2 -->"}]'
+        echo '[{"user":{"login":"testbot"},"body":"<!-- claude-rebase-attempted:base-new:2 -->"}]'
         ;;
       *"issues/19/comments"*)
         echo '[{"user":{"login":"testbot"},"body":"<!-- claude-rebase-attempted:base-old:2 -->"}]'
@@ -159,7 +171,7 @@ chmod +x "$scripts_dir/pr-ci-fix.sh"
 out="$(env -u GATES_FILE BOT_LOGIN=testbot bash "$scripts_dir/pr-rebase.sh" "acme/repo")"
 
 check "PR 10 (CONFLICTING, no marker): emitted attempt=1" bash -c '
-  printf "%s\n" "$1" | grep -qF "$(printf "10\tfeat/issue-10-a\tsha10\tbase1\t1")"' _ "$out"
+  printf "%s\n" "$1" | grep -qF "$(printf "10\tfeat/issue-10-a\tsha10\tbase-new\t1")"' _ "$out"
 check "PR 11 (MERGEABLE): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^11\b"' _ "$out"
 check "PR 12 (needs-human guard): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^12\b"' _ "$out"
 check "PR 13 (claude-rebasing in-flight guard): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^13\b"' _ "$out"
@@ -167,7 +179,7 @@ check "PR 14 (also a feedback candidate -- precedence): NOT emitted" bash -c '! 
 check "PR 15 (also a comment-fix candidate -- precedence): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^15\b"' _ "$out"
 check "PR 20 (also a ci-fix candidate -- precedence): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^20\b"' _ "$out"
 check "PR 16 (marker attempt=1 for SAME base_sha): emitted attempt=2" bash -c '
-  printf "%s\n" "$1" | grep -qF "$(printf "16\tfeat/issue-16-a\tsha16\tbase1\t2")"' _ "$out"
+  printf "%s\n" "$1" | grep -qF "$(printf "16\tfeat/issue-16-a\tsha16\tbase-new\t2")"' _ "$out"
 check "PR 17 (marker attempt=2 for SAME base_sha -- budget exhausted): NOT emitted (escalated)" bash -c '! printf "%s\n" "$1" | grep -qE "^17\b"' _ "$out"
 check "PR 18 (UNKNOWN mergeable, still computing): NOT emitted" bash -c '! printf "%s\n" "$1" | grep -qE "^18\b"' _ "$out"
 check "PR 19 (marker for a DIFFERENT/old base_sha -- reset): emitted attempt=1" bash -c '
@@ -184,6 +196,81 @@ check "PR 16 (attempt 2, budget not yet exhausted): needs-human label NOT applie
   bash -c '! grep -qF -- "-X POST repos/acme/repo/issues/16/labels --input -" "$1"' _ "$gh_log1"
 check "PR 19 (reset after base change): needs-human label NOT applied" \
   bash -c '! grep -qF -- "-X POST repos/acme/repo/issues/19/labels --input -" "$1"' _ "$gh_log1"
+
+# ---------------------------------------------------------------------------
+# fixture2 (issue #187): the base-branch-tip fetch (`gh api
+# repos/.../commits/main --jq .sha`) itself fails (transient gh/network
+# error) -- the script must NOT abort (no `set -e` crash under
+# `set -euo pipefail`) and must still emit the CONFLICTING PR, just with an
+# empty base_sha field, degrading exactly like every other guarded gh call
+# in this script.
+# ---------------------------------------------------------------------------
+fixture2="$work/fixture2"
+scripts_dir2="$fixture2/.claude/scripts"
+mkdir -p "$scripts_dir2" "$fixture2/.claude/state"
+cp "$src" "$scripts_dir2/pr-rebase.sh"
+cp "$resolve_roots_src" "$scripts_dir2/resolve-roots.sh"
+cp "$script_dir/needs-human.sh" "$scripts_dir2/needs-human.sh"
+cp "$script_dir/notify.sh" "$scripts_dir2/notify.sh"
+cp "$script_dir/log-event.sh" "$scripts_dir2/log-event.sh"
+
+cat > "$fixture2/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+
+cat > "$scripts_dir2/bot-gh.sh" <<'BOTGH'
+#!/usr/bin/env bash
+log_dir="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$*" >> "$log_dir/gh-calls.log"
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    case "$2" in
+      comment) exit 0 ;;
+    esac
+    if printf '%s\n' "$*" | grep -q 'headRefOid'; then
+      echo '{"number":30,"headRefName":"feat/issue-30-a","author":{"login":"testbot"},"labels":[],"mergeable":"CONFLICTING","headRefOid":"sha30"}'
+    else
+      echo "fake-bot-gh.sh: unexpected pr subcommand: $*" >&2
+      exit 1
+    fi
+    ;;
+  api)
+    case "$*" in
+      *"repos/acme/repo/commits/main --jq .sha"*)
+        echo "fake-bot-gh.sh: simulated transient failure fetching base tip" >&2
+        exit 1
+        ;;
+      *"issues/"*"/comments"*) echo '[]' ;;
+      *) echo "fake-bot-gh.sh: unhandled api call: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+BOTGH
+chmod +x "$scripts_dir2/bot-gh.sh"
+
+cat > "$scripts_dir2/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+EOF
+chmod +x "$scripts_dir2/pr-feedback.sh"
+cat > "$scripts_dir2/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+EOF
+chmod +x "$scripts_dir2/pr-comment-fix.sh"
+cat > "$scripts_dir2/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+EOF
+chmod +x "$scripts_dir2/pr-ci-fix.sh"
+
+out2="$(env -u GATES_FILE BOT_LOGIN=testbot bash "$scripts_dir2/pr-rebase.sh" "acme/repo")"
+rc2=$?
+check "base-tip fetch failure: script exits 0 (no set -e crash)" bash -c '[ "$1" -eq 0 ]' _ "$rc2"
+check "base-tip fetch failure: PR 30 still emitted, attempt=1, base_sha empty" bash -c '
+  printf "%s\n" "$1" | grep -qF "$(printf "30\tfeat/issue-30-a\tsha30\t\t1")"' _ "$out2"
 
 echo ""
 if [ "$fail" -eq 0 ]; then

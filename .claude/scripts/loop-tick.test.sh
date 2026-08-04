@@ -964,6 +964,54 @@ out25="$(env -u GATES_FILE CLAUDE_EVENTS_FILE="$events25" bash "$dir25/loop-tick
 check "scenario 25 (real loop-census.sh reports advance_ready=none, issue 77 in_flight+stalled)" bash -c 'printf "%s\n" "$1" | grep -qx "advance_ready=none" && printf "%s\n" "$1" | grep -qx "in_flight=77" && printf "%s\n" "$1" | grep -q "^stalled=77 "' _ "$out25"
 check "scenario 25 (end-to-end reachability via REAL census): verdict is action=resume issue=77 branch=feat/issue-77-x" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=resume issue=77 branch=feat/issue-77-x" ]' _ "$out25"
 
+# ---------------------------------------------------------------------------
+# 26. census_error surfacing (issue #187): when loop-census.sh's output
+#     includes one or more `census_error=<stage>` lines (a gh/parse step
+#     failed or degraded that tick), a resulting action=none verdict must
+#     land on the tick record with a NON-EMPTY `reason` -- never the bare,
+#     empty-reason action=none that's indistinguishable from "nothing to
+#     do" (the exact #187 bug this closes). Two census_error lines are
+#     fed in to also confirm they're comma-joined, not just the first one.
+# ---------------------------------------------------------------------------
+dir26="$(new_fixture scenario26 'census_error=open_prs
+open_prs=-1
+census_error=rebase_prs
+feedback_prs=0
+ci_fix_prs=0
+comment_fix_prs=0
+rebase_prs=0
+planned_issues=0
+advance_ready=none
+cadence=IDLE cron=*/15 * * * *' '')"
+ticks26="$work/scenario26-ticks.jsonl"
+out26="$(CLAUDE_TICKS_FILE="$ticks26" run_tick "$dir26")"
+check "scenario 26: verdict is still action=none (no data to act on)" bash -c '[ "$(printf "%s\n" "$1" | tail -1)" = "action=none" ]' _ "$out26"
+check "scenario 26: tick record's reason is non-empty and names BOTH census_error stages" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.action !== "none") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (!obj.reason) throw new Error("expected a NON-EMPTY reason, got " + JSON.stringify(obj));
+  if (obj.reason !== "census_error:open_prs,rebase_prs") throw new Error("reason mismatch: " + JSON.stringify(obj));
+' "$ticks26"
+
+# A HEALTHY tick (zero census_error lines) must keep reason="" exactly as
+# before this feature -- regression control for scenario 26 above.
+dir26b="$(new_fixture scenario26b 'open_prs=0
+feedback_prs=0
+ci_fix_prs=0
+comment_fix_prs=0
+rebase_prs=0
+planned_issues=0
+advance_ready=none
+cadence=IDLE cron=*/15 * * * *' '')"
+ticks26b="$work/scenario26b-ticks.jsonl"
+out26b="$(CLAUDE_TICKS_FILE="$ticks26b" run_tick "$dir26b")"
+check "scenario 26b (no census_error lines): reason stays empty, unchanged from before this feature" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.reason !== "") throw new Error("expected empty reason, got " + JSON.stringify(obj));
+' "$ticks26b"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-tick.test.sh: PASS ($ok checks)"

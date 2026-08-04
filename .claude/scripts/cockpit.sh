@@ -783,6 +783,16 @@ function renderLoopHealth() {
   const intervalSec = CADENCE_INTERVAL_SECONDS[cadence];
 
   html += `<p>Last tick: <code>${esc(last.ts)}</code> &middot; verdict <code>${esc(last.verdict)}</code></p>`;
+  // reason (issue #187): loop-tick.sh's tick record has always carried a
+  // `reason` field (issue #95, spend-ceiling diagnostics), but this panel
+  // never rendered it -- cockpit-visibility gap that let a census_error-
+  // driven action=none look IDENTICAL to a genuinely idle repo. Render it
+  // whenever non-empty, regardless of WHICH mechanism populated it
+  // (spend-ceiling OR census_error), so an operator glancing at the panel
+  // sees not just "action=none" but WHY.
+  if (last.reason) {
+    html += `<p class="unavailable">Reason: <code>${esc(last.reason)}</code></p>`;
+  }
   html += `<p>Cadence: <span class="badge muted">${esc(cadence || "(unknown)")}</span>`;
   if (intervalSec) html += ` <span class="muted">(every ${intervalSec}s)</span>`;
   html += `</p>`;
@@ -796,11 +806,11 @@ function renderLoopHealth() {
     html += `<p class="unavailable">STALLED — no tick in over ${intervalSec * 2}s (cadence ${esc(cadence)})</p>`;
   }
 
-  html += `<table class="routing"><thead><tr><th>Time</th><th>Verdict</th><th>Cadence</th></tr></thead><tbody>`;
+  html += `<table class="routing"><thead><tr><th>Time</th><th>Verdict</th><th>Cadence</th><th>Reason</th></tr></thead><tbody>`;
   const historyStop = Math.max(0, ticks.length - VERDICT_HISTORY_N);
   for (let i = ticks.length - 1; i >= historyStop; i--) {
     const t = ticks[i];
-    html += `<tr><td>${esc(t.ts)}</td><td><code>${esc(t.verdict)}</code></td><td>${esc(t.cadence)}</td></tr>`;
+    html += `<tr><td>${esc(t.ts)}</td><td><code>${esc(t.verdict)}</code></td><td>${esc(t.cadence)}</td><td>${t.reason ? esc(t.reason) : ""}</td></tr>`;
   }
   html += `</tbody></table>`;
 

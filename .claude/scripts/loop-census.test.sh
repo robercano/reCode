@@ -1620,6 +1620,100 @@ check "worktree-marker: zero in_flight lines total (both issues already have ope
 check "worktree-marker: zero stalled lines total" bash -c \
   '[ "$(printf "%s\n" "$1" | grep -c "^stalled=")" -eq 0 ]' _ "$outWtMarker"
 
+# ---------------------------------------------------------------------------
+# census_error (issue #187): a gh/parse step failing mid-tick must surface a
+# visible `census_error=<stage>` line rather than a silently zeroed count,
+# AND census must still complete (emit every later contract line) rather
+# than aborting under `set -euo pipefail`. Two failures are injected in ONE
+# fixture run:
+#   - the CORE `gh pr list --json number` open-PR-count call, which was
+#     UNGUARDED before this fix -- a failure there used to abort the whole
+#     script (the "daemon ticks die to action=none" class of bug: no
+#     stdout at all, so loop-tick.sh's census_out ends up empty and
+#     advance_ready defaults to "none" with no way to tell that apart from
+#     a genuinely idle repo);
+#   - pr-rebase.sh itself failing, reproducing the ACTUAL #187 production
+#     bug directly (an invalid `--json` field made gh exit non-zero,
+#     silently swallowed by census's old `| grep -c . || true` down to
+#     rebase_prs=0 forever).
+# ---------------------------------------------------------------------------
+fixtureCensusErr="$work/fixture-census-error"
+scriptsCensusErr="$fixtureCensusErr/.claude/scripts"
+mkdir -p "$scriptsCensusErr"
+cp "$census_src" "$scriptsCensusErr/loop-census.sh"
+cp "$resolve_roots_src" "$scriptsCensusErr/resolve-roots.sh"
+
+cat > "$fixtureCensusErr/.claude/gates.json" <<'EOF'
+{
+  "modules": [{ "name": "test", "path": ".", "description": "", "owner": "" }],
+  "merge": { "baseBranch": "main" }
+}
+EOF
+
+cat > "$scriptsCensusErr/pr-feedback.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsCensusErr/pr-ci-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$scriptsCensusErr/pr-comment-fix.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+# The actual #187 production bug, reproduced directly: pr-rebase.sh itself
+# fails (mirrors gh exiting non-zero on the invalid baseRefOid --json field).
+cat > "$scriptsCensusErr/pr-rebase.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "fake-pr-rebase.sh: simulated Unknown JSON field failure" >&2
+exit 1
+EOF
+
+cat > "$scriptsCensusErr/bot-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/repo" ;;
+  pr)
+    if printf '%s\n' "$*" | grep -q -- '--json number '; then
+      echo "fake-bot-gh.sh: simulated gh pr list failure" >&2
+      exit 1
+    elif printf '%s\n' "$*" | grep -q 'headRefName'; then
+      : # no open PRs
+    else
+      echo "fake-bot-gh.sh: unexpected pr subcommand: $*" >&2
+      exit 1
+    fi
+    ;;
+  issue)
+    printf '5\tplanned,module:test\t\tCandidate five\n'
+    ;;
+  *) echo "fake-bot-gh.sh: unhandled args: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$scriptsCensusErr"/*.sh
+
+git -C "$fixtureCensusErr" init -q -b main
+git -C "$fixtureCensusErr" -c user.email=t@e.st -c user.name=t commit -q --allow-empty -m init
+
+outCensusErr="$(env -u GATES_FILE bash "$scriptsCensusErr/loop-census.sh" "acme/repo" 2>/dev/null)"
+rcCensusErr=$?
+
+check "census_error: script exits 0 despite the open_prs gh failure (no set -e crash)" \
+  bash -c '[ "$1" -eq 0 ]' _ "$rcCensusErr"
+check "census_error=open_prs line emitted" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "census_error=open_prs"' _ "$outCensusErr"
+check "open_prs degrades to -1 (never a bare/unset value that would break later -eq/-ge comparisons)" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "open_prs=-1"' _ "$outCensusErr"
+check "census_error=rebase_prs line emitted (the actual #187 production bug, reproduced)" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "census_error=rebase_prs"' _ "$outCensusErr"
+check "rebase_prs=0 still printed (never a bare/unset value)" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "rebase_prs=0"' _ "$outCensusErr"
+check "census still reaches planned_issues= despite both failures (never aborts early)" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "planned_issues=1"' _ "$outCensusErr"
+check "advance_ready=none when open_prs is unknown (conservative -- never advances on bad data)" \
+  bash -c 'printf "%s\n" "$1" | grep -qx "advance_ready=none"' _ "$outCensusErr"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-census.test.sh: PASS ($ok checks)"

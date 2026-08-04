@@ -47,7 +47,8 @@
 # posts a bot comment containing
 # `<!-- claude-rebase-attempted:<base_sha>:<attempt> -->` after EVERY attempt
 # (both a clean rebase+force-push AND an aborted conflicting one — see
-# loop-event.sh's rebase prompt). For the PR's CURRENT `baseRefOid` (base_sha):
+# loop-event.sh's rebase prompt). For the base branch's CURRENT tip commit
+# (base_sha — GitHub's own `baseRefOid`, fetched once per run; see below):
 #   - no marker at all for this EXACT base_sha -> next attempt is 1, this PR
 #     is a fresh candidate;
 #   - the highest-attempt marker found for this EXACT base_sha is K -> next
@@ -60,7 +61,7 @@
 # A marker's base_sha is compared for EXACT equality only — a marker posted
 # against an OLDER base_sha never counts toward the CURRENT base_sha's
 # budget. This is what makes the budget self-resetting: once a NEW sibling PR
-# merges into base, `baseRefOid` changes, every marker on file was written
+# merges into base, its tip commit (base_sha) changes, every marker on file was written
 # against the now-stale base_sha, so the count for the fresh base_sha starts
 # back at zero and this PR is eligible again (attempt=1) even if it had
 # previously exhausted its budget against the OLD base_sha and been labeled
@@ -101,6 +102,23 @@ gates_rel="${GATES_FILE:-.claude/gates.json}"
 case "$gates_rel" in /*) gates="$gates_rel" ;; *) gates="$root/$gates_rel" ;; esac
 base="$(node -e 'const g=require(process.argv[1]); console.log((g.merge&&g.merge.baseBranch)||"main")' "$gates" 2>/dev/null || echo main)"
 
+# Base branch tip SHA (issue #187): `baseRefOid` is NOT a valid `gh pr list
+# --json` field on the installed gh (2.46.0) -- it only exists on the
+# GraphQL PullRequest type, which this gh has no `gh api graphql` support
+# for either. Requesting it in the `--json` list below made gh print
+# "Unknown JSON field" + exit non-zero on EVERY invocation, which the caller
+# (loop-census.sh) silently swallowed to rebase_prs=0 -- a permanent no-op.
+# Fix: every PR this script queries shares the SAME base branch ($base,
+# enforced by --base below), so the PR-level baseRefOid GitHub would report
+# is, by definition, identical to that base branch's own current tip --
+# fetch it ONCE via a plain REST call instead of a per-PR graphql round
+# trip. A failed fetch degrades to base_sha="" (never aborts): no marker
+# comment will ever match an empty sha, so every CONFLICTING PR is simply
+# treated as attempt=1 (fresh) for this tick rather than crashing the whole
+# script -- the anti-livelock budget still applies correctly on the NEXT
+# tick once the fetch succeeds.
+base_sha="$(gh api "repos/$repo/commits/$base" --jq .sha 2>/dev/null)" || base_sha=""
+
 # Feedback, comment-fix, AND ci-fix candidates OUTRANK rebase (precedence) —
 # exclude their PR numbers up front so a PR that qualifies for any of them
 # never shows up here at all.
@@ -133,14 +151,16 @@ is_ci_fix_candidate() {
 }
 
 gh pr list -R "$repo" --state open --base "$base" \
-  --json number,headRefName,author,labels,mergeable,baseRefOid,headRefOid \
+  --json number,headRefName,author,labels,mergeable,headRefOid \
   --jq '.[] | select(.author.login=="'"$bot"'")' \
 | while IFS= read -r pr_json; do
     [ -z "$pr_json" ] && continue
 
-    # One node call per PR: parse number/branch/head/base/labels and compute
-    # the guard-skip + qualifies decisions together, so the rest of this loop
-    # body only branches on plain shell values. Extracted via `cut -f`, NOT
+    # One node call per PR: parse number/branch/head/labels and compute the
+    # guard-skip + qualifies decisions together, so the rest of this loop
+    # body only branches on plain shell values. base_sha is NOT part of this
+    # per-PR parse (see the single shared $base_sha fetched once above, not
+    # a per-PR JSON field — issue #187). Extracted via `cut -f`, NOT
     # `IFS=$'\t' read` — bash's `read` classifies tab as "IFS whitespace"
     # REGARDLESS of what IFS is set to, so it silently collapses consecutive
     # tabs (an empty field would swallow the NEXT field too); `cut` never
@@ -150,14 +170,13 @@ gh pr list -R "$repo" --state open --base "$base" \
       const labels = (p.labels || []).map((l) => l.name);
       const guardSkip = labels.includes("needs-human") || labels.includes("claude-rebasing");
       const qualifies = p.mergeable === "CONFLICTING";
-      console.log([p.number, p.headRefName || "", p.headRefOid || "", p.baseRefOid || "", guardSkip ? 1 : 0, qualifies ? 1 : 0].join("\t"));
+      console.log([p.number, p.headRefName || "", p.headRefOid || "", guardSkip ? 1 : 0, qualifies ? 1 : 0].join("\t"));
     ')"
     num="$(printf '%s' "$parsed" | cut -f1)"
     branch="$(printf '%s' "$parsed" | cut -f2)"
     head_sha="$(printf '%s' "$parsed" | cut -f3)"
-    base_sha="$(printf '%s' "$parsed" | cut -f4)"
-    guard_skip="$(printf '%s' "$parsed" | cut -f5)"
-    qualifies="$(printf '%s' "$parsed" | cut -f6)"
+    guard_skip="$(printf '%s' "$parsed" | cut -f4)"
+    qualifies="$(printf '%s' "$parsed" | cut -f5)"
 
     [ -z "${num:-}" ] && continue
     [ "$guard_skip" = "1" ] && continue
