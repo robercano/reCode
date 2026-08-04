@@ -1,0 +1,12 @@
+[Unit]
+Description=Alert on blocked egress from the loop agent
+After=recode-agent-nft.service network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/sbin/egress-alarm.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

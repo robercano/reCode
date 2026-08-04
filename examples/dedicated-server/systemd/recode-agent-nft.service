@@ -1,0 +1,13 @@
+[Unit]
+Description=Load recode-agent egress fence (nftables)
+After=network-pre.target ufw.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/recode-agent.nft
+ExecStop=/usr/sbin/nft delete table inet recode_agent
+
+[Install]
+WantedBy=multi-user.target

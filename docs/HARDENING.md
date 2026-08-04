@@ -324,6 +324,10 @@ sudo gpasswd -d "$USER" docker     # if you don't need Docker in this distro
 
 ### Worked example: dedicated Linux server (maximum containment)
 
+> **Working files:** [`examples/dedicated-server/`](../examples/dedicated-server/) carries the
+> nftables fence, egress alarm, auditd rules, divergence tripwire and systemd drop-in from a real
+> run of this section on bare-metal Ubuntu 26.04, with the reasoning behind each choice.
+
 > **Guided:** run **`/orchestrator:provision`** on the new box to be walked through this section
 > interactively — an interview, phase-by-phase checkpoints with verification, and resumable progress in
 > `.claude/state/provision-progress.json`. This section stays the source of truth; the command executes it.
