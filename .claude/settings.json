@@ -123,9 +123,7 @@
       "Read(~/.docker/config.json)",
       "Read(//mnt/**)",
       "Edit(//mnt/**)",
-      "Write(//mnt/**)",
-      "Edit(//etc/**)",
-      "Write(//etc/**)"
+      "Edit(//etc/**)"
     ]
   },
   "sandbox": {
