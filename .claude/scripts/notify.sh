@@ -18,7 +18,7 @@
 #   - positional args $1/$2/$3 = severity/title/body-line
 #   - env vars NOTIFY_SEVERITY / NOTIFY_TITLE / NOTIFY_BODY = the same three
 # Example commands (all empty by default; pick ONE in your adapter):
-#   ntfy:          "curl -s -d \"$NOTIFY_BODY\" -H \"Title: $NOTIFY_TITLE\" -H \"Priority: $NOTIFY_SEVERITY\" ntfy.sh/<your-topic>"
+#   ntfy:          "curl -s -d \"$NOTIFY_BODY\" -H \"Title: $NOTIFY_TITLE\" -H \"Priority: $NOTIFY_SEVERITY\" https://ntfy.sh/<your-topic>"
 #   notify-send:   "notify-send \"$NOTIFY_TITLE\" \"$NOTIFY_BODY\""
 #   webhook curl:  "curl -s -X POST -H 'Content-Type: application/json' -d \"{\\\"severity\\\":\\\"$NOTIFY_SEVERITY\\\",\\\"title\\\":\\\"$NOTIFY_TITLE\\\",\\\"body\\\":\\\"$NOTIFY_BODY\\\"}\" https://example.invalid/hook"
 #
