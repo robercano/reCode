@@ -206,23 +206,59 @@ If chosen in the interview — and **after** halting the loop, so an in-flight d
 If chosen in the interview — this gives the human's **admin** account zero-inbound-exposure SSH
 (Cloudflare Tunnel + Access + short-lived certs); it is **never** a path into the agent user, whose
 no-`authorized_keys` invariant from Phase 2 stands:
-- Walk the runbook top to bottom; on native Linux its WSL2-specific gotchas (the `loopback0` ufw rule,
-  `localhostForwarding`) drop out. Almost everything is human-terminal or Cloudflare-dashboard work
-  (sshd config, `cloudflared` install + tunnel, the Access app and SSH CA) — print the blocks, then verify.
-- Interplay with Phase 7's egress allowlist: `cloudflared` runs as its own system user, not the agent
-  user, so the UID-matched nftables chain does not (and must not) allowlist anything for it.
+- **Read the runbook's top banner before starting.** Its steps 4–5 are superseded: Cloudflare retired
+  the per-application SSH CA, so `cloudflared access ssh-gen` cannot mint a certificate and the
+  documented client config cannot work. Steps 1–3 (hardened loopback-only sshd, dedicated tunnel,
+  Access application) are still correct.
+- **Set expectations with the human up front**, because the successor changes the deal: Access for
+  Infrastructure requires the **WARP client on every device** in Traffic + DNS mode, uses a private
+  network route instead of the public hostname, and offers **no browser-rendered terminal**. That is a
+  device-level posture change, not a config detail — get a deliberate yes before building toward it,
+  and offer stopping with the server side complete as a legitimate outcome. Everything server-side
+  (CA, sshd, tunnel) carries forward whenever they resume.
+- Prefer Access for Infrastructure over the self-managed-keys path: the latter needs WARP *too* while
+  reintroducing long-lived `authorized_keys`, reversing the property the design exists for.
+- **Verify the CA fingerprint matches the account gateway CA** (`ssh-keygen -lf`, compared against
+  `GET /accounts/$ID/access/gateway_ca`). On a live run the dashboard-pasted key differed from the
+  signing CA, and a cert signed by an untrusted CA fails exactly like a client-side fault.
+- `cloudflared` should run as a **system** unit under its own unprivileged user, not a `--user` unit:
+  the admin account often has `Linger=no`, and remote access must not depend on a login session —
+  it is the recovery path for a box you cannot otherwise reach. Use `Type=simple`; sd_notify support
+  varies by build, and a wrong `Type` presents as a unit stuck in `activating`.
+- Interplay with Phase 7's egress fence: `cloudflared` runs as its own system user, not the agent
+  user, so the UID-matched nftables chain does not (and must not) apply to it.
+- Watch for a **pre-existing DNS record** on the chosen hostname — often an orphan from the
+  decommissioned box, since proxied records hide their target from `dig`. Check the dashboard, then
+  `--overwrite-dns`. List the account's other tunnels too (`cloudflared tunnel list`): each is a
+  standing ingress path, and stale ones are the same hygiene issue as unrotated tokens.
 - Verify: `sshd -T` shows loopback-only `ListenAddress`, `PasswordAuthentication no`,
   `PermitRootLogin no`, and `AllowUsers` limited to the admin (+ email-local-part alias); the
-  `cloudflared` tunnel unit is active; the human confirms a real login from another device lands as
-  the admin account; `~<agent_user>/.ssh/authorized_keys` still does not exist.
+  `cloudflared` tunnel unit is active with registered edge connections; `ss -tln` shows **no**
+  non-loopback listeners; the human confirms a real login from another device lands as the admin
+  account; and `/etc/ssh/principals/` plus `~<agent_user>/.ssh` confirm the agent gained no SSH path.
 
 ## Phase 9 — final verification (`9-verify`)
 
 Walk HARDENING.md's **"Checklist deltas"** for the worked example plus:
 - One loop tick landed in `.claude/state/loop-ticks.jsonl` (or the census explains why not).
-- A test notification arrived through the `notify` seam.
-- The old machine: its loop/daemons decommissioned and its tokens rotated (Phase 3).
+- A test notification arrived through the `notify` seam — **triggered, not assumed**. Force a real
+  blocked-egress event and confirm the human's phone actually buzzed.
+- `ss -tln` shows no non-loopback listeners.
+- The old machine: its loop/daemons decommissioned and its tokens rotated (Phase 3); any stale
+  Cloudflare tunnels on the account deleted.
 - If remote SSH was set up (Phase 8): the runbook's §6 "Verify the security posture" block passes.
+- **`claude-rc-<slug>.service` is a known trap.** `arm-loop.sh` passes `--spawn` to avoid the
+  first-run question, but the server still prompts `Enable Remote Control? (y/n)` inside its tmux
+  session — so the unit reports `active` while sitting on a prompt, doing nothing. `systemctl` cannot
+  see this; check with `tmux capture-pane -p -t rc-<slug> | tail`. Either answer it (and accept that
+  anyone with the human's Anthropic account can drive the agent) or
+  `systemctl --user disable --now claude-rc-<slug>.service`.
+
+**Before signing off, state the unattended posture plainly.** If the human is leaving the box alone,
+walk through the combination they are actually leaving running: the loop's `stop_after_days` horizon,
+whether remote access exists, and what the only feedback channel is. A loop armed indefinitely on a
+box with no remote shell and one notification channel is a decision worth naming out loud — recommend
+a short horizon (`--stop-after-days 14`) so it fails safe, and let them overrule it.
 
 ## Report
 

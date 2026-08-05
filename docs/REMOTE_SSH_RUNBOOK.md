@@ -1,5 +1,50 @@
 # Remote SSH into a WSL2 box — Cloudflare Tunnel + Access runbook
 
+> ## ⚠️ Steps 4–5 are SUPERSEDED — read this first (verified 2026-08)
+>
+> Cloudflare has **retired the per-application SSH CA** this runbook depends on. On a current
+> account, *Access → Service auth → SSH → Generate certificate* is **disabled**, and
+> `cloudflared access ssh-gen` fails with `Bad request, please create CA for application` — the
+> client never obtains a certificate, so nothing on the server side can fix it. Confirmed with the
+> account CA correctly trusted (see below); the failure is upstream of `sshd`.
+>
+> **Steps 1–3 remain correct and worth doing** — loopback-only hardened `sshd`, the dedicated
+> outbound-only tunnel, and the Access application in front of the hostname.
+>
+> The successor is **Access for Infrastructure**, which is a different topology:
+> - The Cloudflare One Client (**WARP**) is required on *every* client device, in Traffic + DNS mode.
+> - Connectivity uses a **private network route** (Networking → Routes → Tunnel CIDR), not the public
+>   hostname ingress in step 2.
+> - You register a **target** (Access controls → Targets: hostname + IP + virtual network) and create
+>   an **Infrastructure application** (protocol SSH, port 22) whose policy lists the exact UNIX
+>   usernames each person may log in as.
+> - Clients then use plain `ssh user@<target-ip>` — no `ProxyCommand`, no `ssh-gen`. `scp`/`sftp`/
+>   `rsync` work too, which the browser terminal never allowed.
+> - **No browser-rendered SSH terminal** is offered for infrastructure apps.
+>
+> The account-wide CA public key comes from *Access controls → Service credentials → SSH →
+> Add a certificate → Generate SSH CA*, or over the API:
+>
+> ```bash
+> curl -s "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/access/gateway_ca" \
+>   --request POST --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r .result.public_key
+> ```
+>
+> **Verify the CA you install is the one Cloudflare signs with.** On a live run the key pasted from
+> the dashboard did *not* match the account gateway CA (`SHA256:UdAX7Pben…` vs `SHA256:K3EDSsU0olUb…`).
+> A cert signed by an untrusted CA fails identically to a client-side problem and will send you
+> chasing the wrong layer. `TrustedUserCAKeys` accepts multiple CAs, one per line — trust both and
+> compare with `ssh-keygen -lf /etc/ssh/cloudflare_access_ca.pub`, which must list every fingerprint.
+>
+> There is also a **self-managed-keys** path (Tunnel → private route → plain `authorized_keys`). It
+> still requires WARP, and it reintroduces long-lived keys — reversing the "nothing long-lived to
+> steal" property that motivates layer 4 below. Prefer Access for Infrastructure if you are installing
+> WARP anyway.
+>
+> **If sshd listens on `127.0.0.1` only** (as step 1 configures), register the target as `127.0.0.1`
+> so `cloudflared` — running on the same box — dials its own loopback and the property survives. The
+> LAN-IP fallback needs a second `ListenAddress` and makes sshd reachable from your LAN.
+
 > Written for WSL2 Ubuntu, but applies almost verbatim to any Linux box — the WSL2-specific
 > gotchas (the `loopback0` ufw rule, the `localhostForwarding` note) simply drop out on native
 > Linux. Every gotcha below was hit for real on a live deployment.
@@ -139,8 +184,11 @@ Zero Trust dashboard → **Access → Applications → Add → Self-hosted**:
 
 ## 4. *(dashboard + terminal)* Short-lived certificates
 
-Zero Trust dashboard → **Access → Service auth → SSH**: select the `ssh.example.com` app and
-**Generate certificate**. Copy the public key it shows, then back on the box:
+> **SUPERSEDED** — *Service auth → SSH → Generate certificate* is disabled on current accounts. Get
+> the **account-wide** CA from *Access controls → Service credentials → SSH*, or the `gateway_ca` API
+> call in the banner at the top of this file. The `sudo tee` step below is still exactly right; only
+> where the key comes from has changed. Verify with `ssh-keygen -lf` that the fingerprint matches the
+> account CA before assuming a client-side fault.
 
 ```bash
 sudo tee /etc/ssh/cloudflare_access_ca.pub > /dev/null <<'EOF'
@@ -154,6 +202,13 @@ systemctl --user enable --now cloudflared-ssh.service
 ```
 
 ## 5. Clients
+
+> **SUPERSEDED** — everything in this section depends on `cloudflared access ssh-gen`, which no
+> longer mints certificates (see the banner). Kept for the historical record and because the
+> `Match exec` reasoning is still the correct shape *if* you ever have a working short-lived-cert
+> source. On a current account, clients use WARP + Access for Infrastructure and connect with plain
+> `ssh user@<target-ip>`, with allowed usernames set in the application policy rather than in
+> `AuthorizedPrincipalsFile`.
 
 **Laptop** (install `cloudflared` there first). GOTCHA: a bare
 `ProxyCommand cloudflared access ssh` only proxies the TCP stream — it never fetches the
