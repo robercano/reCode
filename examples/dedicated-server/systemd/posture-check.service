@@ -1,0 +1,6 @@
+[Unit]
+Description=Agent posture check (git divergence + egress-fence coverage)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/posture-check.sh

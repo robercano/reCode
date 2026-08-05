@@ -1,6 +1,0 @@
-[Unit]
-Description=Check the agent checkout against origin/main
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/divergence-check.sh

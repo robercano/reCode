@@ -15,22 +15,24 @@ Substitute `recode-agent` / uid `1001` / `recode-notifications` for your own val
 | `systemd/recode-agent-nft.service` | `/etc/systemd/system/` | Loads the table at boot; deletes it on stop |
 | `bin/egress-alarm.sh` | `/usr/local/sbin/` | Follows the kernel log, pushes blocked egress to ntfy |
 | `systemd/egress-alarm.service` | `/etc/systemd/system/` | Supervises the follower (runs as root — see below) |
-| `bin/divergence-check.sh` | `/usr/local/sbin/` | Alerts when the agent's checkout diverges from `origin/main` |
-| `systemd/divergence-check.{service,timer}` | `/etc/systemd/system/` | Hourly tripwire |
-| `audit/recode-agent.rules` | `/etc/audit/rules.d/` | auditd watches on scripts, `.env`, settings, unit files |
+| `agents.conf` | `/etc/recode-agents.conf` | **The registry.** One `user:repo` line per agent user; everything else reads it |
+| `bin/posture-check.sh` | `/usr/local/sbin/` | Hourly: git divergence **and** egress-fence coverage, for every agent in the registry |
+| `systemd/posture-check.{service,timer}` | `/etc/systemd/system/` | Hourly tripwire |
+| `bin/gen-audit-rules.sh` | run as needed | Regenerates the auditd watch list from the registry |
 | `systemd/pr-loop-hardening.conf` | `~<agent>/.config/systemd/user/pr-loop-<slug>.service.d/` | User-unit-safe hardening drop-in |
 
 Install:
 
 ```bash
 sudo mkdir -p /etc/nftables.d
+sudo install -m 644 agents.conf               /etc/recode-agents.conf
 sudo install -m 644 nftables/recode-agent.nft /etc/nftables.d/
 sudo install -m 755 bin/*.sh                  /usr/local/sbin/
 sudo install -m 644 systemd/*.service systemd/*.timer /etc/systemd/system/
-sudo install -m 640 audit/recode-agent.rules  /etc/audit/rules.d/
+sudo bash bin/gen-audit-rules.sh | sudo tee /etc/audit/rules.d/recode-agent.rules >/dev/null
 sudo nft -c -f /etc/nftables.d/recode-agent.nft   # syntax check BEFORE enabling
 sudo systemctl daemon-reload
-sudo systemctl enable --now recode-agent-nft.service egress-alarm.service divergence-check.timer
+sudo systemctl enable --now recode-agent-nft.service egress-alarm.service posture-check.timer
 sudo augenrules --load
 ```
 
@@ -41,6 +43,26 @@ mkdir -p ~/.config/systemd/user/pr-loop-<slug>.service.d
 cp pr-loop-hardening.conf ~/.config/systemd/user/pr-loop-<slug>.service.d/hardening.conf
 systemctl --user daemon-reload && systemctl --user restart pr-loop-<slug>.service
 ```
+
+## Adding a second (or third) agent user
+
+Everything except the nftables set is driven by `/etc/recode-agents.conf`:
+
+```bash
+echo 'redeploy-agent:/home/redeploy-agent/reDeploy' | sudo tee -a /etc/recode-agents.conf
+sudo bash gen-audit-rules.sh | sudo tee /etc/audit/rules.d/recode-agent.rules >/dev/null
+sudo augenrules --load
+```
+
+**Then add the uid to the nftables set by hand** — edit `elements = { ... }` in
+`/etc/nftables.d/recode-agent.nft`, then `sudo nft -c -f` it and restart the unit.
+
+That last step is deliberately manual. A generator that populated the set from the registry
+would, on any failure, leave the set **empty** — and an empty set means *no agent is fenced*,
+silently, because the drop rule lives in a chain only listed uids ever jump into. Fail-open is
+the wrong failure for this component. Instead `posture-check.sh` cross-checks the registry
+against the live set every hour and pages you if they disagree, so forgetting is noisy rather
+than invisible.
 
 ## Decisions behind these files
 

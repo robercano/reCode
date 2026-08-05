@@ -1,28 +1,40 @@
 #!/usr/sbin/nft -f
-# Protocol/port egress fence for the loop's agent user (HARDENING.md step 5).
+# Protocol/port egress fence for the loop's agent users (HARDENING.md step 5).
 # Independent of ufw: adds only its own table, never flushes the ruleset.
+#
+# ── ADDING AN AGENT USER ────────────────────────────────────────────────────
+# Add its uid to `agent_uids` below, then:
+#     sudo nft -c -f /etc/nftables.d/recode-agent.nft   # syntax check FIRST
+#     sudo systemctl restart recode-agent-nft.service
+#     sudo nft list set inet recode_agent agent_uids    # confirm it is there
+# A uid missing from this set is NOT fenced and raises NO alarm -- the drop rule
+# lives in a chain only listed uids ever jump into, so an unfenced agent looks
+# exactly like a quiet one. posture-check.sh cross-checks this set against
+# agents.conf hourly precisely because that failure is otherwise invisible.
 #
 # JUMP on a positive skuid match -- `skuid != N accept` never matches
 # kernel-generated packets (ICMPv6 MLD/ND, DHCP renewal), which would then fall
 # through to the drop and silently filter the host's own network stack.
 #
 # Scope, stated honestly: this restricts PROTOCOL and PORT, not destination.
-# Per-destination filtering by IP set was tried and abandoned -- GitHub,
-# Datadog, downloads.claude.ai and the remote-control endpoint all rotate
-# addresses across fleets no DNS snapshot can track, so it dropped real work
-# between refreshes. And since GitHub must be reachable for the loop to
-# function, destination filtering could never have closed the exfiltration
-# path anyway (HARDENING.md lists GitHub as a sanctioned exfil channel among
-# the irreducible risks). What remains is worth having: no outbound SSH, no
-# arbitrary ports, no non-HTTPS protocols -- and an alarm that only fires on
-# genuinely anomalous traffic, so it stays worth reading.
-#
-# For true per-domain control, the correct build is an L7 proxy with a domain
-# allowlist, with direct 443 blocked and the agent forced through it.
+# Per-destination IP-set filtering was tried and abandoned -- GitHub, Datadog,
+# downloads.claude.ai and the remote-control endpoint all rotate addresses
+# faster than a DNS refresh can track, and since GitHub must be reachable for
+# the loop to work, destination filtering could never close the exfiltration
+# path anyway. What remains is worth having: no outbound SSH, no arbitrary
+# ports, no non-HTTPS protocols, and an alarm that only fires on genuinely
+# anomalous traffic. For true per-domain control, build an L7 proxy with a
+# domain allowlist and block direct 443.
 table inet recode_agent {
+	# Every loop agent user's uid. `id -u <agent-user>` to find one.
+	set agent_uids {
+		type uid
+		elements = { 1001 }
+	}
+
 	chain output {
 		type filter hook output priority 0; policy accept;
-		meta skuid 1001 jump agent_out
+		meta skuid @agent_uids jump agent_out
 	}
 
 	chain agent_out {
@@ -37,7 +49,7 @@ table inet recode_agent {
 		tcp dport 53 accept
 		tcp dport 443 accept
 
-		# Anything else from this UID is anomalous: block it and page.
+		# Anything else from these UIDs is anomalous: block it and page.
 		counter log prefix "recode-egress-drop " level warn drop
 	}
 }
