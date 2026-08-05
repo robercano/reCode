@@ -483,6 +483,46 @@ dir13="$(new_fixture scenario13 "$CENSUS_READY_42" "$FEEDBACK_PR_17" 0 "$CIFIX_P
 out13="$(run_tick "$dir13")"
 check "scenario 13 (feedback beats an also-ready ci-fix): verdict is action=feedback pr=17, not ci-fix" bash -c '[ "$(verdict_of "$1")" = "action=feedback pr=17" ]' _ "$out13"
 
+# ---------------------------------------------------------------------------
+# 14. tick_reason precedence (issue #187, non-blocking follow-up): when a
+#     spend-ceiling breach (ceiling_reason, issue #95) AND one or more
+#     census_error=<stage> lines (issue #187) are BOTH present on the SAME
+#     tick, loop-tick.sh's own comment above tick_reason ("ceiling_reason
+#     ALWAYS wins when set -- a spend-ceiling breach is a MORE specific/
+#     actionable reason than 'census degraded'") documents ceiling_reason as
+#     strictly higher precedence. Exercised by combining scenario 2's
+#     past-expiry fixture (ceiling_reason=expired) with a census fixture that
+#     ALSO emits census_error=open_prs -- the tick record's reason must be
+#     EXACTLY "expired", never "census_error:open_prs" and never a
+#     concatenation of both.
+# ---------------------------------------------------------------------------
+CENSUS_READY_42_WITH_ERROR='census_error=open_prs
+open_prs=-1
+feedback_prs=0
+planned_issues=1
+issue=42 branch=none title=Do the thing
+advance_ready=42
+cadence=FAST cron=* * * * *'
+dir14="$(new_fixture scenario14 "$CENSUS_READY_42_WITH_ERROR" "" 1)"
+node -e '
+  const fs = require("fs");
+  const dir = process.argv[1] + "/../state";
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(dir + "/loop-arming.json", JSON.stringify({
+    armed_at: "2020-01-01T00:00:00Z", expires_at: "2020-01-08T00:00:00Z",
+    stop_after_days: 7, notified_expired: false, notice_issue: null,
+  }));
+' "$dir14"
+ticks14="$work/scenario14-ticks.jsonl"
+out14="$(CLAUDE_TICKS_FILE="$ticks14" run_tick "$dir14")"
+check "scenario 14 (ceiling + census_error both fire): verdict is still action=none" bash -c '[ "$(verdict_of "$1")" = "action=none" ]' _ "$out14"
+check "scenario 14: tick record reason is EXACTLY ceiling_reason (expired), not census_error, when both fire" node -e '
+  const fs = require("fs");
+  const obj = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim());
+  if (obj.action !== "none") throw new Error("action mismatch: " + JSON.stringify(obj));
+  if (obj.reason !== "expired") throw new Error("expected reason=\"expired\" (ceiling_reason must win over census_error per documented precedence), got " + JSON.stringify(obj));
+' "$ticks14"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "loop-ceilings.test.sh: PASS ($ok checks)"

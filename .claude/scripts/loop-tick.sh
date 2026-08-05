@@ -275,6 +275,17 @@ in_flight_issues="$(printf '%s\n' "$census_out" | sed -n 's/^in_flight=//p')"
 # e.g. "cadence=FAST cron=* * * * *"; keep only the leading token.
 cadence="$(printf '%s\n' "$census_out" | sed -n 's/^cadence=\([A-Za-z]*\).*/\1/p' | tail -1)"
 
+# census_error (issue #187): zero or more `census_error=<stage>` lines from
+# loop-census.sh (a gh/parse step that failed or degraded THIS TICK -- see
+# loop-census.sh's own header). Folded into a comma-joined, non-empty
+# ceiling_reason-style value below and persisted on the tick record's
+# `reason` field, so a tick that lands on action=none BECAUSE census
+# couldn't get real data is never indistinguishable, on the tick log/cockpit,
+# from a tick that landed on action=none because there was genuinely nothing
+# to do (an empty `reason` on a bare `action=none` meant exactly that before
+# this fix).
+census_error_stages="$(printf '%s\n' "$census_out" | sed -n 's/^census_error=//p' | paste -sd, - 2>/dev/null || true)"
+
 # --- Parse pr-feedback.sh's TSV (num, branch, reviewer, changes_requested_at) --
 # Lowest-numbered PR wins when several need feedback addressed.
 feedback_line="$(printf '%s\n' "$feedback_out" | awk -F'\t' 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}' | sort -t $'\t' -k1,1n | head -1)"
@@ -1027,8 +1038,20 @@ fi
 
 echo "$verdict"
 
+# tick_reason (issue #187): ceiling_reason (existing, issue #95) always wins
+# when set -- a spend-ceiling breach is a MORE specific/actionable reason
+# than "census degraded". Otherwise, when census reported one or more
+# census_error=<stage> lines this tick, fold them into the reason so the
+# tick record's `reason` field is non-empty even on a bare `action=none` --
+# see the census_error_stages comment above for why an empty reason there is
+# the exact bug this closes.
+tick_reason="$ceiling_reason"
+if [ -z "$tick_reason" ] && [ -n "$census_error_stages" ]; then
+  tick_reason="census_error:$census_error_stages"
+fi
+
 # Persist the tick record (issue #85) AFTER the verdict has been echoed, and
 # writing to the FILE ONLY -- never stdout -- so the verdict line above stays
 # the last line of this script's stdout. Best-effort: never allowed to affect
 # the exit status set below.
-write_tick_record "$verdict" "$cadence" "$ceiling_reason" || true
+write_tick_record "$verdict" "$cadence" "$tick_reason" || true

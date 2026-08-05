@@ -4,6 +4,27 @@
 # whether it can ACT — so the actionability check is a single pre-approvable
 # command instead of a discipline the tick can silently skip:
 #
+#   census_error=<stage>        zero or more (issue #187) — a gh/parse step
+#                               genuinely failed or degraded THIS TICK
+#                               instead of silently zeroing a real count or
+#                               aborting the whole script before any other
+#                               contract line printed. Printed inline, near
+#                               the (possibly degraded) line it would
+#                               otherwise have fed — greppable via
+#                               `^census_error=`. <stage> is one of:
+#                               repo-derive, open_prs, open_pr_branches,
+#                               open_issue_set, feedback_prs, ci_fix_prs,
+#                               comment_fix_prs, rebase_prs, planned. NOT
+#                               emitted for the documented, deliberate
+#                               empty-means-ok degrades (the milestone REST
+#                               fetch, the STALE-MERGED-REMOTE per-branch
+#                               merged-PR lookup) — see their own comments
+#                               below for why those stay silent. A repo with
+#                               a genuinely healthy tick prints ZERO
+#                               census_error lines, same as today.
+#                               loop-tick.sh folds this into a non-empty
+#                               tick reason (see its own header) rather than
+#                               a bare action=none with an empty reason.
 #   open_prs=N                  open PRs against the adapter's base branch
 #   feedback_prs=N              bot PRs with unaddressed CHANGES_REQUESTED (pr-feedback.sh)
 #   ci_fix_prs=N                 bot PRs with a failing CI check on the current
@@ -274,7 +295,26 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-roots.sh"
 # Route EVERY gh call through the bot identity (see bot-gh.sh).
 gh() { bash "$script_dir/bot-gh.sh" "$@"; }
-repo="${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+
+# --- census_error mechanism (issue #187) ------------------------------------
+# `census_error=<stage>` — a single-line, greppable (`^census_error=`) signal
+# printed INLINE (near the contract line it would otherwise have fed)
+# whenever a gh/parse step genuinely fails or degrades this tick, instead of
+# EITHER (a) silently zeroing a real count (the historical bug: pr-rebase.sh
+# hitting an invalid `gh pr list --json` field, swallowed by loop-census.sh's
+# own `| grep -c . || true` down to rebase_prs=0 — read by the loop forever
+# after as "nothing to rebase") OR (b) aborting this whole script under
+# `set -euo pipefail` before any contract line prints at all (the caller,
+# loop-tick.sh, then sees an empty/partial census_out and can silently
+# downgrade to `action=none` with an EMPTY reason — indistinguishable from
+# "nothing to do"). loop-tick.sh greps these out and folds them into a
+# non-empty tick reason (see loop-tick.sh's own header comment). This is NOT
+# for the documented, deliberate empty-means-ok degrades (e.g. the milestone
+# REST fetch below, or the STALE-MERGED-REMOTE per-branch lookup) — only for
+# a failure that would otherwise zero out or abort past a REAL signal.
+census_error() {
+  echo "census_error=$1"
+}
 
 gates_rel="${GATES_FILE:-.claude/gates.json}"
 case "$gates_rel" in /*) gates="$gates_rel" ;; *) gates="$root/$gates_rel" ;; esac
@@ -325,6 +365,32 @@ echo "main_dirty=$main_dirty"
 main_head=$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 [ -n "$main_head" ] || main_head="detached"
 echo "main_head=$main_head"
+
+# repo (issue #187): derived from $1, falling back to `gh repo view` only
+# when no explicit repo was passed. Guarded — an unguarded `gh repo view`
+# failure here used to abort this entire script under `set -euo pipefail`
+# BEFORE main_dirty=/main_head= even printed (they're computed above this
+# line precisely so they survive a repo-derivation failure too). Everything
+# below this point needs a real $repo, so on failure this prints a minimal,
+# internally-consistent (never partial/ambiguous) degraded contract plus
+# census_error=repo-derive, and exits 0 rather than crashing or continuing
+# with gh calls against an empty/invalid repo.
+if [ -n "${1:-}" ]; then
+  repo="$1"
+else
+  if ! repo="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || [ -z "$repo" ]; then
+    census_error "repo-derive"
+    echo "open_prs=0"
+    echo "feedback_prs=0"
+    echo "ci_fix_prs=0"
+    echo "comment_fix_prs=0"
+    echo "rebase_prs=0"
+    echo "planned_issues=0"
+    echo "advance_ready=none"
+    echo "cadence=IDLE cron=*/15 * * * *"
+    exit 0
+  fi
+fi
 
 # Adapter-derived facts: base branch + the module:* label set.
 base=$(node -e 'const g=require(process.argv[1]); console.log((g.merge&&g.merge.baseBranch)||"main")' "$gates")
@@ -496,19 +562,59 @@ get_blocked_by() {
   ' "$json" 2>/dev/null || true
 }
 
-open_prs=$(gh pr list -R "$repo" --state open --base "$base" --json number --jq 'length')
+# open_prs (issue #187): guarded — an unguarded `gh pr list` failure here
+# used to abort this ENTIRE script under `set -euo pipefail` (the "daemon
+# ticks die to action=none" symptom: loop-tick.sh's census_out ends up
+# empty/partial, advance_ready defaults to "none" with no way to tell that
+# apart from a genuinely idle repo). On failure: census_error, and open_prs
+# degrades to -1 (a value that is neither `-eq 0` nor `-ge 1`, so every
+# downstream open_prs comparison below takes its conservative/"don't act on
+# unknown data" branch instead of hitting a bash arithmetic error on a
+# non-numeric value).
+#
+# The exit-code check alone is not enough (issue #187 follow-up): a gh
+# SUCCESS with empty/non-numeric stdout (a malformed --jq result, or a gh
+# version whose `length` output isn't a bare integer) would sail past `if !
+# open_prs=$(...)` unnoticed and leave open_prs="" — silently breaking the
+# LATER `[ "$open_prs" -eq 0 ]` comparison with a bash "integer expression
+# expected" error instead of a clean census_error. Validate the VALUE too,
+# reusing the same `case ... ''|*[!0-9]*)` numeric-guard idiom already used
+# for merged_count below — any non-digit-only result (including empty) is
+# treated exactly like a hard gh failure.
+if open_prs=$(gh pr list -R "$repo" --state open --base "$base" --json number --jq 'length'); then
+  case "$open_prs" in
+    ''|*[!0-9]*) census_error "open_prs"; open_prs=-1 ;;
+  esac
+else
+  census_error "open_prs"
+  open_prs=-1
+fi
 echo "open_prs=$open_prs"
 
 # Head branch names of every open PR (against base) — used below to tell
 # in_flight (branch exists, no PR yet) apart from already-at-PR-stage.
-open_pr_branches=$(gh pr list -R "$repo" --state open --base "$base" --json headRefName --jq '.[].headRefName')
+# Guarded (issue #187): failure degrades to open_pr_branches="" (every
+# candidate branch just looks like it has no open PR yet, i.e. in_flight —
+# the conservative direction, same as the pre-existing "no open PRs" case)
+# instead of aborting the whole script.
+if ! open_pr_branches=$(gh pr list -R "$repo" --state open --base "$base" --json headRefName --jq '.[].headRefName'); then
+  census_error "open_pr_branches"
+  open_pr_branches=""
+fi
 
 # All open issue numbers (bounded --limit, matching cockpit.sh's own --state
 # open fetch) — used to decide whether a candidate's "Blocked by #N" target
 # is still open. `|| true` guards a transient gh failure from wedging the
 # whole census; an empty set just makes is_open_issue always report false,
 # i.e. the blocking gate degrades to a no-op (same as before this feature).
-open_issue_set=$(gh issue list -R "$repo" --state open --json number --jq '.[].number' --limit 200 2>/dev/null) || true
+# census_error (issue #187): this degrade is silent on PURPOSE for a
+# genuinely empty open-issue set, but a genuine gh FAILURE still needs to be
+# told apart from "repo has zero open issues" — rc is checked explicitly
+# rather than folded into the `|| true`.
+if ! open_issue_set=$(gh issue list -R "$repo" --state open --json number --jq '.[].number' --limit 200 2>/dev/null); then
+  census_error "open_issue_set"
+  open_issue_set=""
+fi
 
 # PR_FEEDBACK_COUNT_ONLY=1 (issue #99 re-review finding #2): census is a
 # read-only report -- it must NEVER mutate GitHub state. pr-feedback.sh's own
@@ -517,16 +623,45 @@ open_issue_set=$(gh issue list -R "$repo" --state open --json number --jq '.[].n
 # of that while still printing the identical TSV this line counts. The real,
 # side-effecting invocation stays in loop-tick.sh, which actually dispatches
 # fixes for the PRs this counts.
-feedback_prs=$(PR_FEEDBACK_COUNT_ONLY=1 bash "$script_dir/pr-feedback.sh" "$repo" | grep -c . || true)
+#
+# Each of the four PR-event scripts below is guarded the SAME way (issue
+# #187): the sibling script's OWN exit status is checked (not just its
+# stdout line count) so a genuine failure inside it -- e.g. pr-rebase.sh's
+# `gh pr list` erroring on an invalid --json field, the historical bug this
+# issue fixes -- surfaces as census_error=<n>_prs instead of silently
+# reporting 0 (indistinguishable from "nothing to do" for that PR-event
+# type, forever). stderr is left un-redirected (same as before) so the
+# underlying gh/script error is still visible to a human tailing the loop.
+if feedback_raw=$(PR_FEEDBACK_COUNT_ONLY=1 bash "$script_dir/pr-feedback.sh" "$repo"); then
+  feedback_prs=$(printf '%s\n' "$feedback_raw" | grep -c . || true)
+else
+  census_error "feedback_prs"
+  feedback_prs=0
+fi
 echo "feedback_prs=$feedback_prs"
 
-ci_fix_prs=$(bash "$script_dir/pr-ci-fix.sh" "$repo" | grep -c . || true)
+if cifix_raw=$(bash "$script_dir/pr-ci-fix.sh" "$repo"); then
+  ci_fix_prs=$(printf '%s\n' "$cifix_raw" | grep -c . || true)
+else
+  census_error "ci_fix_prs"
+  ci_fix_prs=0
+fi
 echo "ci_fix_prs=$ci_fix_prs"
 
-comment_fix_prs=$(bash "$script_dir/pr-comment-fix.sh" "$repo" | grep -c . || true)
+if commentfix_raw=$(bash "$script_dir/pr-comment-fix.sh" "$repo"); then
+  comment_fix_prs=$(printf '%s\n' "$commentfix_raw" | grep -c . || true)
+else
+  census_error "comment_fix_prs"
+  comment_fix_prs=0
+fi
 echo "comment_fix_prs=$comment_fix_prs"
 
-rebase_prs=$(bash "$script_dir/pr-rebase.sh" "$repo" | grep -c . || true)
+if rebase_raw=$(bash "$script_dir/pr-rebase.sh" "$repo"); then
+  rebase_prs=$(printf '%s\n' "$rebase_raw" | grep -c . || true)
+else
+  census_error "rebase_prs"
+  rebase_prs=0
+fi
 echo "rebase_prs=$rebase_prs"
 
 # Open `planned` issues carrying any of the adapter's module labels, ordered
@@ -539,7 +674,14 @@ echo "rebase_prs=$rebase_prs"
 # (never a separate per-milestone issue query — see the gh 2.4.0 note in
 # MILESTONE SCOPING above), placed BEFORE title so title stays the LAST TSV
 # field (may contain spaces) and is left untouched by this transform.
-planned=$(gh issue list -R "$repo" --state open --label planned --json number,title,labels,milestone \
+# Guarded (issue #187): this pipeline used to be a bare, unguarded
+# assignment -- a `gh issue list` failure (under `pipefail`, the pipeline's
+# exit status is gh's, even though the downstream awk/sort/cut all succeed
+# on empty input) aborted this whole script before ANY contract line below
+# this point could print. On failure, degrade to planned="" (identical to
+# "repo has zero planned issues" downstream) plus census_error, rather than
+# crashing.
+if ! planned=$(gh issue list -R "$repo" --state open --label planned --json number,title,labels,milestone \
   --jq '.[] | [.number, ([.labels[].name]|join(",")), (.milestone.title // ""), .title] | @tsv' \
   | awk -F'\t' 'BEGIN { OFS = "\t" }
     {
@@ -552,7 +694,10 @@ planned=$(gh issue list -R "$repo" --state open --label planned --json number,ti
       print rank OFS $0
     }' \
   | sort -t $'\t' -k1,1n -k2,2n \
-  | cut -f2-)
+  | cut -f2-); then
+  census_error "planned"
+  planned=""
+fi
 
 # --- current-milestone detection (issue #174) -------------------------------
 # Walk the version-sorted open milestones ascending; the FIRST one with at

@@ -324,6 +324,45 @@ check "verdict-history default cap (10) does not truncate a shorter (5-tick) his
 ' "$html_history_default"
 
 # ---------------------------------------------------------------------------
+# 2e. census_error reason surfacing (issue #187): a tick record whose
+#     `reason` field is populated (either the pre-existing spend-ceiling
+#     diagnostic, issue #95, or the new census_error fold, issue #187) must
+#     render a visible "Reason:" line under "Last tick", AND the verdict-
+#     history table must carry the SAME value in its own Reason column. A
+#     tick record with NO reason (the common/healthy case) must render
+#     neither — regression control mirroring section 2a's plain fixture.
+# ---------------------------------------------------------------------------
+mkdir -p "$work/fixtures-census-error"
+echo "[]" >"$work/fixtures-census-error/issues.json"
+echo "[]" >"$work/fixtures-census-error/prs.json"
+: >"$work/fixtures-census-error/events.jsonl"
+cat > "$work/fixtures-census-error/loop-ticks.jsonl" <<'EOF'
+{"ts":"2026-01-01T00:00:00Z","verdict":"action=none","cadence":"IDLE","action":"none","issue":"","pr":""}
+{"ts":"2026-01-01T00:15:00Z","verdict":"action=none","cadence":"IDLE","action":"none","issue":"","pr":"","reason":"census_error:rebase_prs"}
+EOF
+html_census_error="$work/cockpit-census-error.html"
+COCKPIT_NOW="2026-01-01T00:15:30Z" bash "$cockpit" --fixtures "$work/fixtures-census-error" "$html_census_error" >/dev/null 2>"$work/stderr-census-error.log"
+check "census_error reason rendered under 'Last tick'" grep -qF '<p class="unavailable">Reason: <code>census_error:rebase_prs</code></p>' "$html_census_error"
+check "census_error reason also rendered in the verdict-history table's Reason column" node -e '
+  const fs = require("fs");
+  const html = fs.readFileSync(process.argv[1], "utf8");
+  const m = html.match(/<section id="loop-health">[\s\S]*?<\/section>/);
+  if (!m) throw new Error("loop-health section not found");
+  if (!m[0].includes("<th>Reason</th>")) throw new Error("Reason column header missing");
+  if (!m[0].includes("<td>census_error:rebase_prs</td>")) throw new Error("Reason cell missing/wrong for the census_error tick");
+  if (!/<td><\/td><\/tr>/.test(m[0])) throw new Error("expected an EMPTY Reason cell for the reason-less tick");
+' "$html_census_error"
+
+# Regression control: NO reason on the last tick -> no "Reason:" paragraph
+# at all (unchanged from before this feature).
+cat > "$work/fixtures-census-error/loop-ticks.jsonl" <<'EOF'
+{"ts":"2026-01-01T00:15:00Z","verdict":"action=none","cadence":"IDLE","action":"none","issue":"","pr":""}
+EOF
+html_no_reason="$work/cockpit-no-reason.html"
+COCKPIT_NOW="2026-01-01T00:15:30Z" bash "$cockpit" --fixtures "$work/fixtures-census-error" "$html_no_reason" >/dev/null 2>"$work/stderr-no-reason.log"
+check "no Reason paragraph when the last tick has no reason (regression control)" bash -c '! grep -q "unavailable\">Reason:" "$1"' _ "$html_no_reason"
+
+# ---------------------------------------------------------------------------
 # 2d. Spend ceilings sub-panel (issue #95): stop-after countdown, today's
 #     action count vs the daily ceiling, and per-issue attempts vs the
 #     per-issue budget, sourced from loop-arming.json/loop-issue-attempts.json/
