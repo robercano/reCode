@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly divergence check of the agent checkout
+Description=Hourly agent posture check
 
 [Timer]
 OnBootSec=10min

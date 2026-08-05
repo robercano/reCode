@@ -1,9 +1,0 @@
-# auditd watches on the loop's daemon-executed paths and credentials.
-# Any write here outside an expected driver window is worth investigating.
--w /home/recode-agent/reCode/.claude/scripts/ -p wa -k recode_scripts
--w /home/recode-agent/reCode/self/ -p wa -k recode_self
--w /home/recode-agent/reCode/.env -p wa -k recode_env
--w /home/recode-agent/reCode/.claude/settings.local.json -p wa -k recode_settings
--w /home/recode-agent/.config/systemd/user/ -p wa -k recode_units
--w /etc/claude-code/managed-settings.json -p wa -k recode_managed
--w /etc/nftables.d/recode-agent.nft -p wa -k recode_nft
