@@ -25,12 +25,15 @@
 #      checks.sh's own JSON-editing style).
 #   2. Generate a dated Keep-a-Changelog section in
 #      .claude/.claude-plugin/CHANGELOG.md from commits since the last git
-#      tag — or, if there is no prior tag yet (this repo's current state:
-#      zero tags), from the full history (first-release path). Prefers merge
-#      commit subjects ("Merge pull request #N from owner/branch" -> one
-#      bullet per merged PR) when any exist in range; falls back to every
-#      non-merge commit subject in range otherwise (the no-merges case a
-#      fresh/test repo hits).
+#      tag — or, if there is no prior tag yet, from the full history
+#      (first-release path). Walks the base branch's FIRST-PARENT chain, so
+#      exactly one bullet is emitted per landed change no matter how it
+#      landed: a merge-committed PR contributes its "Merge pull request #N
+#      from owner/branch" subject (rewritten to "#N: branch"), a
+#      squash-merged PR contributes its squash subject, and a merged PR's
+#      internal commits are excluded (they are off the first-parent chain).
+#      Repos that mix merge and squash merges — this one does — are handled
+#      correctly; see the comment at the generator itself.
 #   3. Tag vX.Y.Z, commit the bumps + changelog, push both.
 #   4. "Publish" per the existing "Updating the plugin" runbook
 #      (docs/USAGE.md): this script CANNOT run the interactive
@@ -157,12 +160,22 @@ else
   echo "release.sh: no prior git tag found — first-release path, using full history"
 fi
 
-merge_subjects="$(git -C "$root" log $range --merges --pretty=%s 2>/dev/null || true)"
-if [ -n "$merge_subjects" ]; then
-  changelog_items="$(printf '%s\n' "$merge_subjects" | sed -E 's/^Merge pull request (#[0-9]+) from [^\/]+\/(.+)$/- \1: \2/')"
-else
-  changelog_items="$(git -C "$root" log $range --no-merges --pretty=%s 2>/dev/null | sed 's/^/- /')"
-fi
+# One bullet per LANDED change, whatever shape it landed in. Walking the base
+# branch's FIRST-PARENT chain is what makes both merge styles work at once:
+#   - a merge-committed PR appears as its "Merge pull request #N from …" commit,
+#   - a squash-merged PR appears as its single squash commit,
+#   - a merged PR's INTERNAL commits never appear at all — they hang off the
+#     second parent, off the first-parent chain.
+# That last property is the double-listing the old --merges-only branch was
+# really guarding against; --first-parent gets it without having to discard
+# anything. Preferring --merges *wholesale* (the previous behaviour) silently
+# dropped every squash-merged PR as soon as ONE merge commit existed in range —
+# and this repo's history mixes both styles, so the v0.3.0..v0.3.1 range
+# generated 2 bullets instead of 7, omitting five shipped fixes and naming the
+# v0.3.0 release PR itself. A direct-to-base commit is on the first-parent
+# chain too, and is a real shipped change, so it is now listed as well.
+changelog_items="$(git -C "$root" log $range --first-parent --pretty=%s 2>/dev/null \
+  | sed -E -e 's/^Merge pull request (#[0-9]+) from [^\/]+\/(.+)$/\1: \2/' -e 's/^/- /')"
 [ -n "$changelog_items" ] || changelog_items="- (no changes recorded)"
 
 release_date="$(date -u +%Y-%m-%d)"
