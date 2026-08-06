@@ -44,8 +44,10 @@ while IFS=: read -r user repo; do
 done < "$CONF"
 
 # ---- 2. egress-fence coverage ---------------------------------------------
+# nft -j prints plain set elements as "elem":[1001] but wraps them as
+# {"val":1001} when they carry attributes -- pull the numbers from either shape.
 live_uids=$(nft -j list set inet recode_agent agent_uids 2>/dev/null \
-	| grep -oE '"val":[0-9]+' | cut -d: -f2 | sort -u)
+	| grep -o '"elem":.*' | grep -oE '[0-9]+' | sort -u)
 if [ -z "$live_uids" ]; then
 	alert "BusyBee: egress fence NOT LOADED" \
 		"nftables table inet recode_agent has no agent_uids set -- NO agent is fenced"
