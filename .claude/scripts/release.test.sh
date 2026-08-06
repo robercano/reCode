@@ -44,6 +44,11 @@
 #   9. the no-`--issue` real-path variant: milestone-close warns and skips
 #      (never crashes, never guesses), while the rollout companion issue is
 #      still filed with a graceful "titles unavailable" test-focus fallback.
+#  10. MIXED merge-commit + squash-merge history in a single range (this
+#      repo's real v0.3.0..v0.3.1 shape): every landed change is listed
+#      exactly once regardless of how it landed, and a merge-committed PR's
+#      internal commits are never double-listed. Guards the regression where
+#      one merge commit in range caused every squash-merged PR to be dropped.
 #
 # Exit 0 on success, non-zero if any assertion fails. Runnable bare:
 #   bash .claude/scripts/release.test.sh
@@ -209,13 +214,15 @@ seed_fixture "$repo_a"
 # is "since the last tag" and must be the ONLY thing the changelog picks up.
 git -C "$repo_a" -c tag.gpgSign=false tag v1.0.0
 
-# A commit landing AFTER the tag but BEFORE the merge commits below — it is
-# in-range but not a merge commit, so with merge commits present it must be
-# excluded from the changelog (merge subjects win over plain commits when any
-# exist in range — see release.sh's changelog-generation comment).
+# A commit landing AFTER the tag but BEFORE the merge commits below — a direct
+# commit to the base branch. It is in-range and ON the first-parent chain, so
+# it is a real shipped change and MUST appear in the changelog even though
+# merge commits also exist in range. (This inverts the pre-fix behaviour, which
+# discarded every non-merge commit as soon as one merge commit was present —
+# the bug that dropped five squash-merged PRs from the v0.3.1 range.)
 echo "pre-merge" > "$repo_a/premerge.txt"
 git -C "$repo_a" add premerge.txt
-git -C "$repo_a" commit -q -m "premerge: should not show up once merge commits exist in range"
+git -C "$repo_a" commit -q -m "premerge: a direct-to-main commit alongside merge commits"
 
 # Two fake merged-PR commits, real GitHub merge-commit shape.
 git -C "$repo_a" checkout -q -b feat/thing-one
@@ -250,7 +257,15 @@ check "scenario A: new 1.1.0 section is ABOVE the prior 1.0.0 section" bash -c '
 ' _ "$changelog_a" "$work"
 check "scenario A: changelog references merged PR #42" bash -c 'printf "%s" "$1" | grep -q "#42: feat/thing-one"' _ "$changelog_a"
 check "scenario A: changelog references merged PR #43" bash -c 'printf "%s" "$1" | grep -q "#43: feat/thing-two"' _ "$changelog_a"
-check "scenario A: in-range non-merge commit is excluded once merge commits exist" bash -c '! printf "%s" "$1" | grep -q "premerge:"' _ "$changelog_a"
+check "scenario A: in-range direct-to-main commit is INCLUDED alongside merge commits" bash -c 'printf "%s" "$1" | grep -q -- "- premerge: a direct-to-main commit alongside merge commits"' _ "$changelog_a"
+# The real anti-double-listing guarantee: a merged PR contributes its merge
+# subject ONCE, never also its internal commits (which are off the first-parent
+# chain). Without this, #42 would be listed as both "#42: feat/thing-one" and
+# "feat: thing one".
+check "scenario A: merged PRs' internal commits are NOT double-listed" bash -c '
+  ! printf "%s" "$1" | grep -q -- "- feat: thing one" &&
+  ! printf "%s" "$1" | grep -q -- "- feat: thing two"
+' _ "$changelog_a"
 check "scenario A: no real tag v1.1.0 was created" bash -c '! git -C "$1" tag --list | grep -qx v1.1.0' _ "$repo_a"
 check "scenario A: original tag v1.0.0 untouched" bash -c 'git -C "$1" tag --list | grep -qx v1.0.0' _ "$repo_a"
 check "scenario A: HEAD has no new commit (dry-run never commits)" bash -c '
@@ -459,6 +474,54 @@ check "scenario G: version was still bumped and pushed for real (only milestone-
   [ "$(git -C "$1" log -1 --pretty=%s refs/heads/main)" = "release: v1.3.0" ] &&
   git -C "$1" tag --list | grep -qx v1.3.0
 ' _ "$origin_bare_g"
+
+# =============================================================================
+# Scenario H: MIXED merge-commit and squash-merge history in one range — the
+# exact shape of this repo's real v0.3.0..v0.3.1 range, and the regression that
+# motivated the --first-parent generator. Before the fix, the presence of ANY
+# merge commit made release.sh discard every squash-merged PR: the real range
+# generated 2 bullets instead of 7. Both styles must now be represented, and
+# the merge-committed PR must still contribute exactly one bullet.
+# =============================================================================
+repo_h="$work/repo-h"
+seed_fixture "$repo_h"
+git -C "$repo_h" -c tag.gpgSign=false tag v1.0.0
+
+# (a) a merge-committed PR, with an internal commit that must NOT be listed
+git -C "$repo_h" checkout -q -b feat/merged-style
+echo "m" > "$repo_h/m.txt"
+git -C "$repo_h" add m.txt
+git -C "$repo_h" commit -q -m "internal: implementation detail of the merged PR"
+git -C "$repo_h" checkout -q main
+git -C "$repo_h" merge -q --no-ff -m "Merge pull request #90 from robercano/feat/merged-style" feat/merged-style
+
+# (b) two squash-merged PRs — single commits on main, GitHub's "(#N)" subject
+echo "s1" > "$repo_h/s1.txt"
+git -C "$repo_h" add s1.txt
+git -C "$repo_h" commit -q -m "fix(notify): use https:// in the ntfy notify command (#91)"
+echo "s2" > "$repo_h/s2.txt"
+git -C "$repo_h" add s2.txt
+git -C "$repo_h" commit -q -m "feat(server): support multiple agent users on one box (#92)"
+
+out_h="$(run_release "$repo_h" v1.4.0 --dry-run)"
+rc_h=$?
+
+check "scenario H: exits 0" [ "$rc_h" -eq 0 ]
+changelog_h="$(cat "$repo_h/.claude/.claude-plugin/CHANGELOG.md")"
+check "scenario H: merge-committed PR #90 is listed" bash -c 'printf "%s" "$1" | grep -q -- "- #90: feat/merged-style"' _ "$changelog_h"
+check "scenario H: squash-merged PR #91 is listed despite a merge commit in range" bash -c '
+  printf "%s" "$1" | grep -q -- "- fix(notify): use https:// in the ntfy notify command (#91)"
+' _ "$changelog_h"
+check "scenario H: squash-merged PR #92 is listed despite a merge commit in range" bash -c '
+  printf "%s" "$1" | grep -q -- "- feat(server): support multiple agent users on one box (#92)"
+' _ "$changelog_h"
+check "scenario H: the merged PR's internal commit is not double-listed" bash -c '
+  ! printf "%s" "$1" | grep -q -- "- internal: implementation detail"
+' _ "$changelog_h"
+check "scenario H: the 1.4.0 section holds exactly 3 bullets (one per landed change)" bash -c '
+  n=$(printf "%s\n" "$1" | awk "/^## \[1\.4\.0\]/{s=1;next} s&&/^## \[/{s=0} s&&/^- /{c++} END{print c+0}")
+  [ "$n" -eq 3 ]
+' _ "$changelog_h"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
