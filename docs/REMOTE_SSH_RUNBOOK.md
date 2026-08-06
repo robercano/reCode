@@ -41,9 +41,35 @@
 > steal" property that motivates layer 4 below. Prefer Access for Infrastructure if you are installing
 > WARP anyway.
 >
-> **If sshd listens on `127.0.0.1` only** (as step 1 configures), register the target as `127.0.0.1`
-> so `cloudflared` — running on the same box — dials its own loopback and the property survives. The
-> LAN-IP fallback needs a second `ListenAddress` and makes sshd reachable from your LAN.
+> **If sshd listens on `127.0.0.1` only** (as step 1 configures), do NOT register the target as
+> `127.0.0.1` — the client OS routes loopback traffic to *itself*, so it never enters WARP and the
+> connection can't reach the box. The verified pattern (BusyBee, 2026-08-06) is a **virtual IP bound
+> to `lo`**: pick an address from TEST-NET-1 (`192.0.2.0/24`, RFC 5737 — reserved, never routed on
+> the internet), e.g. `192.0.2.1`:
+>
+> - `ip addr replace 192.0.2.1/32 dev lo` — persist with a oneshot unit ordered `Before=ssh.service`
+>   (sshd must find the address at bind time).
+> - Second `ListenAddress 192.0.2.1` in sshd. The address exists only on loopback, so the
+>   invisible-to-the-LAN property survives intact.
+> - `warp-routing: enabled: true` in the tunnel's config file (config-file tunnels don't accept
+>   private-network traffic without it), then restart cloudflared.
+> - `cloudflared tunnel route ip add 192.0.2.1/32 <tunnel>` — works with `cert.pem`, no API token.
+> - Register the target with IP `192.0.2.1`. Because TEST-NET is not RFC1918/CGNAT space, WARP's
+>   default Exclude-mode split tunnel needs **no carve-out** — a huge simplification over using
+>   `100.64.0.0/10` or a LAN IP.
+>
+> Infrastructure-app certificates carry the **UNIX username** as principal (not the email local
+> part) — if `AuthorizedPrincipalsFile` is configured, each user's principals file must also list
+> the unix username itself, or auth fails against a perfectly good cert.
+>
+> Dashboard locations (2026 UI reshuffle): the Gateway TCP proxy toggle is under *Traffic policies →
+> Traffic settings → Proxy and inspection settings* (was Settings → Network); device enrollment is
+> under *Team & Resources → Devices → Device profiles → Device enrollment → Manage* (was Settings →
+> WARP Client). Targets and Infrastructure applications live under *Access*.
+>
+> Phone client: the **Cloudflare One** app (WARP), enrolled and Connected, plus any plain SSH client
+> — `ssh user@192.0.2.1` from Termux works with zero client config; first connect shows Cloudflare's
+> proxy host key.
 
 > Written for WSL2 Ubuntu, but applies almost verbatim to any Linux box — the WSL2-specific
 > gotchas (the `loopback0` ufw rule, the `localhostForwarding` note) simply drop out on native
