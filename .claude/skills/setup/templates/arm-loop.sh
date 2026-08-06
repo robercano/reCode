@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @orchestrator-managed arm-loop v6
+# @orchestrator-managed arm-loop v7
 # arm-loop.sh — installs the cron-less PR-loop as systemd (user) units
 # (issue #102). Templated + re-stamped by `/orchestrator:setup`/`sync`; do
 # not hand-edit the copy scaffold.sh wrote into this repo if you want future
@@ -13,10 +13,10 @@
 # then recreate).
 #
 # Usage:
-#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>] [--spawn <mode>]
+#   bash .claude/scripts/arm-loop.sh [--gates-file <path>] [--permission-mode <mode>] [--capacity N] [--rc-name <name>] [--spawn <mode>] [--stop-after-days N]
 #
 #   --gates-file <path>       passed to pr-loop.service as GATES_FILE (e.g.
-#                              .claude/self/gates.json for the self-hosted
+#                              self/gates.json for the self-hosted
 #                              loop). Omit for the default project adapter.
 #   --permission-mode <mode>  passed to `claude remote-control --permission-mode`.
 #                              Defaults to permissions.defaultMode in
@@ -30,6 +30,16 @@
 #   --spawn <mode>             remote-control spawn mode: same-dir (default) or
 #                              worktree. Passed explicitly so the server never
 #                              blocks on its interactive first-run question.
+#   --stop-after-days N        self-disarm horizon (issue #95): loop-tick.sh
+#                              refuses every advance/feedback dispatch once
+#                              armed_at + N days has passed, until re-armed.
+#                              Defaults to budget.stop_after_days in the
+#                              adapter picked by --gates-file (or the default
+#                              .claude/gates.json when --gates-file is
+#                              omitted), else 7. Every re-arm rewrites
+#                              .claude/state/loop-arming.json fresh --
+#                              clearing any prior expiry AND the one-time
+#                              "disarmed" notification guard.
 set -euo pipefail
 
 gates_file=""
@@ -37,6 +47,7 @@ permission_mode=""
 capacity="8"
 rc_name=""
 spawn_mode="same-dir"
+stop_after_days=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --gates-file) gates_file="${2:?--gates-file needs a value}"; shift 2 ;;
@@ -49,8 +60,10 @@ while [ "$#" -gt 0 ]; do
     --spawn) spawn_mode="${2:?--spawn needs a value}"; shift 2 ;;
     --spawn=*) spawn_mode="${1#--spawn=}"; shift ;;
     --capacity=*) capacity="${1#--capacity=}"; shift ;;
+    --stop-after-days) stop_after_days="${2:?--stop-after-days needs a value}"; shift 2 ;;
+    --stop-after-days=*) stop_after_days="${1#--stop-after-days=}"; shift ;;
     -h|--help)
-      sed -n '2,32p' "$0"
+      sed -n '2,42p' "$0"
       exit 0
       ;;
     *) echo "arm-loop.sh: unknown argument '$1'" >&2; exit 2 ;;
@@ -96,6 +109,46 @@ if [ -n "$gates_file" ]; then
   gates_env="Environment=GATES_FILE=$gates_file"
 fi
 
+# --- spend-ceiling arming state (issue #95) ---------------------------------
+# Resolve the stop-after horizon: --stop-after-days wins; else
+# budget.stop_after_days from the SAME adapter the armed daemon will read
+# (gates_file, defaulting to .claude/gates.json); else 7. Always WRITE a
+# fresh .claude/state/loop-arming.json on every arm/re-arm -- this is what
+# clears a prior expiry and the one-time "disarmed" notification guard.
+if [ -z "$stop_after_days" ]; then
+  adapter_for_stop_after="${gates_file:-.claude/gates.json}"
+  case "$adapter_for_stop_after" in
+    /*) ;;
+    *) adapter_for_stop_after="$repo_root/$adapter_for_stop_after" ;;
+  esac
+  stop_after_days="$(node -e '
+    try {
+      const g = require(process.argv[1]);
+      const d = g && g.budget && g.budget.stop_after_days;
+      if (Number.isFinite(d) && d > 0) { console.log(d); process.exit(0); }
+    } catch (e) {}
+  ' "$adapter_for_stop_after" 2>/dev/null || true)"
+  stop_after_days="${stop_after_days:-7}"
+fi
+case "$stop_after_days" in
+  ''|*[!0-9.]*) echo "arm-loop.sh: --stop-after-days must be a positive number (got '$stop_after_days')" >&2; exit 2 ;;
+esac
+
+arming_state_dir="$repo_root/.claude/state"
+mkdir -p "$arming_state_dir"
+arm_now="$(date -u +%FT%TZ)"
+node -e '
+  const fs = require("fs");
+  const now = process.argv[2];
+  const days = parseFloat(process.argv[3]);
+  const expires = new Date(Date.parse(now) + days * 86400000).toISOString();
+  fs.writeFileSync(process.argv[1], JSON.stringify({
+    armed_at: now, expires_at: expires, stop_after_days: days,
+    notified_expired: false, notice_issue: null,
+  }, null, 2) + "\n");
+' "$arming_state_dir/loop-arming.json" "$arm_now" "$stop_after_days"
+echo "arm-loop.sh: armed until $(node -e 'const j=require(process.argv[1]);console.log(j.expires_at)' "$arming_state_dir/loop-arming.json") (stop_after_days=$stop_after_days) -- .claude/state/loop-arming.json"
+
 # Absolute claude path, resolved HERE — this script runs in a real terminal
 # with the user's full environment, while the installed unit runs under
 # systemd's minimal PATH (gh but no nvm-provisioned node/claude). A bare
@@ -110,6 +163,26 @@ fi
 
 rc_name="${rc_name:-$repo_slug-planner}"
 claude_dir="$(dirname "$claude_bin")"
+
+# Same rationale as claude_bin above, plus issue #107: the installed
+# pr-loop.service unit (the loop daemon itself, NOT claude-rc) previously got
+# NO baked PATH at all and ran under systemd's minimal PATH — which has `gh`
+# but neither `node` nor `claude`, silently stalling node-dependent tick steps
+# (loop-census.sh, merge-ready.sh, write_tick_record) until the daemon's own
+# runtime ensure_claude_on_path fallback (loop-daemon.sh) kicked in. Bake the
+# resolved node/claude dirs in here too so the unit starts with a working PATH
+# from the first tick, with the nvm-sourcing fallback staying as a safety net
+# for installs that predate this change or use fnm/volta/system node.
+node_bin="$(command -v node || true)"
+if [ -z "$node_bin" ]; then
+  echo "arm-loop.sh: 'node' not found on PATH — run this from a real terminal where \`node\` works." >&2
+  exit 1
+fi
+node_dir="$(dirname "$node_bin")"
+
+# Compose the baked PATH: node_dir, claude_dir, then the standard system dirs
+# — deduped, since under nvm node_dir and claude_dir are frequently identical.
+baked_path="$(printf '%s\n' "$node_dir" "$claude_dir" "/usr/local/sbin" "/usr/local/bin" "/usr/sbin" "/usr/bin" "/sbin" "/bin" | awk '!seen[$0]++' | paste -sd: -)"
 
 units_dir="$HOME/.config/systemd/user"
 mkdir -p "$units_dir"
@@ -129,6 +202,7 @@ claude_rc_dst="$units_dir/claude-rc-$repo_slug.service"
 sed -e "s#__WORKDIR__#$repo_root#g" \
     -e "s#__REPO_SLUG__#$repo_slug#g" \
     -e "s#__GATES_ENV__#$gates_env#g" \
+    -e "s#__PATH__#$baked_path#g" \
     "$pr_loop_src" > "$pr_loop_dst"
 
 sed -e "s#__WORKDIR__#$repo_root#g" \
@@ -143,6 +217,25 @@ sed -e "s#__WORKDIR__#$repo_root#g" \
 
 echo "arm-loop.sh: wrote $pr_loop_dst"
 echo "arm-loop.sh: wrote $claude_rc_dst"
+
+# Guard against template/script skew (issue #130): if either sed block above
+# is missing a substitution for a placeholder the template still contains
+# (e.g. a new __FOO__ added to the .service template without a matching -e
+# here), the installed unit silently keeps the literal token and systemd
+# fails it at the NEXT boot with an opaque status=127 -- long after this
+# script has exited 0. Fail loudly, right here, instead.
+for dst in "$pr_loop_dst" "$claude_rc_dst"; do
+  # Scan only directive (non-comment) lines: the template header comments carry
+  # the literal doc token __PLACEHOLDER__, which is not a sed target and must
+  # not false-positive. A REAL leftover lives in a directive line. `|| true`
+  # keeps the no-leftover healthy path from aborting under `set -euo pipefail`
+  # (grep exits 1 on no match). Fail loudly on genuine skew (issue #130).
+  leftover="$(grep -v '^[[:space:]]*#' "$dst" | grep -o '__[A-Z_]*__' | sort -u | tr '\n' ' ' || true)"
+  if [ -n "$leftover" ]; then
+    echo "arm-loop.sh: unsubstituted placeholder(s) leaked into $dst: ${leftover}-- the sed block that generated this file is missing a substitution (issue #130); fix arm-loop.sh before re-running." >&2
+    exit 1
+  fi
+done
 
 systemctl --user daemon-reload
 # pr-loop: enable --now on purpose (NOT restart) — never kill a daemon that
