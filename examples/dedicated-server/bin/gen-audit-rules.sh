@@ -20,5 +20,17 @@ while IFS=: read -r user repo; do
 	echo "-w $repo/self/ -p wa -k ${key}_self"
 	echo "-w $repo/.env -p wa -k ${key}_env"
 	echo "-w $repo/.claude/settings.local.json -p wa -k ${key}_settings"
-	echo "-w /home/$user/.config/systemd/user/ -p wa -k ${key}_units"
 done < "$CONF"
+
+# The unit-dir watch is per USER, not per repo: with several repos consolidated
+# under one agent user, emitting it per registry line makes auditd reject the
+# duplicate ("Rule exists") on every load, including every boot.
+echo
+echo "# --- per-user systemd unit dirs ---"
+while IFS=: read -r user repo; do
+	case "${user:-}" in ''|\#*) continue ;; esac
+	printf '%s\n' "$user"
+done < "$CONF" | sort -u | while read -r user; do
+	key=$(printf '%s' "$user" | tr -c 'a-zA-Z0-9' '_')
+	echo "-w /home/$user/.config/systemd/user/ -p wa -k ${key}_units"
+done
