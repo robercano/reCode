@@ -30,7 +30,11 @@ alert() {
 # ---- 1. git divergence, per agent -----------------------------------------
 while IFS=: read -r user repo; do
 	case "${user:-}" in ''|\#*) continue ;; esac
-	[ -d "$repo" ] || { alert "BusyBee: $user repo missing" "no such path: $repo"; continue; }
+	# One user routinely owns several clones, so the user alone does not identify
+	# the alert -- lead with the repo name and keep the full path in the body,
+	# since two agents can hold same-named clones under different homes.
+	who="$(basename "$repo") ($user)"
+	[ -d "$repo" ] || { alert "BusyBee: $who repo missing" "no such path: $repo"; continue; }
 
 	as_agent() { sudo -u "$user" git -C "$repo" "$@"; }
 	as_agent fetch -q origin main 2>/dev/null
@@ -38,8 +42,9 @@ while IFS=: read -r user repo; do
 	drift=$(as_agent diff --stat origin/main -- $PATHS 2>/dev/null)
 
 	if [ -n "$dirty" ] || [ -n "$drift" ]; then
-		alert "BusyBee: $user checkout diverges from origin/main" \
-			"$(printf 'uncommitted:\n%s\n\nvs origin/main:\n%s\n' "$dirty" "$drift")"
+		alert "BusyBee: $who checkout diverges from origin/main" \
+			"$(printf 'repo: %s\n\nuncommitted:\n%s\n\nvs origin/main:\n%s\n' \
+				"$repo" "$dirty" "$drift")"
 	fi
 done < "$CONF"
 
