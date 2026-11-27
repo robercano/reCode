@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate.sh lint"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate.sh --hook lint"
           }
         ]
       }
@@ -27,7 +27,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate.sh test_affected"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate.sh --hook test_affected"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "implementer|orchestrator:implementer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate.sh --hook test_affected"
           }
         ]
       }

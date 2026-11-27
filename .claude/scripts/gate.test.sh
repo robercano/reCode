@@ -146,6 +146,72 @@ rc3b=$?
 check "(3b) configured gate + no pnpm-lock.yaml: exit 0" bash -c '[ "$1" -eq 0 ]' _ "$rc3b"
 check "(3b) configured gate + no pnpm-lock.yaml: command actually ran" bash -c '[ -e "$1" ]' _ "$sideEffect3b"
 
+# =============================================================================
+# (4) --hook mode: root follows the hook event's `cwd` into a linked worktree
+# of the SAME repo, and a failing gate exits 2 (the only code Claude Code
+# treats as "block") with its output on stderr.
+#
+# Fixture: a real git repo whose tracked .claude/scripts/ holds gate.sh, plus a
+# linked worktree under .claude/worktrees/w1. The gate command writes `pwd` to
+# an absolute file, so we can see WHICH tree it ran in. The hook is invoked the
+# way settings.json spells it: via the MAIN checkout's script path (that's what
+# $CLAUDE_PROJECT_DIR expands to), with the event JSON on stdin.
+# =============================================================================
+repo4="$work/hookrepo"
+mkdir -p "$repo4/.claude/scripts"
+cp "$gate_src" "$repo4/.claude/scripts/gate.sh"
+cp "$resolve_roots_src" "$repo4/.claude/scripts/resolve-roots.sh"
+marker4="$work/hook-pwd.txt"
+gates4="$(write_gates_file hook-gate "{\"gates\":{\"where\":\"pwd -P > $marker4\",\"red\":\"echo boom-from-gate; exit 7\"}}")"
+(
+  cd "$repo4" && git init -q -b main . && git config user.email t@t && git config user.name t \
+    && printf '.claude/worktrees/\n' > .gitignore && git add -A && git commit -qm init \
+    && git worktree add -q .claude/worktrees/w1 -b worker-w1
+) >/dev/null 2>&1
+wt4="$repo4/.claude/worktrees/w1"
+main_real4="$(cd "$repo4" && pwd -P)"
+wt_real4="$(cd "$wt4" && pwd -P)"
+
+run_hook() {
+  # $1 = gate key, $2 = stdin payload
+  printf '%s' "$2" | GATES_FILE="$gates4" bash "$repo4/.claude/scripts/gate.sh" --hook "$1"
+}
+
+rm -f "$marker4"
+run_hook where "{\"hook_event_name\":\"SubagentStop\",\"cwd\":\"$wt4\"}" >/dev/null 2>&1
+rc4a=$?
+check "(4a) --hook with worktree cwd: exit 0" bash -c '[ "$1" -eq 0 ]' _ "$rc4a"
+check "(4a) --hook with worktree cwd: gate ran IN THE WORKTREE" bash -c \
+  '[ "$(cat "$1")" = "$2" ]' _ "$marker4" "$wt_real4"
+
+rm -f "$marker4"
+run_hook where "{\"hook_event_name\":\"Stop\",\"cwd\":\"$repo4\"}" >/dev/null 2>&1
+check "(4b) --hook with main-checkout cwd: gate ran in the main checkout" bash -c \
+  '[ "$(cat "$1")" = "$2" ]' _ "$marker4" "$main_real4"
+
+other4="$work/unrelated-repo"
+mkdir -p "$other4" && (cd "$other4" && git init -q .) >/dev/null 2>&1
+rm -f "$marker4"
+run_hook where "{\"cwd\":\"$other4\"}" >/dev/null 2>&1
+check "(4c) --hook with cwd in a DIFFERENT repo: falls back to the main checkout" bash -c \
+  '[ "$(cat "$1")" = "$2" ]' _ "$marker4" "$main_real4"
+
+rm -f "$marker4"
+run_hook where 'not json' >/dev/null 2>&1
+rc4d=$?
+check "(4d) --hook with unparsable stdin: still runs (fallback root), exit 0" bash -c \
+  '[ "$1" -eq 0 ] && [ "$(cat "$2")" = "$3" ]' _ "$rc4d" "$marker4" "$main_real4"
+
+out4e="$(run_hook red "{\"cwd\":\"$wt4\"}" 2>"$work/err4e")"
+rc4e=$?
+check "(4e) --hook failing gate: exit 2 (blocking)" bash -c '[ "$1" -eq 2 ]' _ "$rc4e"
+check "(4e) --hook failing gate: gate output goes to stderr" bash -c \
+  'grep -q "boom-from-gate" "$1"' _ "$work/err4e"
+
+out4f="$(printf '' | GATES_FILE="$gates4" bash "$repo4/.claude/scripts/gate.sh" red 2>/dev/null)"
+rc4f=$?
+check "(4f) bare (non-hook) failing gate: exit code still propagates as-is (7)" bash -c '[ "$1" -eq 7 ]' _ "$rc4f"
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "gate.test.sh: PASS ($ok checks)"
