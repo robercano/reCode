@@ -28,6 +28,23 @@ Entries land here as work merges; `.claude/scripts/release.sh` (issue #176) turn
   filter for PRs authored by the plugin author's bot. Set `BOT_LOGIN` in `.env` to skip the extra
   API call; behavior is unchanged when it's set.
 
+### Fixed
+- **Gate hooks now gate the worker's worktree, and actually block.** Hook commands are spelled with
+  `$CLAUDE_PROJECT_DIR`/`$CLAUDE_PLUGIN_ROOT`, which never follow a worker into its worktree, so the `Stop`
+  `test_affected` and `PostToolUse` lint gates always ran against the MAIN checkout. They also exited with the
+  gate's own code (usually 1), which Claude Code treats as a non-blocking hook error — only exit 2 blocks. New
+  `gate.sh --hook` mode reads the event's `cwd` from stdin, gates that linked worktree when it belongs to the
+  same repo (falls back to the old root otherwise), and exits 2 with the failure on stderr. Hooks
+  (`hooks/hooks.json`, `settings.json` and its setup template) now pass `--hook`, and a new `SubagentStop`
+  hook (matcher `implementer|orchestrator:implementer`) runs `test_affected` when an implementer finishes —
+  the settings-level `Stop` hook only fires for the main session.
+- **`feature-fanout` v3 (MANAGED, re-stamped by `/orchestrator:sync`).** The fix iteration now continues on
+  the implementer's own branch/worktree; v2 spawned each fix agent in a fresh `isolation: 'worktree'`
+  checkout branched from the default branch, without the change under review. Lenses, base branch and
+  per-role/per-lens models are read from the adapter (or `args`) instead of a hardcoded 3-lens list;
+  reviewers read the diff themselves instead of a pasted report; a reviewer that returns nothing counts as
+  a reject, and red gates block approval.
+
 ## [0.3.0] - 2026-08-04
 
 ### Changed

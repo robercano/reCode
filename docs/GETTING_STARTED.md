@@ -111,9 +111,10 @@ Each should run the right command (or say "not configured — skipping").
 > `Stop` hook and every agent's "done".
 
 ### Choosing `test_affected` per stack
-`test_affected` runs on the `Stop` hook — wired both by the plugin's own `hooks/hooks.json` and by the
-`.claude/settings.json` `/orchestrator:setup` scaffolds (Step 2 above; it calls
-`${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR/.claude}/scripts/gate.sh test_affected`) — after every change, so it
+`test_affected` runs on the `Stop` hook and on the implementer's `SubagentStop` hook — wired both by the plugin's own
+`hooks/hooks.json` and by the `.claude/settings.json` `/orchestrator:setup` scaffolds (Step 2 above; it calls
+`${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR/.claude}/scripts/gate.sh --hook test_affected`, which gates the worktree the
+event came from) — after every change, so it
 should be *fast* — ideally only the tests touched by the diff. But "test only what changed" isn't free in every
 stack. Sensible options:
 

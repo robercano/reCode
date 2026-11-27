@@ -47,7 +47,9 @@ only the adapter changes.
   + merge discipline are the logical/integration backstops.
 - **Adversarial, one-lens-per-reviewer** beats a single "looks good?" pass: a reviewer told to *refute* through
   a specific lens (correctness/tests/security/perf) catches what a generic approver rubber-stamps.
-- **Hard gate via Stop hook**: a failing test gate is enforced outside the model, so it can't be argued around.
+- **Hard gate via Stop/SubagentStop hooks**: a failing test gate is enforced outside the model, so it can't be argued around.
+  The hooks call `gate.sh --hook`, which gates the tree the event came from (the worker's worktree, not the main
+  checkout) and exits 2 on red — the only exit code Claude Code treats as "keep working".
 - **Model routing** (Opus orchestrate/review · Sonnet build · Haiku explore) mirrors Anthropic's own finding —
   Opus-orchestrator + Sonnet-workers gave a large quality gain at the cost of ~15× tokens.
 
